@@ -1,0 +1,36 @@
+# 密钥模板文件 - 复制为 api-keys.yml 并填入实际值.
+# api-keys.yml 已在 .gitignore 中,不会进入 Git.
+#
+# 环境变量优先级高于本文件,生产环境建议通过 ENV 覆盖:
+#   export WX_MP_APP_ID=...
+#   export WX_MP_SECRET=...
+#   export LLM_DEEPSEEK_API_KEY=...
+#   export LLM_GLM_API_KEY=...
+#   export GITHUB_TOKEN=...
+
+wx:
+  mp:
+    app-id: ${WX_MP_APP_ID:your-wechat-app-id}
+    secret: ${WX_MP_SECRET:your-wechat-app-secret}
+    use-stable-token: true
+
+llm:
+  deepseek:
+    api-key: ${LLM_DEEPSEEK_API_KEY:your-deepseek-api-key}
+    base-url: https://api.deepseek.com
+  glm:
+    api-key: ${LLM_GLM_API_KEY:your-glm-api-key}
+    base-url: https://open.bigmodel.cn
+
+github:
+  token: ${GITHUB_TOKEN:your-github-token}
+
+# twscrape 账号凭据(仅文档目的, 不被 @ConfigurationProperties 绑定).
+# Story 2.2b 架构决策: twscrape 账号 / cookie / password 不进入 Spring 配置,
+# 避免 /actuator/env 即使 show-values: when-authorized 也降低泄漏风险.
+# 实际登录态由运维通过命令维护:
+#   docker exec -it <container> twscrape add_accounts user1 email pass ct0 auth_token
+#   docker exec -it <container> twscrape login_accounts
+# 本节仅作为运维登记参考, 应用代码不读取.
+twscrape:
+  accounts: []

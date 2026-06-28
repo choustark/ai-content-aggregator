@@ -1,0 +1,14 @@
+# 韧性参数 - 重试 / 超时 / 降级.
+# 由 Story 1.4 异常体系与后续模块的 RetryTemplate / TimeLimiter 读取.
+
+resilience:
+  retry:
+    max-attempts: 3
+    backoff-millis: 1000
+  timeout:
+    http-millis: 10000
+    redis-millis: 3000
+    llm-millis: 60000
+  degradation:
+    enabled: true
+    fallback-to-default: true

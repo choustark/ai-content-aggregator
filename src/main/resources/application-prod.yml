@@ -1,0 +1,33 @@
+# Prod Profile - 生产环境.
+# 所有可能变动的值均通过环境变量注入, 不给默认值 - 快速失败优于运行时崩溃.
+# Actuator env 端点关闭, 防止密钥泄露.
+
+spring:
+  data:
+    redis:
+      cluster:
+        nodes: ${REDIS_CLUSTER_NODES}
+        max-redirects: ${REDIS_CLUSTER_MAX_REDIRECTS:3}
+
+redis:
+  cluster:
+    nodes: ${REDIS_CLUSTER_NODES_LIST}
+
+langchain4j:
+  community:
+    redis:
+      enabled: ${LANGCHAIN4J_REDIS_ENABLED:true}
+      index-name: ${LANGCHAIN4J_REDIS_INDEX:aiaggregator-embeddings}
+      dimension: ${LANGCHAIN4J_REDIS_DIMENSION:1536}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint.env.show-values: NEVER
+
+logging:
+  level:
+    com.choucj.aiaggregator: INFO
+    org.springframework.boot.context.config: WARN

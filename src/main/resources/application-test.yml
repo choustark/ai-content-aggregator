@@ -1,0 +1,33 @@
+# Test Profile - CI / 集成测试环境.
+# Redis 通过 Docker container name 解析, LangChain4j Redis 关闭以避免外部依赖.
+
+spring:
+  data:
+    redis:
+      cluster:
+        nodes:
+          - redis-cluster-1:7001
+          - redis-cluster-2:7002
+          - redis-cluster-3:7003
+        max-redirects: 3
+
+redis:
+  cluster:
+    nodes:
+      - host: redis-cluster-1
+        port: 7001
+      - host: redis-cluster-2
+        port: 7002
+      - host: redis-cluster-3
+        port: 7003
+
+langchain4j:
+  community:
+    redis:
+      enabled: false
+      index-name: aiaggregator-embeddings-test
+      dimension: 1536
+
+logging:
+  level:
+    com.choucj.aiaggregator: INFO

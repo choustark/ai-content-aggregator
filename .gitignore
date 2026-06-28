@@ -1,0 +1,69 @@
+HELP.md
+target/
+.mvn/wrapper/maven-wrapper.jar
+!**/src/main/**/target/
+!**/src/test/**/target/
+
+### STS ###
+.apt_generated
+.classpath
+.factorypath
+.project
+.settings
+.springBeans
+.sts4-cache
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
+### NetBeans ###
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
+build/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+### VS Code ###
+.vscode/
+
+### BMad ###
+# _bmad/ 是 BMad 框架本身 (脚本/配置),不入 Git.
+# _bmad-output/ 是 BMad 产物 (story 文档/sprint-status/review 记录),视为本地工作笔记,不入 Git.
+_bmad/
+_bmad-output/
+
+### application
+# 主配置入口: 不入 Git, 每个开发者本地维护, 避免本地调过的配置被误提交.
+application.yml
+application.yaml
+# 密钥文件: 永远不入 Git. 提交模板 api-keys.example.yml 即可.
+api-keys.yml
+api-keys.yaml
+
+### Claude Code / Codex / 其他 Agent 工具 ###
+.claude
+.agent
+.agents/
+.opencode/
+
+### MCP 工具缓存 (大文件 / 本地索引, 强制忽略) ###
+# java-class-analyzer MCP 产物, 单文件可达 20MB+, 必须忽略.
+.mcp-class-index.json
+.mcp-class-temp/
+.mcp-decompile-cache/
+
+### 日志 / OS 临时文件 ###
+*.log
+logs/
+.DS_Store
+Thumbs.db
+
+### 自定义工作流 / 设计产物 (本地实验, 不入主干) ###
+custom-workflows/
+design-artifacts/

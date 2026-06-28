@@ -1,0 +1,33 @@
+# Dev Profile - 本地开发环境.
+# Redis Cluster 3 节点在本机 7001/7002/7003.
+
+spring:
+  data:
+    redis:
+      cluster:
+        nodes:
+          - localhost:7001
+          - localhost:7002
+          - localhost:7003
+        max-redirects: 3
+
+redis:
+  cluster:
+    nodes:
+      - host: localhost
+        port: 7001
+      - host: localhost
+        port: 7002
+      - host: localhost
+        port: 7003
+
+langchain4j:
+  community:
+    redis:
+      enabled: false              # 开发期默认关闭,按需打开
+      index-name: aiaggregator-embeddings
+      dimension: 1536
+
+logging:
+  level:
+    com.choucj.aiaggregator: DEBUG

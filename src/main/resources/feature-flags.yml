@@ -1,0 +1,15 @@
+# 功能开关 - 各模块启用/降级控制.
+# Phase 4 启用的功能(github / rag / multi-model)默认 false,按需打开.
+
+feature-flags:
+  twitter:
+    enabled: true
+    use-twscrape: false          # FxTwitter 优先, twscrape 作为降级
+  github:
+    enabled: false               # Phase 4 启用
+  rag:
+    enabled: false               # Phase 4 启用
+  multi-model:
+    enabled: false               # Phase 4 启用
+  wechat:
+    auto-publish: false          # 默认人工审核

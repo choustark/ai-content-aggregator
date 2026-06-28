@@ -1,0 +1,136 @@
+# 主配置模板文件 - 复制为 application.yml 后按需调整.
+# application.yml 已在 .gitignore 中, 不会进入 Git.
+#
+# 用法:
+#   cp src/main/resources/application.example.yml src/main/resources/application.yml
+#   然后编辑 application.yml, 通常只需调整 management.endpoints 与 logging.level.
+#
+# 注意:
+#   - 本文件不含密钥. 密钥统一放 api-keys.yml (复制 api-keys.example.yml).
+#   - feature-flags.yml / resilience.yml 不含密钥, 直接提交, 无需 example.
+#   - Spring Boot 加载顺序: application.yml → application-{profile}.yml → spring.config.import 引入的外部 yml.
+
+spring:
+  application:
+    name: ai-content-aggregator
+  profiles:
+    # 通过 SPRING_PROFILES_ACTIVE 环境变量切换 dev/test/prod, 默认 dev.
+    active: ${SPRING_PROFILES_ACTIVE:dev}
+  config:
+    # 引入 3 个外部 yml. optional: 前缀表示缺失不报错 (如未复制 api-keys.yml 时启动 dev 也能跑).
+    # 加载顺序: 后引入的覆盖先引入的. api-keys 最后加载, 优先级最高.
+    import:
+      - "optional:classpath:api-keys.yml"
+      - "optional:classpath:feature-flags.yml"
+      - "optional:classpath:resilience.yml"
+  data:
+    redis:
+      cluster:
+        # 业务键值(Lettuce)集群总开关.
+        # 关闭时 RedisClusterLettuceConfiguration 不注册 RedisConnectionFactory / StringRedisTemplate.
+        # 集群节点列表(nodes)由 application-{profile}.yml 提供.
+        enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        # env 端点会暴露所有属性 (含密钥), prod 必须收紧到 health,info.
+        # dev/test 保留 env 方便调试.
+        include: health,info,env
+  endpoint:
+    health:
+      show-details: when-authorized
+  endpoint.env.show-values: when-authorized
+
+# 内容处理调度器配置
+schedule:
+  # 调度器总开关 — 关闭时 ContentScheduler Bean 不注册, @Scheduled 不触发.
+  # 仅用于故障排查场景, prod/dev 默认开启.
+  enabled: true
+  # cron 表达式 — 默认每小时整点触发一次.
+  # 示例: "0 0 * * * ?" 每小时 / "0 */30 * * * ?" 每 30 分钟 / "0 0 9 * * ?" 每天 9 点
+  cron: "0 0 * * * ?"
+  # 启动时执行一次 — 应用启动后立即触发首次内容处理(含断点恢复).
+  # 关闭时仅按 cron 周期触发, 启动后等待下一个 cron 时刻.
+  run-on-startup: true
+
+# RSSHub 实例配置 — Twitter 推文发现层的数据源入口.
+# 公网 rsshub.app 经常被限流, 建议配置至少 1 个备用实例(自部署 docker / 第三方镜像).
+# 调用方按列表顺序依次尝试, 主失败切备, 全部失败抛 RetryableException.
+rsshub:
+  # RSSHub 总开关 — 关闭时 RSSHubClient.discoverTweets 直接返回空列表.
+  # 故障排查或临时禁用 Twitter 抓取时设为 false.
+  enabled: true
+  # HTTP 调用超时(秒) — 单次抓取通常 1-5s, 超过 30s 视为卡死切下一实例.
+  timeout-seconds: 30
+  instances:
+    # 公网主实例, 末尾不带斜杠.
+    - https://rsshub.app
+    # 自部署 docker 备用实例(取消注释启用):
+    # - http://localhost:1200
+
+# Twitter 账号列表 — TwitterSource 编排 RSSHub + FxTwitter 的目标账号.
+# handle 不带 @ 前缀. 空列表时 fetch() 返回空.
+twitter:
+  accounts:
+    - karpathy
+    - sama
+
+# FxTwitter 补全客户端配置 — 通过 /i/status/{id}.json 端点补全 content/互动数/imageUrls.
+# 默认公共实例 https://api.fxtwitter.com (Vercel global edge, 稳定性较好).
+# Story 2.2b 后作为 twscrape 的降级路径 — 关闭(enabled=false) 时仅走 twscrape 主路径.
+fxtwitter:
+  enabled: true
+  timeout-seconds: 15
+  instance: https://api.fxtwitter.com
+
+# twscrape CLI 补全客户端配置 — Story 2.2b 主路径.
+# 通过 ProcessBuilder 调用 twscrape tweet {url} 子进程, 拉取已登录账号视角的完整推文字段.
+# 凭据(cookie / 账号)不通过此处绑定, 由运行环境 twscrape add_accounts 命令维护登录态.
+# 关闭(enabled=false) 时直接走 FxTwitter 降级(等价 Story 2.2a 单链行为).
+twscrape:
+  enabled: true
+  # CLI 调用超时(秒) — twscrape 单次抓取 5-30s, 慢网络可达 60s+. 最小 60s.
+  timeout-seconds: 120
+  # 可执行文件名或绝对路径 — 默认依赖 PATH 查找. Docker 镜像位于 /usr/bin/twscrape.
+  executable: twscrape
+  # 忽略账号凭据校验(测试用) — 生产保持 false.
+  skip-account-check: false
+
+# LLM 模型配置 (Story 2.3a) — api-key 与 base-url 统一在 api-keys.yml 中维护,
+# 不在本文件重复 (配置文件分离原则, 见 Story 1.2).
+# Spring Boot 通过 spring.config.import 加载 api-keys.yml, LlmProperties 自动绑定 llm.* 键.
+# 占位符示例 (复制 api-keys.example.yml 为 api-keys.yml 后填写):
+#   llm:
+#     deepseek:
+#       api-key: ${LLM_DEEPSEEK_API_KEY:your-deepseek-api-key}
+#       base-url: https://api.deepseek.com
+#     glm:
+#       api-key: ${LLM_GLM_API_KEY:your-glm-api-key}
+#       base-url: https://open.bigmodel.cn
+# 主路径 DeepSeek + 备用 GLM, LlmConfig 注册两个 ChatModel Bean, LangChain4jLlmClient 自动降级.
+
+# 内容筛选器配置 (Story 2.3b) — 两级筛选阈值.
+# 第一级 CommentFilter 按 replyCount >= comment-threshold 剔除低互动推文.
+# 第二级 InnovationFilter 调 LLM 评分 (1-10), innovationScore >= innovation-threshold 才保留.
+# 默认 10 / 6.0 来自 PRD FR3 调研结论, 节省 80%+ Token 成本.
+filter:
+  # 评论数下限 — 默认 10. 调高保留更高质量内容, 调低保留更多.
+  comment-threshold: 10
+  # AI 创新度评分下限 (1-10) — 默认 6.0, 仅保留中等及以上.
+  innovation-threshold: 6.0
+
+# 内容改写器配置 (Story 2.4) — DeepSeek 主 + GLM 备单模型改写.
+# SingleModelRewriter 调 LlmClient.chat(system, user) 改写推文为微信公众号文章,
+# 失败时手动重试 max-retries 次 (总尝试 = 1 + max-retries), 退避间隔递增.
+rewriter:
+  # 重试次数 — LLM 调用失败后重试的次数, 总尝试 = 1 + max-retries (默认 4 次).
+  # 范围 [0, 10], 0 表示不重试 (单次失败即抛 RetryableException).
+  max-retries: 3
+  # 重试退避毫秒 (初始值) — 实际等待 = retry-backoff-ms * attemptIndex (1s, 2s, 3s 递增).
+  # 范围 [100, 60000].
+  retry-backoff-ms: 1000
+  # 源推文截断上限 (code points) — 防 prompt 过长撑爆 LLM context.
+  # 按 code point 截断 (非 char), 防 UTF-16 代理对 emoji 切断产生乱码. 范围 [100, 10000].
+  content-max-code-points: 2000
