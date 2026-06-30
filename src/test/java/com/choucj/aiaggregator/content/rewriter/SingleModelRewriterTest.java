@@ -84,7 +84,7 @@ class SingleModelRewriterTest {
 
         com.choucj.aiaggregator.common.model.Article article = rewriter.rewrite(tweet);
 
-        assertThat(article.getId()).isNotNull().isNotEmpty();
+        assertThat(article.getId()).isEqualTo("tw-12345");
         assertThat(article.getTitle()).isEqualTo("DeepSeek 革命性提升推理速度");
         assertThat(article.getContent()).contains("MoE 架构优化");
         assertThat(article.getDigest()).isEqualTo("DeepSeek 推出新模型, 推理速度大幅提升.");
@@ -103,6 +103,18 @@ class SingleModelRewriterTest {
         com.choucj.aiaggregator.common.model.Article article = rewriter.rewrite(tweet);
 
         assertThat(article.isAiGenerated()).isTrue();
+    }
+
+    @Test
+    void shouldGenerateDeterministicArticleIdFromTweetId() {
+        Tweet tweet = sampleTweet("same-tweet-id", "hello");
+        when(llmClient.chat(anyString(), anyString())).thenReturn(LLM_RESPONSE);
+
+        com.choucj.aiaggregator.common.model.Article first = rewriter.rewrite(tweet);
+        com.choucj.aiaggregator.common.model.Article second = rewriter.rewrite(tweet);
+
+        assertThat(first.getId()).isEqualTo("tw-same-tweet-id");
+        assertThat(second.getId()).isEqualTo("tw-same-tweet-id");
     }
 
     // T5.2: 边界用例 (content null fallback summary / 都 null 兜底空串)
@@ -190,19 +202,22 @@ class SingleModelRewriterTest {
     // T5.4: 异常用例
 
     @Test
-    void shouldThrowNpeWhenTweetIsNull() {
+    void shouldThrowNonRetryableWhenTweetIsNull() {
+        // Patch-10 (Round 3 review): 改抛 NonRetryableException 而非 NPE, 调试模式下被 processQueueOnce
+        // 正确分类为 NonRetryable → complete(taskId) 移除避免阻塞整批 (AC-3).
         assertThatThrownBy(() -> rewriter.rewrite(null))
-                .isInstanceOf(NullPointerException.class)
-                .hasMessageContaining("tweet 不能为 null");
+                .isInstanceOf(NonRetryableException.class)
+                .hasMessageContaining("tweet 或 tweet.id 为 null");
         verifyNoInteractions(llmClient);
     }
 
     @Test
-    void shouldThrowNpeWhenTweetIdIsNull() {
+    void shouldThrowNonRetryableWhenTweetIdIsNull() {
+        // Patch-10: 同上, NonRetryableException 替代 NPE 让调试模式分类正确.
         Tweet tweet = Tweet.builder().author("a").build();
         assertThatThrownBy(() -> rewriter.rewrite(tweet))
-                .isInstanceOf(NullPointerException.class)
-                .hasMessageContaining("tweet.id 不能为 null");
+                .isInstanceOf(NonRetryableException.class)
+                .hasMessageContaining("tweet 或 tweet.id 为 null");
         verifyNoInteractions(llmClient);
     }
 

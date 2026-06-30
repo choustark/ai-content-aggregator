@@ -5,6 +5,7 @@ import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.content.filter.config.FilterProperties;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -48,9 +49,14 @@ import java.util.regex.Pattern;
  * </ul>
  *
  * <p>架构 delta (Story 2.3b): 责任链第二级, 依赖 Story 2.3a {@link LlmClient} 抽象.
+ *
+ * <p><b>Story 2.6 顺手补:</b> 类注解加 {@code @Order(200)} 显式声明在 Spring
+ * {@code List<ContentFilter<Tweet>>} 注入排序中后于 {@link CommentFilter} (@Order(100)) 执行.
+ * 原 Story 2.3b 仅 {@code @Component} 无 {@code @Order}, 顺序依赖 Bean 注册时机不稳定.
  */
 @Slf4j
 @Component
+@Order(200)
 public class InnovationFilter implements ContentFilter<Tweet> {
 
     private static final String SCORE_PROMPT_TEMPLATE = """
@@ -111,6 +117,7 @@ public class InnovationFilter implements ContentFilter<Tweet> {
             try {
                 Double score = scoreTweet(tweet);
                 if (score == null) {
+                    llmFailCount++;
                     continue;
                 }
                 scored.add(tweet.toBuilder().innovationScore(score).build());
@@ -121,7 +128,7 @@ public class InnovationFilter implements ContentFilter<Tweet> {
             }
         }
 
-        // AC-17 降级语义: 全部 tweet 评分失败 = LLM 整体故障 → pass-through 返回原列表,
+        // AC-17 降级语义: 全部 tweet 评分失败/不可解析 = LLM 整体故障 → pass-through 返回原列表,
         // 等同 CommentFilter-only 模式, 不丢数据.
         if (llmFailCount == items.size()) {
             log.warn("LLM 全部 {} 条评分失败, InnovationFilter 降级为 pass-through", items.size());

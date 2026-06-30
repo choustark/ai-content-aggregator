@@ -3,6 +3,7 @@ package com.choucj.aiaggregator.content.filter;
 import com.choucj.aiaggregator.content.filter.config.FilterProperties;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -17,9 +18,14 @@ import java.util.List;
  * <p>引用源: Story 2.1/2.2 已通过 RSSHub + FxTwitter + twscrape 三链补全 {@code Tweet.replyCount}.
  *
  * <p>架构 delta (Story 2.3b): 责任链第一级, 由 Pipeline (Story 2.6) 编排调用.
+ *
+ * <p><b>Story 2.6 顺手补:</b> 类注解加 {@code @Order(100)} 显式声明在 Spring
+ * {@code List<ContentFilter<Tweet>>} 注入排序中先于 {@link InnovationFilter} (@Order(200)) 执行.
+ * 原 Story 2.3b 仅 {@code @Component} 无 {@code @Order}, 顺序依赖 Bean 注册时机不稳定.
  */
 @Slf4j
 @Component
+@Order(100)
 public class CommentFilter implements ContentFilter<Tweet> {
 
     private final FilterProperties properties;

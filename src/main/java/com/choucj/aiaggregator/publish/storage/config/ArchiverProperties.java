@@ -1,6 +1,7 @@
 package com.choucj.aiaggregator.publish.storage.config;
 
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Pattern;
 import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
@@ -61,14 +62,19 @@ public class ArchiverProperties {
      * 文件名日期格式. 默认 {@code yyyy-MM-dd} (ISO 8601 严格).
      * <p>由 {@link java.time.format.DateTimeFormatter#ofPattern(String)} 解析, 非法格式在
      * MarkdownArchiver 初始化 ({@code @PostConstruct}) 抛 IllegalArgumentException.
+     * <p>校验: 仅允许 {@code [-_a-zA-Z0-9]} 字符 (拒绝 {@code /} 防子目录逃逸, 拒绝 {@code ..} 防路径穿越).
      */
     @NotBlank(message = "archive.date-pattern 不能为空")
+    @Pattern(regexp = "[-_a-zA-Z0-9]+",
+            message = "archive.date-pattern 仅允许字母/数字/-/_ 字符 (拒绝 / 与 .. 防路径穿越)")
     private String datePattern = "yyyy-MM-dd";
 
     /**
      * 文件扩展名. 默认 {@code .md} (Markdown).
+     * <p>校验: 不允许包含路径分隔符 {@code /} 或 {@code \} (防跨平台路径穿越).
      */
     @NotBlank(message = "archive.file-suffix 不能为空")
+    @Pattern(regexp = "^[^/\\\\]*$", message = "archive.file-suffix 不能包含路径分隔符 / 或 \\")
     private String fileSuffix = ".md";
 
     /**

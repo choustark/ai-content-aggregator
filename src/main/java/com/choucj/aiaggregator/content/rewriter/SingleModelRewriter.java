@@ -1,6 +1,7 @@
 package com.choucj.aiaggregator.content.rewriter;
 
 import com.choucj.aiaggregator.common.client.LlmClient;
+import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.Article;
 import com.choucj.aiaggregator.common.model.ErrorCode;
@@ -12,8 +13,6 @@ import org.springframework.stereotype.Component;
 
 import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.util.Objects;
-import java.util.UUID;
 
 /**
  * Story 2.4: 单模型内容改写器 (DeepSeek 主 + GLM 备).
@@ -120,8 +119,16 @@ public class SingleModelRewriter implements ContentRewriter {
 
     @Override
     public Article rewrite(Tweet tweet) {
-        Objects.requireNonNull(tweet, "tweet 不能为 null");
-        Objects.requireNonNull(tweet.getId(), "tweet.id 不能为 null");
+        // Patch-10 (Round 3 review, 2026-06-30): 用 NonRetryableException 替代 Objects.requireNonNull.
+        // 原 Objects.requireNonNull 抛 NullPointerException (extends RuntimeException, 非 NonRetryable),
+        // 在 processor.fault-isolation-enabled=false (调试模式) 下, Patch-2 的 "throw e" 把 NPE 透传到
+        // ContentScheduler.processQueueOnce, 但该方法 catch 仅识别 Retryable/NonRetryable, NPE 逃逸到
+        // 顶层 catch(Exception) 中断整批 — 违背 AC-3 "单条失败不阻塞整批". 改抛 NonRetryableException 后,
+        // processQueueOnce 的 catch(NonRetryableException) 会 taskQueue.complete(taskId) 移除任务, 整批继续.
+        if (tweet == null || tweet.getId() == null) {
+            throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                    "rewrite 拒绝: tweet 或 tweet.id 为 null");
+        }
 
         String sourceText = extractSourceText(tweet);
         String truncated = truncateByCodePoints(sourceText, properties.getContentMaxCodePoints());
@@ -244,7 +251,7 @@ public class SingleModelRewriter implements ContentRewriter {
             log.warn("LLM 响应未识别到 '# 标题' 格式, 使用 fallback 标题: tweetId={}", tweet.getId());
         }
         return Article.builder()
-                .id(UUID.randomUUID().toString())
+                .id(buildDeterministicArticleId(tweet))
                 .title(title)
                 .content(parseContent(response))
                 .digest(parseDigest(response))
@@ -254,6 +261,10 @@ public class SingleModelRewriter implements ContentRewriter {
                 .innovationScore(convertInnovationScore(tweet.getInnovationScore()))
                 .originalUrl(tweet.getUrl())
                 .build();
+    }
+
+    static String buildDeterministicArticleId(Tweet tweet) {
+        return "tw-" + tweet.getId();
     }
 
     /**
@@ -340,7 +351,16 @@ public class SingleModelRewriter implements ContentRewriter {
         return innovationScore != null ? innovationScore.intValue() : 0;
     }
 
-    private static String getRootMessage(Throwable e) {
+    /**
+     * 提取异常链最深层非 null message (Story 2.6 提升为 {@code public static} 跨包复用).
+     *
+     * <p>Story 2.6 {@code TwitterProcessor} (在 {@code processor/} 包) 需要复用此方法截断
+     * cause message 防正文泄漏 (N4 模式). 原 {@code private} 阻止跨包访问, 提升 visibility
+     * 不破坏现有调用 (Story 2.4 内部调用仍合法).
+     *
+     * <p>返回最深层 cause 的非 null message; 全链均无 message 时回退到异常类简单名.
+     */
+    public static String getRootMessage(Throwable e) {
         Throwable cursor = e;
         String last = e.getMessage();
         while (cursor.getCause() != null && cursor.getCause() != cursor) {
@@ -361,8 +381,11 @@ public class SingleModelRewriter implements ContentRewriter {
      * 让 {@code "..."} 占用 max 预算, 返回值 ≤ max codepoint.
      *
      * <p>{@code max ≤ 3} 时跳过 ellipsis 直接截到 max (当前常量 50/200 不会触达).
+     *
+     * <p><b>Story 2.6 提升为 {@code public static}</b> — {@code TwitterProcessor} (在
+     * {@code processor/} 包) 跨包复用 (N2 + R3-1 修复版, 避免重复实现导致 stale).
      */
-    static String truncateForLog(String s, int max) {
+    public static String truncateForLog(String s, int max) {
         if (s == null || s.isEmpty()) return "";
         int total = s.codePointCount(0, s.length());
         if (total <= max) return s;

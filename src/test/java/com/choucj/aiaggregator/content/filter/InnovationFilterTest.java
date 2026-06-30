@@ -88,18 +88,36 @@ class InnovationFilterTest {
 
     @Test
     void shouldSkipTweetWhenLlmReturnsNonNumeric() {
-        when(llmClient.chat(anyPrompt())).thenReturn("无法评分");
-        List<Tweet> input = List.of(tweet("a", "content-a"));
+        when(llmClient.chat(contains("content-a"))).thenReturn("无法评分");
+        when(llmClient.chat(contains("content-b"))).thenReturn("9");
+        List<Tweet> input = List.of(tweet("a", "content-a"), tweet("b", "content-b"));
 
-        assertThat(filter.filter(input)).isEmpty();
+        List<Tweet> result = filter.filter(input);
+
+        assertThat(result).extracting(Tweet::getId).containsExactly("b");
+    }
+
+    @Test
+    void shouldDegradeToPassThroughWhenAllScoresAreNull() {
+        when(llmClient.chat(contains("content-a"))).thenReturn("无法评分");
+        when(llmClient.chat(contains("content-b"))).thenReturn("评分: 8");
+        List<Tweet> input = List.of(tweet("a", "content-a"), tweet("b", "content-b"));
+
+        List<Tweet> result = filter.filter(input);
+
+        assertThat(result).extracting(Tweet::getId).containsExactly("a", "b");
+        assertThat(result).allSatisfy(t -> assertThat(t.getInnovationScore()).isNull());
     }
 
     @Test
     void shouldSkipTweetWhenScoreOutOfRange() {
-        when(llmClient.chat(anyPrompt())).thenReturn("15");
-        List<Tweet> input = List.of(tweet("a", "content-a"));
+        when(llmClient.chat(contains("content-a"))).thenReturn("15");
+        when(llmClient.chat(contains("content-b"))).thenReturn("8");
+        List<Tweet> input = List.of(tweet("a", "content-a"), tweet("b", "content-b"));
 
-        assertThat(filter.filter(input)).isEmpty();
+        List<Tweet> result = filter.filter(input);
+
+        assertThat(result).extracting(Tweet::getId).containsExactly("b");
     }
 
     @Test

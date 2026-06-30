@@ -134,3 +134,32 @@ rewriter:
   # 源推文截断上限 (code points) — 防 prompt 过长撑爆 LLM context.
   # 按 code point 截断 (非 char), 防 UTF-16 代理对 emoji 切断产生乱码. 范围 [100, 10000].
   content-max-code-points: 2000
+
+# Markdown 归档器配置 (Story 2.5) — NFR4 双重存储的文件系统侧.
+# MarkdownArchiver implements ContentPublisher, 将 Article 写入 archive/{yyyy-MM-dd}.md 按天归档.
+# 同日多篇文章追加到同一文件, 用 separator 分隔. Docker 卷挂载 ./archive:/app/archive 对应.
+archive:
+  # 归档根目录 — 相对路径基于 JVM 工作目录 (本地开发 ./archive, Docker /app/archive).
+  # 目录不存在时由 Files.createDirectories 自动递归创建.
+  base-directory: "archive"
+  # 总开关 — 关闭时 MarkdownArchiver Bean 不注册 (@ConditionalOnProperty matchIfMissing=true).
+  # 仅故障排查时设为 false, 正常运行保持 true.
+  enabled: true
+  # 文件名日期格式 — ISO 8601 严格 yyyy-MM-dd. 由 DateTimeFormatter 解析, 非法格式启动失败.
+  date-pattern: "yyyy-MM-dd"
+  # 文件扩展名 — 默认 .md (Markdown).
+  file-suffix: ".md"
+  # 同日多文章块之间的分隔符 — Markdown 水平分割线, 视觉清晰区分同时不破坏渲染.
+  separator: "\n\n---\n\n"
+
+# Twitter 处理流水线配置 (Story 2.6) — 编排 TwitterSource→Filter→Rewriter→Archiver 端到端闭环.
+# TwitterProcessor.process() 串联 5 个阶段: fetch / commentFilter / innovationFilter / rewrite / publish.
+# ContentScheduler.processTask(taskId) 按 task-id-prefix 路由 (默认 "twitter") 到 TwitterProcessor.
+processor:
+  # 故障隔离总开关 — true 时 per-article try/catch+continue 单条失败不阻塞整批 (生产默认).
+  # false 时异常透传到 ContentScheduler 顶层 (仅调试用, 排查问题时定位具体阶段).
+  # Patch-2 修复: 配置承诺与运行时行为一致 — false 时 per-article 异常 throw 到 process() 顶层.
+  fault-isolation-enabled: true
+  # taskId 前缀 — ContentScheduler.processTask 按此前缀路由到 TwitterProcessor.
+  # Patch-3 修复: ContentScheduler 注入 ProcessorProperties, 真正按此前缀路由 (不再硬编码 "twitter:").
+  task-id-prefix: "twitter"

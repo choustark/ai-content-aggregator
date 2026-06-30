@@ -2,6 +2,8 @@ package com.choucj.aiaggregator.task.scheduler;
 
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.processor.TwitterProcessor;
+import com.choucj.aiaggregator.processor.config.ProcessorProperties;
 import com.choucj.aiaggregator.task.queue.TaskQueue;
 import com.choucj.aiaggregator.task.queue.TaskRecoveryRunner;
 import org.junit.jupiter.api.BeforeEach;
@@ -9,13 +11,19 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 
 import java.util.concurrent.TimeUnit;
+import java.util.Set;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -31,10 +39,12 @@ import static org.mockito.Mockito.when;
  *   <li>recovery 失败仍继续 processContent(应用启动不被阻塞)</li>
  * </ul>
  *
- * <p><b>注:</b> {@code processTask} 是占位实现,仅记日志不抛异常;Retryable/NonRetryable
- * 路径的真实行为由 Story 2.6 Pipeline Integration 注入处理器后通过集成测试验证.
+ * <p><b>Story 2.6 更新:</b> 构造器从 3 参数扩展为 5 参数, 加 {@link TwitterProcessor} mock
+ * + {@link ProcessorProperties} mock (Patch-3 修复 — 配置驱动 taskId 前缀路由).
+ * 现有 7 用例 taskId="task-1" 不匹配 "twitter:" 前缀, 走 "未知前缀" 路径不调 process(),
+ * 业务逻辑不变.
  */
-@ExtendWith(MockitoExtension.class)
+@ExtendWith({MockitoExtension.class, OutputCaptureExtension.class})
 class ContentSchedulerTest {
 
     @Mock
@@ -43,11 +53,22 @@ class ContentSchedulerTest {
     @Mock
     private TaskRecoveryRunner recoveryRunner;
 
+    @Mock
+    private TwitterProcessor twitterProcessor;
+
+    @Mock
+    private ProcessorProperties processorProperties;
+
     private ContentScheduler scheduler;
 
     @BeforeEach
     void setUp() {
-        scheduler = new ContentScheduler(taskQueue, recoveryRunner, true);
+        // lenient: 不所有用例都会路由到 processTask (例如 run-on-startup=false 的早返回用例)
+        lenient().when(processorProperties.getTaskIdPrefix()).thenReturn("twitter");
+        lenient().when(taskQueue.getProcessingTasks()).thenReturn(Set.of());
+        lenient().when(taskQueue.isQueued("twitter:run")).thenReturn(false);
+        scheduler = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
+                processorProperties, true);
     }
 
     @Test
@@ -85,11 +106,13 @@ class ContentSchedulerTest {
 
     @Test
     void shouldTriggerRecoveryBeforeProcessContentOnStartup() {
+        when(taskQueue.isQueued("twitter:run")).thenReturn(false, true);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
         scheduler.onStartup();
 
         verify(recoveryRunner).recoverPendingTasks();
+        verify(taskQueue).push("twitter:run");
         verify(taskQueue).poll(eq(0L), eq(TimeUnit.SECONDS));
     }
 
@@ -97,11 +120,13 @@ class ContentSchedulerTest {
     void shouldContinueProcessContentEvenIfRecoveryThrowsRetryable() {
         doThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "recovery fail"))
                 .when(recoveryRunner).recoverPendingTasks();
+        when(taskQueue.isQueued("twitter:run")).thenReturn(false, true);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
         scheduler.onStartup();
 
         verify(recoveryRunner).recoverPendingTasks();
+        verify(taskQueue).push("twitter:run");
         verify(taskQueue).poll(eq(0L), eq(TimeUnit.SECONDS));
     }
 
@@ -109,11 +134,13 @@ class ContentSchedulerTest {
     void shouldContinueProcessContentEvenIfRecoveryThrowsUnexpectedException() {
         doThrow(new RuntimeException("unexpected"))
                 .when(recoveryRunner).recoverPendingTasks();
+        when(taskQueue.isQueued("twitter:run")).thenReturn(false, true);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
         scheduler.onStartup();
 
         verify(recoveryRunner).recoverPendingTasks();
+        verify(taskQueue).push("twitter:run");
         verify(taskQueue).poll(eq(0L), eq(TimeUnit.SECONDS));
     }
 
@@ -121,7 +148,8 @@ class ContentSchedulerTest {
 
     @Test
     void shouldSkipStartupProcessingWhenRunOnStartupIsFalse() {
-        ContentScheduler disabled = new ContentScheduler(taskQueue, recoveryRunner, false);
+        ContentScheduler disabled = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
+                processorProperties, false);
 
         disabled.onStartup();
 
@@ -133,12 +161,171 @@ class ContentSchedulerTest {
     @Test
     void shouldStillHonorCronWhenRunOnStartupIsFalse() {
         // run-on-startup=false 不影响 cron 触发的 processContent
-        ContentScheduler disabled = new ContentScheduler(taskQueue, recoveryRunner, false);
+        ContentScheduler disabled = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
+                processorProperties, false);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
         disabled.processContent();
 
         verify(taskQueue).poll(eq(0L), eq(TimeUnit.SECONDS));
+        verify(taskQueue).push("twitter:run");
         verifyNoInteractions(recoveryRunner);
+    }
+
+    // ============ Story 2.6 Task 7: processTask 路由用例 (AC-6) ============
+
+    @Test
+    void shouldRouteTwitterTaskToProcessor() {
+        // taskId 以 "twitter:" 前缀开头 → 路由到 TwitterProcessor.process()
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter:run")
+                .thenReturn(null);
+
+        scheduler.processContent();
+
+        verify(twitterProcessor).process();
+        verify(taskQueue).push("twitter:run");
+        verify(taskQueue).complete("twitter:run");
+    }
+
+    @Test
+    void shouldSkipUnknownTaskIdPrefix(CapturedOutput output) {
+        // taskId 不以 "twitter:" 开头 → 记 warn 跳过, 不调用 process, 仍 complete
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("unknown:xyz")
+                .thenReturn(null);
+
+        scheduler.processContent();
+
+        verify(twitterProcessor, never()).process();
+        verify(taskQueue).push("twitter:run");
+        verify(taskQueue).complete("unknown:xyz");
+        assertThat(output.getOut()).contains("未知 taskId 前缀");
+    }
+
+    @Test
+    void shouldHandleBlankTaskId(CapturedOutput output) {
+        // taskId 为空白 → 记 warn 跳过, 不调用 process, 仍 complete
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("   ")
+                .thenReturn(null);
+
+        scheduler.processContent();
+
+        verify(twitterProcessor, never()).process();
+        verify(taskQueue).push("twitter:run");
+        verify(taskQueue).complete("   ");
+        assertThat(output.getOut()).contains("taskId 为空");
+    }
+
+    @Test
+    void shouldRouteMultipleTwitterTasksInOneBatch() {
+        // 队列中含多个 twitter: 任务 → 顺序路由, 全部 process + complete
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter:run")
+                .thenReturn("twitter:tweet:123")
+                .thenReturn(null);
+
+        scheduler.processContent();
+
+        verify(twitterProcessor, times(2)).process();
+        verify(taskQueue).push("twitter:run");
+        verify(taskQueue).complete("twitter:run");
+        verify(taskQueue).complete("twitter:tweet:123");
+    }
+
+    // ============ Patch-3 修复验证: 配置驱动 taskId 前缀路由 ============
+
+    /**
+     * Patch-3 修复: 改 processor.task-id-prefix 后路由仍能匹配.
+     * 早期实现硬编码 "twitter:" — 改 prefix 后处理器产生的任务会被视为未知前缀跳过.
+     */
+    @Test
+    void shouldRouteTaskByConfiguredPrefix() {
+        when(processorProperties.getTaskIdPrefix()).thenReturn("twitter-stage");
+        ContentScheduler staged = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
+                processorProperties, true);
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter-stage:run")
+                .thenReturn(null);
+
+        staged.processContent();
+
+        verify(twitterProcessor).process();
+        verify(taskQueue).push("twitter-stage:run");
+        verify(taskQueue).complete("twitter-stage:run");
+    }
+
+    /**
+     * Patch-3 修复: 改 prefix 后旧前缀的任务应被视为未知 (验证配置真正生效, 不是硬编码兼容).
+     */
+    @Test
+    void shouldTreatOldPrefixAsUnknownAfterConfigChange(CapturedOutput output) {
+        when(processorProperties.getTaskIdPrefix()).thenReturn("twitter-stage");
+        ContentScheduler staged = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
+                processorProperties, true);
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter:run")
+                .thenReturn(null);
+
+        staged.processContent();
+
+        verify(twitterProcessor, never()).process();
+        assertThat(output.getOut()).contains("未知 taskId 前缀");
+    }
+
+    @Test
+    void shouldPushTwitterRunOnCronTrigger() {
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
+
+        scheduler.processContent();
+
+        verify(taskQueue).push("twitter:run");
+    }
+
+    @Test
+    void shouldPushTwitterRunOnStartup() {
+        when(taskQueue.isQueued("twitter:run")).thenReturn(false, true);
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
+
+        scheduler.onStartup();
+
+        verify(taskQueue).push("twitter:run");
+    }
+
+    @Test
+    void shouldSkipPushWhenRunTaskAlreadyQueued() {
+        when(taskQueue.isQueued("twitter:run")).thenReturn(true);
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
+
+        scheduler.processContent();
+
+        verify(taskQueue, never()).push("twitter:run");
+    }
+
+    @Test
+    void shouldSkipPushWhenRunTaskAlreadyProcessing() {
+        when(taskQueue.getProcessingTasks()).thenReturn(Set.of("twitter:run"));
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
+
+        scheduler.processContent();
+
+        verify(taskQueue, never()).push("twitter:run");
+    }
+
+    @Test
+    void shouldStillTriggerProcessContentWhenStartupEnqueueFails() {
+        // Patch-9 (Round 3 review): onStartup 的 enqueueRunTaskIfAbsent("startup") 包 try/catch,
+        // 即便 Redis 抖动抛 RetryableException, processContent 仍应被调用 (内部 enqueue 兜底).
+        // 第一次 isQueued (startup 路径) 抛 RetryableException, 第二次 (processContent 路径) 返回 false 让 push 成功.
+        when(taskQueue.isQueued("twitter:run"))
+                .thenThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "redis down"))
+                .thenReturn(false);
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
+
+        scheduler.onStartup();
+
+        // processContent 仍被调用 — 内部 enqueue 成功 push 一次
+        verify(taskQueue).push("twitter:run");
     }
 }

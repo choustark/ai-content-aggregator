@@ -19,6 +19,7 @@ import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.serializer.SerializationException;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
@@ -232,5 +233,21 @@ class TaskQueueTest {
         assertThatThrownBy(() -> taskQueue.getProcessingTasks())
                 .isInstanceOf(NonRetryableException.class)
                 .hasMessageContaining("根因透传");
+    }
+
+    @Test
+    void shouldReturnTrueWhenTaskAlreadyQueued() {
+        when(stringRedisTemplate.opsForList()).thenReturn(listOps);
+        when(listOps.range("task:queue", 0, -1)).thenReturn(List.of("task-1", "task-2"));
+
+        assertThat(taskQueue.isQueued("task-2")).isTrue();
+    }
+
+    @Test
+    void shouldReturnFalseWhenTaskNotQueued() {
+        when(stringRedisTemplate.opsForList()).thenReturn(listOps);
+        when(listOps.range("task:queue", 0, -1)).thenReturn(List.of("task-1"));
+
+        assertThat(taskQueue.isQueued("task-2")).isFalse();
     }
 }

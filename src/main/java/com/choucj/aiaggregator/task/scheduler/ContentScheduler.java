@@ -2,6 +2,8 @@ package com.choucj.aiaggregator.task.scheduler;
 
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
+import com.choucj.aiaggregator.processor.TwitterProcessor;
+import com.choucj.aiaggregator.processor.config.ProcessorProperties;
 import com.choucj.aiaggregator.task.queue.TaskQueue;
 import com.choucj.aiaggregator.task.queue.TaskRecoveryRunner;
 import lombok.RequiredArgsConstructor;
@@ -53,24 +55,35 @@ public class ContentScheduler {
 
     private final TaskQueue taskQueue;
     private final TaskRecoveryRunner recoveryRunner;
+    private final TwitterProcessor twitterProcessor;
+    private final ProcessorProperties processorProperties;
     private final boolean runOnStartup;
 
     /**
-     * 构造器注入 {@code schedule.run-on-startup}(CR W2 修复).
+     * 构造器注入 {@code schedule.run-on-startup}(CR W2 修复) +
+     * {@link TwitterProcessor} (Story 2.6 Pipeline Integration) +
+     * {@link ProcessorProperties} (Patch-3 修复 — 配置驱动 taskId 前缀路由).
      *
      * <p>不用 {@code @RequiredArgsConstructor} 是因为 boolean 配置项需要
      * {@code @Value} 显式标注 + 默认值, Lombok 自动生成的构造器无法表达.
-     * 其他依赖({@link TaskQueue} / {@link TaskRecoveryRunner})仍走 Spring 自动注入.
+     * 其他依赖({@link TaskQueue} / {@link TaskRecoveryRunner} / {@link TwitterProcessor} /
+     * {@link ProcessorProperties}) 仍走 Spring 自动注入.
      *
-     * @param taskQueue       任务队列
-     * @param recoveryRunner  断点恢复 Bean
-     * @param runOnStartup    启动时是否执行首次处理, 默认 true (来自 {@code schedule.run-on-startup})
+     * @param taskQueue            任务队列
+     * @param recoveryRunner       断点恢复 Bean
+     * @param twitterProcessor     Twitter 处理流水线 (Story 2.6, 按 taskId 前缀路由)
+     * @param processorProperties  Processor 配置 (Story 2.6 Patch-3, 提供 task-id-prefix 路由判断)
+     * @param runOnStartup         启动时是否执行首次处理, 默认 true (来自 {@code schedule.run-on-startup})
      */
     public ContentScheduler(TaskQueue taskQueue,
                             TaskRecoveryRunner recoveryRunner,
+                            TwitterProcessor twitterProcessor,
+                            ProcessorProperties processorProperties,
                             @Value("${schedule.run-on-startup:true}") boolean runOnStartup) {
         this.taskQueue = taskQueue;
         this.recoveryRunner = recoveryRunner;
+        this.twitterProcessor = twitterProcessor;
+        this.processorProperties = processorProperties;
         this.runOnStartup = runOnStartup;
     }
 
@@ -83,6 +96,7 @@ public class ContentScheduler {
     public void processContent() {
         log.info("开始执行内容处理任务");
         try {
+            enqueueRunTaskIfAbsent("cron");
             processQueueOnce();
             log.info("内容处理任务完成");
         } catch (Exception e) {
@@ -101,6 +115,12 @@ public class ContentScheduler {
      *
      * <p>CR W2 修复: {@code schedule.run-on-startup=false} 时仅记 info 日志并早返回,
      * 不做断点恢复也不触发首次处理 — 应用启动后等待下一个 cron 时刻.
+     *
+     * <p><b>Patch-9 修复 (2026-06-30, Round 3 review):</b> {@code enqueueRunTaskIfAbsent("startup")}
+     * 包在 try/catch 中. Round 2 Patch-8 在此处显式入队 startup 任务, 但未做异常兜底 — 若启动时
+     * Redis 不可达, {@code TaskQueue.isQueued} / {@code getProcessingTasks} 抛 {@link RetryableException}
+     * 会逃逸到 {@code @EventListener} 外, 抑制下方 {@code processContent()} 调用, 启动触发器静默丢失.
+     * 包 try/catch 后失败仅记 warn, {@code processContent()} 内部仍会触发自己的 enqueue 兜底.
      */
     @EventListener(ApplicationReadyEvent.class)
     public void onStartup() {
@@ -113,6 +133,11 @@ public class ContentScheduler {
             recoveryRunner.recoverPendingTasks();
         } catch (Exception e) {
             log.warn("启动时断点恢复失败, 继续触发首次内容处理", e);
+        }
+        try {
+            enqueueRunTaskIfAbsent("startup");
+        } catch (Exception e) {
+            log.warn("启动时入队失败, 仍继续触发首次内容处理 (processContent 内部会再次尝试 enqueue)", e);
         }
         processContent();
     }
@@ -146,13 +171,59 @@ public class ContentScheduler {
     }
 
     /**
-     * 处理单个任务 — MVP 占位实现, Story 2.x 路由到具体业务处理器.
+     * 处理单个任务 — 按 taskId 前缀路由到具体业务处理器 (Story 2.6 实施).
      *
-     * <p>Story 2.6 Pipeline Integration 会注入 {@code ContentProcessor} 替换本方法,
-     * 按 taskId 前缀路由到 RSSHUB / Twitter / LLM 处理器.
+     * <p><b>路由策略 (Patch-3 修复 — 配置驱动):</b>
+     * <ul>
+     *   <li>{@code processorProperties.getTaskIdPrefix() + ":"} 前缀 →
+     *       {@link TwitterProcessor#process()} 编排完整 Pipeline
+     *       (fetch → filter chain → rewrite → publish)</li>
+     *   <li>其他前缀 (未来 {@code "github:"} / {@code "rss:"}) → 记 {@code log.warn} 跳过,
+     *       前向兼容 Epic 4 GitHub 集成</li>
+     * </ul>
+     *
+     * <p><b>路由失败异常策略 (沿用 {@link #processQueueOnce()} 分类):</b>
+     * {@link TwitterProcessor#process()} 内部三层防御已捕获所有异常不会抛出,
+     * 但若因 Bean 装配问题抛出, 或 {@code processor.fault-isolation-enabled=false} 调试模式
+     * 主动透传 per-article 异常, 沿用 processQueueOnce catch Retryable/NonRetryable 策略
+     * (Retryable 留 processing 集合待重启重入队, NonRetryable complete 移除避免阻塞).
+     *
+     * <p><b>Patch-3 修复动机:</b>
+     * 早期实现硬编码 {@code taskId.startsWith("twitter:")}, 但 {@code TwitterProcessor}
+     * 用 {@code properties.getTaskIdPrefix()} 生成 taskId, 改前缀后处理器产生的任务会被调度器
+     * 视为"未知前缀"跳过, 违背 AC-6 与配置注释中"按 task-id-prefix 路由"的契约.
+     * 注入 {@link ProcessorProperties} 让配置真正驱动路由行为.
+     *
+     * <p><b>Epic 4 扩展点:</b>
+     * 引入 {@code Map<String, Processor>} 或 Spring 自动注入 {@code List<Processor>} +
+     * {@code @Qualifier} 替换 if-else, 支持多 Processor 路由.
      */
     private void processTask(String taskId) {
-        log.info("处理任务: {}", taskId);
-        // TODO(2026-07) Story 2.6: 注入 ContentProcessor 路由到具体业务处理器
+        log.info("处理任务: taskId={}", taskId);
+        if (taskId == null || taskId.isBlank()) {
+            log.warn("taskId 为空, 跳过");
+            return;
+        }
+        String prefix = processorProperties.getTaskIdPrefix() + ":";
+        if (taskId.startsWith(prefix)) {
+            twitterProcessor.process();
+            return;
+        }
+        log.warn("未知 taskId 前缀, 跳过 (Epic 4 github: 前缀待扩展): taskId={}, expectedPrefix={}",
+                taskId, prefix);
+    }
+
+    private void enqueueRunTaskIfAbsent(String trigger) {
+        String runTaskId = processorProperties.getTaskIdPrefix() + ":run";
+        if (taskQueue.getProcessingTasks().contains(runTaskId)) {
+            log.info("批量任务已在 processing 中, 跳过重复入队: trigger={}, taskId={}", trigger, runTaskId);
+            return;
+        }
+        if (taskQueue.isQueued(runTaskId)) {
+            log.info("批量任务已在队列中, 跳过重复入队: trigger={}, taskId={}", trigger, runTaskId);
+            return;
+        }
+        taskQueue.push(runTaskId);
+        log.info("已推送批量任务: trigger={}, taskId={}", trigger, runTaskId);
     }
 }

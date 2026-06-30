@@ -65,14 +65,14 @@ class ArchiverPropertiesTest {
                         .addFirst(new MapPropertySource("test", Map.of(
                                 "archive.base-directory", "/var/data/archive",
                                 "archive.enabled", false,
-                                "archive.date-pattern", "yyyy/MM/dd",
+                                "archive.date-pattern", "yyyy_MM_dd",
                                 "archive.file-suffix", ".markdown",
                                 "archive.separator", "\n===\n"))))
                 .run(ctx -> {
                     ArchiverProperties props = ctx.getBean(ArchiverProperties.class);
                     assertThat(props.getBaseDirectory()).isEqualTo("/var/data/archive");
                     assertThat(props.isEnabled()).isFalse();
-                    assertThat(props.getDatePattern()).isEqualTo("yyyy/MM/dd");
+                    assertThat(props.getDatePattern()).isEqualTo("yyyy_MM_dd");
                     assertThat(props.getFileSuffix()).isEqualTo(".markdown");
                     assertThat(props.getSeparator()).isEqualTo("\n===\n");
                 });
@@ -132,5 +132,50 @@ class ArchiverPropertiesTest {
 
         assertThat(violations).anySatisfy(v ->
                 assertThat(v.getPropertyPath().toString()).isEqualTo("separator"));
+    }
+
+    /**
+     * Story 2.5 代码审查 Patch-1/6: date-pattern 含 {@code /} 应触发 @Pattern 校验失败
+     * (防子目录逃逸 — {@code yyyy/MM/dd} 会写 {@code 2026/06/28.md}).
+     */
+    @Test
+    void shouldFailValidationWhenDatePatternContainsSlash() {
+        ArchiverProperties props = new ArchiverProperties();
+        props.setDatePattern("yyyy/MM/dd");
+
+        Set<ConstraintViolation<ArchiverProperties>> violations = validator.validate(props);
+
+        assertThat(violations).anySatisfy(v ->
+                assertThat(v.getPropertyPath().toString()).isEqualTo("datePattern"));
+    }
+
+    /**
+     * Story 2.5 代码审查 Patch-1/6: file-suffix 含 {@code /} 应触发 @Pattern 校验失败
+     * (防路径穿越 — {@code ../../etc} 可逃逸 baseDirectory).
+     */
+    @Test
+    void shouldFailValidationWhenFileSuffixContainsSlash() {
+        ArchiverProperties props = new ArchiverProperties();
+        props.setFileSuffix("../../etc");
+
+        Set<ConstraintViolation<ArchiverProperties>> violations = validator.validate(props);
+
+        assertThat(violations).anySatisfy(v ->
+                assertThat(v.getPropertyPath().toString()).isEqualTo("fileSuffix"));
+    }
+
+    /**
+     * Story 2.5 第二轮代码审查 Patch-7: file-suffix 含 Windows 反斜杠 {@code \} 应触发 @Pattern
+     * 校验失败 (防跨平台路径穿越 — Windows 上 {@code ..\evil.md} 与 {@code /path} 等价).
+     */
+    @Test
+    void shouldFailValidationWhenFileSuffixContainsBackslash() {
+        ArchiverProperties props = new ArchiverProperties();
+        props.setFileSuffix("..\\..\\etc");
+
+        Set<ConstraintViolation<ArchiverProperties>> violations = validator.validate(props);
+
+        assertThat(violations).anySatisfy(v ->
+                assertThat(v.getPropertyPath().toString()).isEqualTo("fileSuffix"));
     }
 }

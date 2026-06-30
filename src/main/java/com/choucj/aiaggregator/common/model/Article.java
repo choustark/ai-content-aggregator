@@ -28,7 +28,7 @@ import java.time.LocalDateTime;
 @AllArgsConstructor
 public class Article {
 
-    /** 文章 ID(UUID, 由 Rewriter 生成). */
+    /** 文章 ID(由 Rewriter 基于源内容生成的确定性标识, 例如 {@code tw-{tweetId}}). */
     private String id;
 
     /** 标题. */

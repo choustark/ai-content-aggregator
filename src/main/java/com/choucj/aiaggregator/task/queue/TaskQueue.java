@@ -119,6 +119,24 @@ public class TaskQueue {
     }
 
     /**
+     * 判断待处理队列中是否已存在指定 taskId.
+     *
+     * <p>用于调度触发器避免把相同批量任务重复压入 {@code task:queue}.
+     *
+     * @return {@code true} 表示已存在; Redis 返回 {@code null} 时按空队列处理
+     * @throws RetryableException Redis 连接异常
+     */
+    public boolean isQueued(String taskId) {
+        if (taskId == null) {
+            throw new NonRetryableException(ErrorCode.REDIS_DATA_ERROR,
+                    "isQueued 失败: taskId 不能为 null");
+        }
+        java.util.List<String> tasks = supplyWithMapping("isQueued", RedisKeys.taskQueue(), () ->
+                stringRedisTemplate.opsForList().range(RedisKeys.taskQueue(), 0, -1));
+        return tasks != null && tasks.contains(taskId);
+    }
+
+    /**
      * 异常包装 helper — 沿用 Story 1.5b {@code RedisRepositoryImpl.supplyWithMapping} 模式.
      *
      * <p>注意: 本类重复实现而非抽到 common, 因 List/Set 操作与 Repository CRUD 是不同抽象层级,
