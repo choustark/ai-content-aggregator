@@ -3,6 +3,7 @@ package com.choucj.aiaggregator.common.repository;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -14,11 +15,13 @@ import org.springframework.data.redis.ClusterStateFailureException;
 import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.RedisSystemException;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.data.redis.core.ListOperations;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.data.redis.serializer.SerializationException;
 
 import java.time.Duration;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -53,6 +56,9 @@ class RedisExceptionMappingTest {
     @Mock
     private ValueOperations<String, Object> objectValueOps;
 
+    @Mock
+    private ListOperations<String, String> stringListOps;
+
     private RedisRepositoryImpl repository;
 
     /**
@@ -62,7 +68,7 @@ class RedisExceptionMappingTest {
      */
     @BeforeEach
     void setUp() {
-        repository = new RedisRepositoryImpl(stringRedisTemplate, objectRedisTemplate);
+        repository = new RedisRepositoryImpl(stringRedisTemplate, objectRedisTemplate, new ObjectMapper());
     }
 
     // ============ AC-5: Retryable 映射(RedisConnectionFailure / QueryTimeout / ClusterStateFailure) ============
@@ -226,5 +232,37 @@ class RedisExceptionMappingTest {
 
         assertThat(repository.getObject("k", String.class))
                 .isEqualTo("hello");
+    }
+
+    @Test
+    void shouldReturnStringValuesFromLRange() {
+        when(stringRedisTemplate.opsForList()).thenReturn(stringListOps);
+        when(stringListOps.range("list", 0, -1)).thenReturn(List.of("a", "b"));
+
+        assertThat(repository.lRange("list", 0, -1, String.class))
+                .containsExactly("a", "b");
+    }
+
+    @Test
+    void shouldDeserializeJsonValuesFromLRange() {
+        when(stringRedisTemplate.opsForList()).thenReturn(stringListOps);
+        when(stringListOps.range("list", 0, -1))
+                .thenReturn(List.of("{\"name\":\"Ada\"}", "{\"name\":\"Grace\"}"));
+
+        assertThat(repository.lRange("list", 0, -1, SampleValue.class))
+                .extracting(SampleValue::getName)
+                .containsExactly("Ada", "Grace");
+    }
+
+    static class SampleValue {
+        private String name;
+
+        public String getName() {
+            return name;
+        }
+
+        public void setName(String name) {
+            this.name = name;
+        }
     }
 }

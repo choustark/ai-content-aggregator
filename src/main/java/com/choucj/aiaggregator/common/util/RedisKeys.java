@@ -100,4 +100,49 @@ public final class RedisKeys {
     public static String costDaily(java.time.LocalDate date) {
         return "cost:daily:" + date.format(java.time.format.DateTimeFormatter.ISO_LOCAL_DATE);
     }
+
+    /**
+     * Story 3.4: 批量发布待办队列键 (Redis List).
+     *
+     * <p>键格式: {@code "publish:pending:{yyyy-MM-dd}"} (e.g., {@code "publish:pending:2026-07-06"}).
+     * 由 {@link com.choucj.aiaggregator.publish.wechat.PublishingModeDecider} 入队 (rPush Article JSON),
+     * 由 {@link com.choucj.aiaggregator.publish.wechat.BatchPublishingScheduler} 在每晚 20:00 cron 触发消费
+     * (lPop + 反序列化 + WeChatPublisher.publish).
+     *
+     * <p><b>键命名空间分离 (与 Story 3.5 协同 M1 风险):</b>
+     * 本键是 List ({@code publish:pending:{date}}), Story 3.5 ArticleStatus 用 String
+     * ({@code article:{id}:status}) — 不同 namespace 不冲突.
+     *
+     * <p>跨日场景: Article.createdAt 决定写入哪天的队列, BatchPublishingScheduler 在 20:00 cron 时只读
+     * {@code LocalDate.now()} 当日队列; 跨日残留因 TTL 7 天仍在 Redis, 但不自动补跑 (YAGNI, Story 5.x 范围).
+     *
+     * @param date 日期 (LocalDate, 不为 null; 由 Article.createdAt.toLocalDate() 或 LocalDate.now() 提供)
+     * @return {@code "publish:pending:{date}"} 键字符串
+     */
+    public static String publishPending(java.time.LocalDate date) {
+        return "publish:pending:" + date.format(java.time.format.DateTimeFormatter.ISO_LOCAL_DATE);
+    }
+
+    /**
+     * Story 3.5: 单篇文章状态机键 (Redis String).
+     *
+     * <p>键格式: {@code "article:{articleId}:status"} (e.g., {@code "article:tw-1234567890:status"}),
+     * 由 {@link com.choucj.aiaggregator.publish.status.ArticleStatusService} 写入,
+     * 值为 {@link com.choucj.aiaggregator.publish.status.ArticleStatus} 枚举 name() 字符串,
+     * TTL 30 天.
+     *
+     * <p><b>键命名空间分离 (与 Story 3.4 协同 M1 风险):</b>
+     * 本键是 String ({@code article:{id}:status}), Story 3.4 publishPending 用 List
+     * ({@code publish:pending:{date}}) — 不同 namespace 不冲突.
+     *
+     * <p><b>键命名稳定性:</b> articleId 由 {@link com.choucj.aiaggregator.common.model.Article#getId()}
+     * 提供, B8 规则要求确定性 ID (Twitter: {@code tw-{tweetId}}), 不含换行 / 空格,
+     * 不存在 Redis key 注入风险 (但 ArticleStatusService 仍会校验防御深度).
+     *
+     * @param articleId 文章 ID (如 {@code "tw-1234567890"}), 不为 null/blank
+     * @return {@code "article:{articleId}:status"} 键字符串
+     */
+    public static String articleStatus(String articleId) {
+        return "article:" + articleId + ":status";
+    }
 }

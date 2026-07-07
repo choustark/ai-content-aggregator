@@ -28,6 +28,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *   <li>{@code RetryableException} → 503 + ErrorResponse(code=RETRYABLE_ERROR)</li>
  *   <li>{@code NonRetryableException} → 400 + ErrorResponse(code=NON_RETRYABLE_ERROR)</li>
  *   <li>{@code DegradationException} → 503 + ErrorResponse(code=DEGRADATION_NEEDED, message="服务降级,请稍后重试")</li>
+ *   <li>{@code NotFoundException} → 404 + ErrorResponse(code=NON_RETRYABLE_ERROR)</li>
  *   <li>{@code Exception} 兜底 → 500 + ErrorResponse(code=INTERNAL_ERROR, message="系统错误")</li>
  * </ol>
  */
@@ -79,6 +80,14 @@ class GlobalExceptionHandlerTest {
     }
 
     @Test
+    void shouldMapNotFoundExceptionTo404() throws Exception {
+        mockMvc.perform(get("/test/not-found"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value(ErrorCode.NON_RETRYABLE_ERROR.name()))
+                .andExpect(jsonPath("$.message").value("Article 状态未找到"));
+    }
+
+    @Test
     void shouldMapUnexpectedExceptionTo500WithoutStackTraceLeak() throws Exception {
         mockMvc.perform(get("/test/unexpected"))
                 .andExpect(status().isInternalServerError())
@@ -115,6 +124,11 @@ class GlobalExceptionHandlerTest {
         @GetMapping("/test/degradation")
         public void throwDegradation() {
             throw new DegradationException("DeepSeek 超时, 切换 GLM");
+        }
+
+        @GetMapping("/test/not-found")
+        public void throwNotFound() {
+            throw new NotFoundException(ErrorCode.NON_RETRYABLE_ERROR, "Article 状态未找到");
         }
 
         @GetMapping("/test/unexpected")

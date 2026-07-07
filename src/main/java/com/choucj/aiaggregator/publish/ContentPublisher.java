@@ -7,7 +7,7 @@ import com.choucj.aiaggregator.common.model.Article;
  *
  * <p>实现类:
  * <ul>
- *   <li>{@code WeChatPublisher} — Story 3.3, 微信公众号草稿发布(调用 WxMpService)</li>
+ *   <li>{@code PublishingModeDecider} — Story 3.4, 微信公众号实时/批量发布决策入口</li>
  *   <li>{@code MarkdownArchiver} — Story 2.5, Markdown 文件归档(语义虽不同, 但可视为
  *       "发布到文件系统", 复用此接口避免 Pipeline 编排分支)</li>
  * </ul>

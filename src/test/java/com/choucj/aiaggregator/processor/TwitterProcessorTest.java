@@ -4,11 +4,14 @@ import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.Article;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.repository.RedisRepository;
 import com.choucj.aiaggregator.content.filter.ContentFilter;
 import com.choucj.aiaggregator.content.rewriter.ContentRewriter;
 import com.choucj.aiaggregator.content.rewriter.SingleModelRewriter;
 import com.choucj.aiaggregator.processor.config.ProcessorProperties;
 import com.choucj.aiaggregator.publish.ContentPublisher;
+import com.choucj.aiaggregator.publish.status.ArticleStatus;
+import com.choucj.aiaggregator.publish.status.ArticleStatusService;
 import com.choucj.aiaggregator.source.twitter.TwitterSource;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
 import org.junit.jupiter.api.BeforeEach;
@@ -25,6 +28,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -61,9 +65,13 @@ class TwitterProcessorTest {
     @Mock
     private ContentPublisher contentPublisher;
     @Mock
+    private ContentPublisher secondContentPublisher;
+    @Mock
     private ContentFilter<Tweet> commentFilterDelegate;
     @Mock
     private ContentFilter<Tweet> innovationFilterDelegate;
+    @Mock
+    private ArticleStatusService articleStatusService;
 
     private ProcessorProperties properties;
     private TwitterProcessor processor;
@@ -79,7 +87,7 @@ class TwitterProcessorTest {
                 new CommentFilterStub(commentFilterDelegate),
                 new InnovationFilterStub(innovationFilterDelegate));
         processor = new TwitterProcessor(twitterSource, filters, contentRewriter,
-                contentPublisher, properties);
+                List.of(contentPublisher), properties, articleStatusService);
     }
 
     @Test
@@ -95,6 +103,31 @@ class TwitterProcessorTest {
 
         verify(contentRewriter, times(2)).rewrite(any());
         verify(contentPublisher, times(2)).publish(any());
+    }
+
+    @Test
+    void shouldInvokeAllContentPublishersForEachSuccessfulArticle() {
+        processor = new TwitterProcessor(twitterSource, List.of(
+                new CommentFilterStub(commentFilterDelegate),
+                new InnovationFilterStub(innovationFilterDelegate)),
+                contentRewriter, List.of(contentPublisher, secondContentPublisher), properties,
+                articleStatusService);
+        Tweet t1 = tweet("id-1", "content-1");
+        Tweet t2 = tweet("id-2", "content-2");
+        Article a1 = article("art-1");
+        Article a2 = article("art-2");
+        when(twitterSource.fetch()).thenReturn(List.of(t1, t2));
+        when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1, t2));
+        when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1, t2));
+        when(contentRewriter.rewrite(t1)).thenReturn(a1);
+        when(contentRewriter.rewrite(t2)).thenReturn(a2);
+
+        processor.process();
+
+        verify(contentPublisher).publish(a1);
+        verify(contentPublisher).publish(a2);
+        verify(secondContentPublisher).publish(a1);
+        verify(secondContentPublisher).publish(a2);
     }
 
     @Test
@@ -358,6 +391,87 @@ class TwitterProcessorTest {
         String truncated = SingleModelRewriter.truncateForLog(longMsg, 200);
         assertThat(truncated.codePointCount(0, truncated.length())).isLessThanOrEqualTo(200);
         assertThat(truncated).endsWith("...");
+    }
+
+    // ============ Story 3.5 集成验证: PENDING + PROCESSING 写入 ============
+
+    /**
+     * Story 3.5 AC-1: Stage 3 入口 (rewrite 前) 调 markPending — 用确定性 ID `tw-{tweetId}`.
+     */
+    @Test
+    void shouldMarkPendingBeforeRewriteLoop() {
+        Tweet t1 = tweet("id-1", "content-1");
+        when(twitterSource.fetch()).thenReturn(List.of(t1));
+        when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1));
+        when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1));
+        when(contentRewriter.rewrite(any())).thenReturn(article("art-1"));
+
+        processor.process();
+
+        // rewrite 前用 tw-{tweetId} 调 markPending
+        verify(articleStatusService).markPending(eq("tw-id-1"));
+    }
+
+    @Test
+    void shouldNotMarkProcessingInTwitterProcessorBeforePublish() {
+        Tweet t1 = tweet("id-1", "content-1");
+        Article a1 = article("art-1");
+        when(twitterSource.fetch()).thenReturn(List.of(t1));
+        when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1));
+        when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1));
+        when(contentRewriter.rewrite(t1)).thenReturn(a1);
+
+        processor.process();
+
+        // Story 3.5 Round 2: PROCESSING 只在真正微信 addDraft 前由 WeChatPublisher 写,
+        // 避免批量入队文章被 TwitterProcessor 提前标为 PROCESSING.
+        verify(articleStatusService, never()).markProcessing(any());
+        verify(contentPublisher).publish(a1);
+    }
+
+    @Test
+    void shouldNotCreatePendingStatusWhenTweetIdIsNull() {
+        Tweet t1 = tweet(null, "content-1");
+        when(twitterSource.fetch()).thenReturn(List.of(t1));
+        when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1));
+        when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1));
+
+        processor.process();
+
+        verify(articleStatusService, never()).markPending(any());
+        verify(contentRewriter, never()).rewrite(any());
+        verify(contentPublisher, never()).publish(any());
+    }
+
+    /**
+     * Story 3.5 §5.2 软失败验证: Redis 写 PENDING 抛 Retryable 被真实 ArticleStatusService 内部吞,
+     * Pipeline 仍正常完成.
+     */
+    @Test
+    void shouldNotPropagateStatusServiceSoftFailure(CapturedOutput output) {
+        RedisRepository redisRepository = org.mockito.Mockito.mock(RedisRepository.class);
+        ArticleStatusService realStatusService = new ArticleStatusService(redisRepository);
+        processor = new TwitterProcessor(twitterSource, List.of(
+                new CommentFilterStub(commentFilterDelegate),
+                new InnovationFilterStub(innovationFilterDelegate)),
+                contentRewriter, List.of(contentPublisher), properties, realStatusService);
+
+        Tweet t1 = tweet("id-1", "content-1");
+        when(twitterSource.fetch()).thenReturn(List.of(t1));
+        when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1));
+        when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1));
+        when(contentRewriter.rewrite(any())).thenReturn(article("art-1"));
+        doThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "Redis 连接失败"))
+                .when(redisRepository).set(eq("article:tw-id-1:status"),
+                        eq(ArticleStatus.PENDING.name()), eq(java.time.Duration.ofDays(30)));
+
+        processor.process();
+
+        // 仍调用了 publish, 软失败未阻塞流水线
+        verify(contentPublisher, times(1)).publish(any());
+        verify(redisRepository).set(eq("article:tw-id-1:status"),
+                eq(ArticleStatus.PENDING.name()), eq(java.time.Duration.ofDays(30)));
+        assertThat(output.getOut()).contains("状态写入失败, 跳过");
     }
 
     // ============ helpers ============

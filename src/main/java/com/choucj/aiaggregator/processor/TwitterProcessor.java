@@ -1,11 +1,14 @@
 package com.choucj.aiaggregator.processor;
 
+import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.model.Article;
+import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.content.filter.ContentFilter;
 import com.choucj.aiaggregator.content.rewriter.ContentRewriter;
 import com.choucj.aiaggregator.content.rewriter.SingleModelRewriter;
 import com.choucj.aiaggregator.processor.config.ProcessorProperties;
 import com.choucj.aiaggregator.publish.ContentPublisher;
+import com.choucj.aiaggregator.publish.status.ArticleStatusService;
 import com.choucj.aiaggregator.source.twitter.TwitterSource;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
 import lombok.RequiredArgsConstructor;
@@ -14,6 +17,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Pattern;
 
 /**
  * Twitter 处理流水线编排器 (Story 2.6 — Epic 2 收尾).
@@ -77,6 +81,7 @@ import java.util.List;
  *   <li>Tweet 缓存 — {@link TwitterSource#enrichTweet} + {@code RedisRepository}</li>
  *   <li>幂等查重 (articleId) — {@code MarkdownArchiver.isAlreadyArchived}</li>
  *   <li>{@code Tweet.innovationScore} 空安全 — {@link SingleModelRewriter#convertInnovationScore}</li>
+ *   <li>状态追踪 (Story 3.5) — {@link ArticleStatusService} 在 Stage 3 入口写 PENDING, publish 前写 PROCESSING</li>
  * </ul>
  *
  * <p><b>日志规范 (强制 W11/N4/Patch-5/N2):</b>
@@ -100,8 +105,11 @@ public class TwitterProcessor {
     private final TwitterSource twitterSource;
     private final List<ContentFilter<Tweet>> contentFilters;
     private final ContentRewriter contentRewriter;
-    private final ContentPublisher contentPublisher;
+    private final List<ContentPublisher> contentPublishers;
     private final ProcessorProperties properties;
+    private final ArticleStatusService articleStatusService;
+
+    private static final Pattern TWEET_ID_PATTERN = Pattern.compile("[A-Za-z0-9_-]+");
 
     /**
      * 执行一轮完整的 Twitter 处理流水线.
@@ -181,9 +189,17 @@ public class TwitterProcessor {
         // 顶层 (调试用, 由调度器按 Retryable/NonRetryable 分类处理).
         for (Tweet tweet : filtered) {
             try {
+                // Story 3.5 AC-1/P5: rewrite 前写 PENDING, 但必须先校验 tweetId,
+                // 避免生成 tw-null / malformed orphan status.
+                articleStatusService.markPending(buildDeterministicArticleId(tweet));
                 Article article = contentRewriter.rewrite(tweet);
                 rewriteSuccess++;
-                contentPublisher.publish(article);
+                // Story 3.4: 多 ContentPublisher 遍历 (MarkdownArchiver + PublishingModeDecider + ...)
+                // 单 publisher 抛异常 → L2 per-article 隔离 catch 捕获, 后续 publisher 本条不再调
+                // (与单条失败语义一致, 不调"半成功" — 任何 publisher 失败视本条失败)
+                for (ContentPublisher publisher : contentPublishers) {
+                    publisher.publish(article);
+                }
                 archiveSuccess++;
             } catch (Exception e) {
                 failure++;
@@ -220,5 +236,17 @@ public class TwitterProcessor {
         } else {
             log.info("创新筛选完成: 输入={}, 通过={}", before, after);
         }
+    }
+
+    private static String buildDeterministicArticleId(Tweet tweet) {
+        if (tweet == null || tweet.getId() == null || tweet.getId().isBlank()) {
+            throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                    "非法 tweetId: " + (tweet == null ? null : tweet.getId()));
+        }
+        if (!TWEET_ID_PATTERN.matcher(tweet.getId()).matches()) {
+            throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                    "非法 tweetId (必须匹配 [A-Za-z0-9_-]+): " + tweet.getId());
+        }
+        return "tw-" + tweet.getId();
     }
 }

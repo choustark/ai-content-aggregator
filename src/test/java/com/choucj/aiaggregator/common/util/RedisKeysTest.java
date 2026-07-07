@@ -48,4 +48,12 @@ class RedisKeysTest {
         assertThat(RedisKeys.taskQueue()).matches("^[a-z][a-z:]*$");
         assertThat(RedisKeys.taskProcessing()).matches("^[a-z][a-z:]*$");
     }
+
+    /**
+     * Story 3.5: articleStatus 键格式 — 服务于 ArticleStatusService 状态机.
+     */
+    @Test
+    void shouldFormatArticleStatusKey() {
+        assertThat(RedisKeys.articleStatus("tw-123")).isEqualTo("article:tw-123:status");
+    }
 }

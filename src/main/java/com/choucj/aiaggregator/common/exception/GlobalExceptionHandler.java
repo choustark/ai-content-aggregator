@@ -104,6 +104,22 @@ public class GlobalExceptionHandler {
     }
 
     /**
+     * 处理资源不存在异常.
+     *
+     * <p>用于 REST 查询目标不存在或状态已过期的场景, 返回 404 + 统一 ErrorResponse,
+     * 与参数/业务规则错误的 {@link NonRetryableException} → 400 区分.
+     *
+     * @param e 查询目标不存在或已过期
+     * @return 404 NOT_FOUND + ErrorResponse
+     */
+    @ExceptionHandler(NotFoundException.class)
+    public ResponseEntity<ErrorResponse> handleNotFound(NotFoundException e) {
+        log.warn("资源不存在 [{}]: {}", e.getErrorCode(), e.getMessage());
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(new ErrorResponse(e.getErrorCode(), e.getMessage()));
+    }
+
+    /**
      * 兜底处理所有未预期的异常.
      *
      * <p>记 error 级别日志(含完整 stacktrace,内部排查用),

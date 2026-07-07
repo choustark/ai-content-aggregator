@@ -1,6 +1,7 @@
 package com.choucj.aiaggregator.common.repository;
 
 import java.time.Duration;
+import java.util.List;
 
 /**
  * Redis 键值访问 Repository — 业务侧统一入口.
@@ -49,6 +50,17 @@ public interface RedisRepository {
      * @param ttl   过期时间(不能为 null 或负数)
      */
     void set(String key, String value, Duration ttl);
+
+    /**
+     * 写入键值并保留 Redis 现有 TTL.
+     *
+     * <p>语义等同 Redis {@code SET key value KEEPTTL}; 用于状态机类场景在状态转换时更新 value,
+     * 但不清除首次写入建立的过期时间. 如果 key 原本没有 TTL, 写入后仍无 TTL.
+     *
+     * @param key   Redis 键
+     * @param value 字符串值
+     */
+    void setKeepingTtl(String key, String value);
 
     /**
      * 读取键值.
@@ -110,4 +122,62 @@ public interface RedisRepository {
      * @throws com.choucj.aiaggregator.common.exception.NonRetryableException 类型不匹配 / 序列化失败
      */
     <T> T getObject(String key, Class<T> type);
+
+    /**
+     * Story 3.4: 在 Redis List 右端追加元素 (rPush).
+     *
+     * <p>用于 {@code publish:pending:{date}} 批量发布队列入队 (FIFO 配合 {@link #lPop}).
+     * 复用 {@code supplyWithMapping} 异常映射 (Story 1.5b 模式).
+     *
+     * @param key   Redis List 键
+     * @param value 字符串值 (调用方负责 JSON 序列化)
+     * @throws com.choucj.aiaggregator.common.exception.RetryableException Redis 连接失败
+     * @throws com.choucj.aiaggregator.common.exception.NonRetryableException Redis 数据异常
+     */
+    void rPush(String key, String value);
+
+    /**
+     * Story 3.4: 从 Redis List 左端弹出元素 (lPop).
+     *
+     * <p>用于 {@code publish:pending:{date}} 批量发布队列消费 (FIFO 配合 {@link #rPush}).
+     * 复用 {@code supplyWithMapping} 异常映射 (Story 1.5b 模式).
+     *
+     * @param key Redis List 键
+     * @return 左端元素; 键不存在/空列表返回 null
+     * @throws com.choucj.aiaggregator.common.exception.RetryableException Redis 连接失败
+     * @throws com.choucj.aiaggregator.common.exception.NonRetryableException Redis 数据异常
+     */
+    String lPop(String key);
+
+    /**
+     * Story 3.4: 返回 Redis List 长度 (llen).
+     *
+     * <p>用于 BatchPublishingScheduler 在批量发布前读取队列深度, 控制 per-batch 循环次数.
+     *
+     * @param key Redis List 键
+     * @return List 长度; 键不存在返回 0
+     * @throws com.choucj.aiaggregator.common.exception.RetryableException Redis 连接失败
+     * @throws com.choucj.aiaggregator.common.exception.NonRetryableException Redis 数据异常
+     */
+    long listLength(String key);
+
+    /**
+     * Story 3.4: 返回 Redis List 指定区间的所有元素 (lRange).
+     *
+     * <p>{@code start=0, end=-1} 返回整个 List. 当前实现用于调试/监控与未来补跑场景, 批量消费侧用
+     * {@link #lPop} 逐条出队 (保证原子性).
+     *
+     * <p>本方法保留为接口扩展点 — Story 5.x 跨日补跑 / 死信检查场景可能需要按区间批量读取.
+     * List 元素以字符串存储; {@code type=String.class} 时原样返回, 其他类型按 JSON 反序列化.
+     *
+     * @param key   Redis List 键
+     * @param start 起始下标 (0-based, 负数表示从右端计数: -1 末尾)
+     * @param end   结束下标 (含, -1 表示到末尾)
+     * @param type  期望元素类型
+     * @param <T>   元素类型
+     * @return 区间元素列表 (键不存在返回空列表)
+     * @throws com.choucj.aiaggregator.common.exception.RetryableException Redis 连接失败
+     * @throws com.choucj.aiaggregator.common.exception.NonRetryableException Redis 数据异常 / JSON 反序列化失败
+     */
+    <T> List<T> lRange(String key, long start, long end, Class<T> type);
 }

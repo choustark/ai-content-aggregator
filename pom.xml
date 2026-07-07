@@ -31,6 +31,7 @@
 		<langchain4j.version>1.16.0</langchain4j.version>
 		<langchain4j.starter.version>1.16.0-beta26</langchain4j.starter.version>
 		<wx-java.version>4.6.0</wx-java.version>
+		<commonmark.version>0.22.0</commonmark.version>
 	</properties>
 	<dependencies>
 		<dependency>
@@ -94,6 +95,18 @@
 			<groupId>com.github.binarywang</groupId>
 			<artifactId>wx-java-mp-spring-boot-starter</artifactId>
 			<version>${wx-java.version}</version>
+		</dependency>
+
+		<!-- commonmark-java — Markdown → HTML 转换 (Story 3.2 ArticleToWxArticleConverter) -->
+		<dependency>
+			<groupId>org.commonmark</groupId>
+			<artifactId>commonmark</artifactId>
+			<version>${commonmark.version}</version>
+		</dependency>
+		<dependency>
+			<groupId>org.commonmark</groupId>
+			<artifactId>commonmark-ext-gfm-tables</artifactId>
+			<version>${commonmark.version}</version>
 		</dependency>
 
 	</dependencies>

@@ -74,5 +74,36 @@ public enum ErrorCode {
      *
      * <p>架构 delta: 见 architecture.md Story 2.1 Delta 段落.
      */
-    EXTERNAL_API_ERROR
+    EXTERNAL_API_ERROR,
+
+    /**
+     * 微信 API 通用失败(可重试或不可重试, 由抛出的异常类型决定).
+     *
+     * <p>Story 3.1 引入,用于包装微信公众号 API 的通用错误:
+     * <ul>
+     *   <li>{@code errcode=40164} — IP 白名单未配置,不可重试</li>
+     *   <li>{@code errcode=45009} — 接口调用次数达上限,不可重试</li>
+     *   <li>{@code errcode=-1} — 微信系统繁忙,可重试</li>
+     *   <li>未知 {@code errcode} — 保守按不可重试处理</li>
+     * </ul>
+     *
+     * <p>区分可重试语义由 {@code RetryableException} / {@code NonRetryableException} 承担.
+     */
+    WECHAT_API_ERROR,
+
+    /**
+     * 微信 access_token 过期或无效(可重试场景).
+     *
+     * <p>Story 3.1 引入,用于包装微信公众号 {@code errcode=40014}. stable access token 模式下
+     * 该错误通常可通过 WxJava 自动刷新或调用方重试恢复.
+     */
+    WECHAT_TOKEN_EXPIRED,
+
+    /**
+     * 微信凭据失效(不可重试场景).
+     *
+     * <p>Story 3.1 引入,用于包装微信公众号 {@code errcode=40001},常见触发条件为 AppSecret 错误、
+     * 测试号/正式号凭据混用或凭据被重置,需要人工修正配置.
+     */
+    WECHAT_INVALID_CREDENTIAL
 }

@@ -5,6 +5,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
 
@@ -67,6 +68,14 @@ class RedisRepositoryImplTest {
         repository.set("cache:rsshub:url1", "value1", ttl);
 
         verify(valueOps, times(1)).set("cache:rsshub:url1", "value1", ttl);
+    }
+
+    @Test
+    void shouldSetKeyValueKeepingTtlViaLowLevelCommand() {
+        repository.setKeepingTtl("article:tw-1:status", "PROCESSING");
+
+        verify(redisTemplate, times(1)).execute(any(RedisCallback.class));
+        verify(valueOps, never()).set(any(), any());
     }
 
     @Test

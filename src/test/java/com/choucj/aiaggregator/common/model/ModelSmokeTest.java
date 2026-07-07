@@ -135,7 +135,18 @@ class ModelSmokeTest {
 
         assertThat(response.getCode()).isEqualTo(ErrorCode.RETRYABLE_ERROR);
         assertThat(response.getMessage()).isEqualTo("Network timeout");
-        // Story 2.1 delta: 新增 EXTERNAL_API_ERROR → 6 → 7
-        assertThat(ErrorCode.values()).hasSize(7);
+        // Story 3.1 delta: 明确锁定枚举语义与顺序, 避免新增项时只报 size 变化而看不出语义漂移.
+        assertThat(ErrorCode.values())
+                .containsExactly(
+                        ErrorCode.RETRYABLE_ERROR,
+                        ErrorCode.NON_RETRYABLE_ERROR,
+                        ErrorCode.DEGRADATION_NEEDED,
+                        ErrorCode.INTERNAL_ERROR,
+                        ErrorCode.REDIS_CONNECTION_ERROR,
+                        ErrorCode.REDIS_DATA_ERROR,
+                        ErrorCode.EXTERNAL_API_ERROR,
+                        ErrorCode.WECHAT_API_ERROR,
+                        ErrorCode.WECHAT_TOKEN_EXPIRED,
+                        ErrorCode.WECHAT_INVALID_CREDENTIAL);
     }
 }

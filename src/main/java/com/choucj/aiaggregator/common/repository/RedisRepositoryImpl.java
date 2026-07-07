@@ -3,6 +3,8 @@ package com.choucj.aiaggregator.common.repository;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.InvalidDataAccessApiUsageException;
@@ -10,12 +12,17 @@ import org.springframework.dao.QueryTimeoutException;
 import org.springframework.data.redis.ClusterStateFailureException;
 import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.RedisSystemException;
+import org.springframework.data.redis.connection.RedisStringCommands;
+import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.types.Expiration;
 import org.springframework.data.redis.serializer.SerializationException;
 import org.springframework.stereotype.Repository;
 
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.function.Supplier;
 
 /**
@@ -70,6 +77,7 @@ public class RedisRepositoryImpl implements RedisRepository {
 
     private final StringRedisTemplate stringRedisTemplate;
     private final RedisTemplate<String, Object> objectRedisTemplate;
+    private final ObjectMapper objectMapper;
 
     @Override
     public void set(String key, String value) {
@@ -79,6 +87,16 @@ public class RedisRepositoryImpl implements RedisRepository {
     @Override
     public void set(String key, String value, Duration ttl) {
         runWithMapping(() -> stringRedisTemplate.opsForValue().set(key, value, ttl), key, "set(ttl)");
+    }
+
+    @Override
+    public void setKeepingTtl(String key, String value) {
+        runWithMapping(() -> stringRedisTemplate.execute((RedisCallback<Boolean>) connection ->
+                connection.stringCommands().set(
+                        key.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                        value.getBytes(java.nio.charset.StandardCharsets.UTF_8),
+                        Expiration.keepTtl(),
+                        RedisStringCommands.SetOption.UPSERT)), key, "set(keepTtl)");
     }
 
     @Override
@@ -120,6 +138,47 @@ public class RedisRepositoryImpl implements RedisRepository {
                             key, type.getName(), raw.getClass().getName()));
         }
         return type.cast(raw);
+    }
+
+    @Override
+    public void rPush(String key, String value) {
+        runWithMapping(() -> stringRedisTemplate.opsForList().rightPush(key, value), key, "rPush");
+    }
+
+    @Override
+    public String lPop(String key) {
+        return supplyWithMapping(() -> stringRedisTemplate.opsForList().leftPop(key), key, "lPop");
+    }
+
+    @Override
+    public long listLength(String key) {
+        Long size = supplyWithMapping(() -> stringRedisTemplate.opsForList().size(key), key, "listLength");
+        return size == null ? 0L : size;
+    }
+
+    @Override
+    public <T> List<T> lRange(String key, long start, long end, Class<T> type) {
+        List<String> values = supplyWithMapping(
+                () -> stringRedisTemplate.opsForList().range(key, start, end), key, "lRange");
+        if (values == null || values.isEmpty()) {
+            return List.of();
+        }
+        List<T> result = new ArrayList<>(values.size());
+        for (String value : values) {
+            if (type == String.class) {
+                result.add(type.cast(value));
+                continue;
+            }
+            try {
+                result.add(objectMapper.readValue(value, type));
+            } catch (JsonProcessingException e) {
+                throw new NonRetryableException(ErrorCode.REDIS_DATA_ERROR,
+                        "lRange 反序列化失败(Redis 数据异常): key=" + key
+                                + ", expected=" + type.getName(),
+                        e);
+            }
+        }
+        return result;
     }
 
     /**
