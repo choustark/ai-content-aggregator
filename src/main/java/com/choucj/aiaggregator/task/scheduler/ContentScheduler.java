@@ -2,6 +2,7 @@ package com.choucj.aiaggregator.task.scheduler;
 
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
+import com.choucj.aiaggregator.processor.GitHubProcessor;
 import com.choucj.aiaggregator.processor.TwitterProcessor;
 import com.choucj.aiaggregator.processor.config.ProcessorProperties;
 import com.choucj.aiaggregator.task.queue.TaskQueue;
@@ -15,6 +16,7 @@ import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -56,12 +58,14 @@ public class ContentScheduler {
     private final TaskQueue taskQueue;
     private final TaskRecoveryRunner recoveryRunner;
     private final TwitterProcessor twitterProcessor;
+    private final Optional<GitHubProcessor> githubProcessorOptional;
     private final ProcessorProperties processorProperties;
     private final boolean runOnStartup;
 
     /**
      * 构造器注入 {@code schedule.run-on-startup}(CR W2 修复) +
      * {@link TwitterProcessor} (Story 2.6 Pipeline Integration) +
+     * {@link Optional<GitHubProcessor>} (Story 4.4 AC-7 — github: 路由, 测试/未来拆分时保留容错) +
      * {@link ProcessorProperties} (Patch-3 修复 — 配置驱动 taskId 前缀路由).
      *
      * <p>不用 {@code @RequiredArgsConstructor} 是因为 boolean 配置项需要
@@ -69,20 +73,28 @@ public class ContentScheduler {
      * 其他依赖({@link TaskQueue} / {@link TaskRecoveryRunner} / {@link TwitterProcessor} /
      * {@link ProcessorProperties}) 仍走 Spring 自动注入.
      *
-     * @param taskQueue            任务队列
-     * @param recoveryRunner       断点恢复 Bean
-     * @param twitterProcessor     Twitter 处理流水线 (Story 2.6, 按 taskId 前缀路由)
-     * @param processorProperties  Processor 配置 (Story 2.6 Patch-3, 提供 task-id-prefix 路由判断)
-     * @param runOnStartup         启动时是否执行首次处理, 默认 true (来自 {@code schedule.run-on-startup})
+     * <p><b>Story 4.4 github: 容错 (AC-7):</b> {@link GitHubProcessor} 常驻注册并在
+     * {@code process()} 内处理 {@code features.github.enabled} + {@code feature-flags.github.enabled} +
+     * {@code github.enabled} 三开关 disabled 0-summary 契约. 此处保留 {@link Optional<T>} 注入,
+     * 让测试或未来拆分 processor Bean 时 ContentScheduler 启动不受影响.
+     *
+     * @param taskQueue                任务队列
+     * @param recoveryRunner           断点恢复 Bean
+     * @param twitterProcessor         Twitter 处理流水线 (Story 2.6, 按 taskId 前缀路由)
+     * @param githubProcessorOptional  GitHub 处理流水线 (Story 4.4, 常规运行常驻注册; 测试/未来拆分时可为空)
+     * @param processorProperties      Processor 配置 (Story 2.6 Patch-3, 提供 task-id-prefix 路由判断)
+     * @param runOnStartup             启动时是否执行首次处理, 默认 true (来自 {@code schedule.run-on-startup})
      */
     public ContentScheduler(TaskQueue taskQueue,
                             TaskRecoveryRunner recoveryRunner,
                             TwitterProcessor twitterProcessor,
+                            Optional<GitHubProcessor> githubProcessorOptional,
                             ProcessorProperties processorProperties,
                             @Value("${schedule.run-on-startup:true}") boolean runOnStartup) {
         this.taskQueue = taskQueue;
         this.recoveryRunner = recoveryRunner;
         this.twitterProcessor = twitterProcessor;
+        this.githubProcessorOptional = githubProcessorOptional;
         this.processorProperties = processorProperties;
         this.runOnStartup = runOnStartup;
     }
@@ -171,21 +183,24 @@ public class ContentScheduler {
     }
 
     /**
-     * 处理单个任务 — 按 taskId 前缀路由到具体业务处理器 (Story 2.6 实施).
+     * 处理单个任务 — 按 taskId 前缀路由到具体业务处理器 (Story 2.6 实施 + Story 4.4 github: 扩展).
      *
-     * <p><b>路由策略 (Patch-3 修复 — 配置驱动):</b>
+     * <p><b>路由策略 (Patch-3 配置驱动 + Story 4.4 github: 路由):</b>
      * <ul>
      *   <li>{@code processorProperties.getTaskIdPrefix() + ":"} 前缀 →
      *       {@link TwitterProcessor#process()} 编排完整 Pipeline
      *       (fetch → filter chain → rewrite → publish)</li>
-     *   <li>其他前缀 (未来 {@code "github:"} / {@code "rss:"}) → 记 {@code log.warn} 跳过,
-     *       前向兼容 Epic 4 GitHub 集成</li>
+     *   <li>{@code "github:"} 前缀 → {@link GitHubProcessor#process()} (Story 4.4 AC-7).
+     *       常规 disabled 场景由 processor 内部输出 0-summary; 若 Bean 真未注册则记 warn 日志跳过, 不抛异常</li>
+     *   <li>其他前缀 (未来 {@code "rss:"} / {@code "blog:"}) → 记 {@code log.warn} 跳过,
+     *       前向兼容 Epic 5+ 扩展</li>
      * </ul>
      *
      * <p><b>路由失败异常策略 (沿用 {@link #processQueueOnce()} 分类):</b>
-     * {@link TwitterProcessor#process()} 内部三层防御已捕获所有异常不会抛出,
-     * 但若因 Bean 装配问题抛出, 或 {@code processor.fault-isolation-enabled=false} 调试模式
-     * 主动透传 per-article 异常, 沿用 processQueueOnce catch Retryable/NonRetryable 策略
+     * {@link TwitterProcessor#process()} / {@link GitHubProcessor#process()} 内部三层防御
+     * 已捕获所有异常不会抛出, 但若因 Bean 装配问题抛出, 或
+     * {@code processor.fault-isolation-enabled=false} 调试模式主动透传 per-article 异常,
+     * 沿用 processQueueOnce catch Retryable/NonRetryable 策略
      * (Retryable 留 processing 集合待重启重入队, NonRetryable complete 移除避免阻塞).
      *
      * <p><b>Patch-3 修复动机:</b>
@@ -194,7 +209,13 @@ public class ContentScheduler {
      * 视为"未知前缀"跳过, 违背 AC-6 与配置注释中"按 task-id-prefix 路由"的契约.
      * 注入 {@link ProcessorProperties} 让配置真正驱动路由行为.
      *
-     * <p><b>Epic 4 扩展点:</b>
+     * <p><b>Story 4.4 github: 前缀硬编码决策 (Task 4.4):</b> GitHubProcessor 暂不实现
+     * 独立的 {@code processor.github.task-id-prefix} 配置 — github: 前缀硬编码于本方法,
+     * 与 TwitterProcessor 的配置驱动 prefix 解耦. 触发 github 处理仅通过手动
+     * {@code redis-cli RPUSH task:queue "github:run"} 或测试用例, 不实现自动 enqueue
+     * (避免与 TwitterProcessor 共享 cron 时段冲突, 留 Epic 5 按需扩展).
+     *
+     * <p><b>Epic 5+ 扩展点:</b>
      * 引入 {@code Map<String, Processor>} 或 Spring 自动注入 {@code List<Processor>} +
      * {@code @Qualifier} 替换 if-else, 支持多 Processor 路由.
      */
@@ -209,7 +230,15 @@ public class ContentScheduler {
             twitterProcessor.process();
             return;
         }
-        log.warn("未知 taskId 前缀, 跳过 (Epic 4 github: 前缀待扩展): taskId={}, expectedPrefix={}",
+        if (taskId.startsWith("github:")) {
+            if (githubProcessorOptional.isPresent()) {
+                githubProcessorOptional.get().process();
+            } else {
+                log.warn("github: 任务到达但 GitHubProcessor 未注册 (github.enabled=false), 跳过: taskId={}", taskId);
+            }
+            return;
+        }
+        log.warn("未知 taskId 前缀, 跳过 (Epic 5+ 其他前缀待扩展): taskId={}, expectedPrefix={}",
                 taskId, prefix);
     }
 

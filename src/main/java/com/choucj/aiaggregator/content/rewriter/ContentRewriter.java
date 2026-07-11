@@ -1,6 +1,9 @@
 package com.choucj.aiaggregator.content.rewriter;
 
+import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.model.Article;
+import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.source.github.model.GitHubRepo;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
 
 /**
@@ -13,10 +16,13 @@ import com.choucj.aiaggregator.source.twitter.model.Tweet;
  *   <li>{@code RagEnhancedRewriter} — Story 5.3, RAG 增强(检索相关知识后改写)</li>
  * </ul>
  *
- * <p><b>签名设计:</b>
- * 当前 PRD 只有 Twitter → Article 一条改写路径. 若 Story 4.4 GitHub 集成时需要直接改写
- * {@code GitHubRepo}, 可在此接口添加 {@code default Article rewrite(GitHubRepo repo)}
- * 方法并默认抛出 {@code UnsupportedOperationException}, 由需要的实现类覆盖.
+ * <p><b>签名设计 (Story 4.4 扩展):</b>
+ * 原始 PRD 只有 Twitter → Article 一条改写路径. Story 4.4 GitHub Pipeline Integration
+ * 需要直接改写 {@link GitHubRepo} → {@link Article}, 在此接口添加
+ * {@code default Article rewrite(GitHubRepo repo)} 方法并默认抛
+ * {@link NonRetryableException}, 由 {@code SingleModelRewriter} 覆盖. 默认抛
+ * {@code NonRetryableException} (非 {@code UnsupportedOperationException}) 保持项目异常
+ * 分类法一致 — 调用方 (GitHubProcessor) per-article catch(Exception) 仍可隔离单条失败 (L2 防御).
  */
 public interface ContentRewriter {
 
@@ -35,4 +41,28 @@ public interface ContentRewriter {
      * @return 改写后的 Article(包含 UUID / 标题 / 正文 / digest / source / 时间戳)
      */
     Article rewrite(Tweet tweet);
+
+    /**
+     * 将 GitHub 仓库改写为可发布的文章 (Story 4.4 GitHub Pipeline 集成).
+     *
+     * <p>默认实现抛 {@link NonRetryableException}, 提示实现类未覆盖此路径.
+     * {@code SingleModelRewriter} 覆盖此方法消费 {@link GitHubRepo}:
+     * 取 {@code readmeContent}(Story 4.2) + {@code valueSummary}(Story 4.3) 作为源文本,
+     * 经 LLM 改写为中文微信公众号风格文章, {@code Article.id} 形如 {@code gh-{owner}-{repo}}
+     * (B8 确定性 ID).
+     *
+     * <p><b>D3 警示:</b> 调用方 (GitHubProcessor) 需 null-check {@code repo.valueScore}
+     * (Double nullable) 后赋值给 {@code Article.innovationScore} (int primitive).
+     * 本方法内部已通过 {@code SingleModelRewriter#convertInnovationScore} 空安全转换.
+     *
+     * @param repo 源 GitHub 仓库(不应为 {@code null}, 需含 {@code fullName})
+     * @return 改写后的 Article({@code id=gh-{owner}-{repo}}, {@code source="GitHub Repo:owner/repo"})
+     * @throws NonRetryableException 实现类未覆盖 (默认路径) 或 repo 非法
+     */
+    default Article rewrite(GitHubRepo repo) {
+        throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                "ContentRewriter.rewrite(GitHubRepo) 未实现: "
+                        + (repo == null ? "(repo=null)" : repo.getFullName()));
+    }
 }
+

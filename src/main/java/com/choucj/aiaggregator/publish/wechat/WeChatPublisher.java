@@ -59,8 +59,14 @@ public class WeChatPublisher {
     /** 日志/异常中 errmsg / rootMessage 截断长度 (codepoint, R3-1 ≤ max, N4 防泄漏). */
     private static final int LOG_ERROR_MSG_MAX_CODEPOINTS = 200;
 
-    /** Story 3.5 B8: Article.id 必须使用确定性 tw-{tweetId} 格式. */
-    private static final Pattern ARTICLE_ID_PATTERN = Pattern.compile("tw-[A-Za-z0-9_-]+");
+    /**
+     * Story 3.5 B8 + Story 4.4: Article.id 确定性前缀格式 — {@code tw-{tweetId}} (Twitter) /
+     * {@code gh-{owner}-{repo}} (GitHub). 字符集 {@code [A-Za-z0-9_-]+} 两者兼容
+     * (GitHubProcessor.buildDeterministicArticleId 校验 owner/repo 字符集同为
+     * {@code [A-Za-z0-9_-]+}, 与本正则一致 — GitHub 实际允许 {@code .}, 但项目收窄为更严格的
+     * URL-safe 字符集, 简化 Redis key / Article.id 治理).
+     */
+    private static final Pattern ARTICLE_ID_PATTERN = Pattern.compile("(tw|gh)-[A-Za-z0-9_-]+");
 
     private final WxMpService wxMpService;
     private final ArticleToWxArticleConverter converter;
@@ -172,7 +178,7 @@ public class WeChatPublisher {
         }
         if (!ARTICLE_ID_PATTERN.matcher(articleId).matches()) {
             throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
-                    "Article.id 非法 (必须匹配 tw-[A-Za-z0-9_-]+): " + articleId);
+                    "Article.id 非法 (必须匹配 (tw|gh)-[A-Za-z0-9_-]+): " + articleId);
         }
         return articleId;
     }

@@ -97,11 +97,11 @@ class TwitterProcessorTest {
         when(twitterSource.fetch()).thenReturn(List.of(t1, t2));
         when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1, t2));
         when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1, t2));
-        when(contentRewriter.rewrite(any())).thenReturn(article("art-1")).thenReturn(article("art-2"));
+        when(contentRewriter.rewrite(any(Tweet.class))).thenReturn(article("art-1")).thenReturn(article("art-2"));
 
         processor.process();
 
-        verify(contentRewriter, times(2)).rewrite(any());
+        verify(contentRewriter, times(2)).rewrite(any(Tweet.class));
         verify(contentPublisher, times(2)).publish(any());
     }
 
@@ -171,7 +171,7 @@ class TwitterProcessorTest {
         when(twitterSource.fetch()).thenReturn(List.of(t1));
         when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1));
         when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1));
-        when(contentRewriter.rewrite(any())).thenReturn(article("art-1"));
+        when(contentRewriter.rewrite(any(Tweet.class))).thenReturn(article("art-1"));
         doThrow(new IllegalStateException("未预期异常")).when(contentPublisher).publish(any());
 
         processor.process();
@@ -189,7 +189,7 @@ class TwitterProcessorTest {
         // L1 兜底: fetch 异常被吞, summary 正常输出
         assertThat(output.getOut()).contains("Pipeline 完成: 发现=0");
         assertThat(output.getOut()).contains("TwitterSource.fetch 失败");
-        verify(contentRewriter, never()).rewrite(any());
+        verify(contentRewriter, never()).rewrite(any(Tweet.class));
     }
 
     @Test
@@ -200,7 +200,7 @@ class TwitterProcessorTest {
         processor.process();
 
         assertThat(output.getOut()).contains("Pipeline 完成: 发现=0");
-        verify(contentRewriter, never()).rewrite(any());
+        verify(contentRewriter, never()).rewrite(any(Tweet.class));
     }
 
     @Test
@@ -211,12 +211,12 @@ class TwitterProcessorTest {
         when(commentFilterDelegate.filter(any()))
                 .thenThrow(new RetryableException(ErrorCode.EXTERNAL_API_ERROR, "filter 失败"));
         when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1));
-        when(contentRewriter.rewrite(any())).thenReturn(article("art-1"));
+        when(contentRewriter.rewrite(any(Tweet.class))).thenReturn(article("art-1"));
 
         processor.process();
 
         // 阶段降级后仍走到 rewrite — rewriteSuccess > 0
-        verify(contentRewriter, times(1)).rewrite(any());
+        verify(contentRewriter, times(1)).rewrite(any(Tweet.class));
         assertThat(output.getOut()).contains("评论筛选降级: 输入=1, 透传=1");
         assertThat(output.getOut()).contains("Pipeline 完成: 发现=1, 评论筛选通过=0");
     }
@@ -227,11 +227,11 @@ class TwitterProcessorTest {
         when(twitterSource.fetch()).thenReturn(List.of(t1));
         when(commentFilterDelegate.filter(any())).thenReturn(null);
         when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1));
-        when(contentRewriter.rewrite(any())).thenReturn(article("art-1"));
+        when(contentRewriter.rewrite(any(Tweet.class))).thenReturn(article("art-1"));
 
         processor.process();
 
-        verify(contentRewriter, times(1)).rewrite(any());
+        verify(contentRewriter, times(1)).rewrite(any(Tweet.class));
         assertThat(output.getOut()).contains("筛选阶段返回 null");
         assertThat(output.getOut()).contains("评论筛选降级: 输入=1, 透传=1");
     }
@@ -250,7 +250,7 @@ class TwitterProcessorTest {
         when(twitterSource.fetch()).thenReturn(List.of(t1, t2));
         when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1, t2));
         when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1, t2));
-        when(contentRewriter.rewrite(any())).thenReturn(article("art-1"));
+        when(contentRewriter.rewrite(any(Tweet.class))).thenReturn(article("art-1"));
 
         processor.process();
 
@@ -267,7 +267,7 @@ class TwitterProcessorTest {
         when(twitterSource.fetch()).thenReturn(List.of(t1));
         when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1));
         when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1));
-        when(contentRewriter.rewrite(any()))
+        when(contentRewriter.rewrite(any(Tweet.class)))
                 .thenThrow(new RetryableException(ErrorCode.EXTERNAL_API_ERROR, "失败"));
 
         processor.process();
@@ -309,7 +309,7 @@ class TwitterProcessorTest {
         when(twitterSource.fetch()).thenReturn(List.of(t1));
         when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1));
         when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1));
-        when(contentRewriter.rewrite(any()))
+        when(contentRewriter.rewrite(any(Tweet.class)))
                 .thenThrow(new RetryableException(ErrorCode.EXTERNAL_API_ERROR, "改写失败"));
 
         properties.setFaultIsolationEnabled(false);
@@ -330,7 +330,7 @@ class TwitterProcessorTest {
 
         assertThat(output.getOut()).contains(
                 "Pipeline 完成: 发现=0, 评论筛选通过=0, 创新筛选通过=0, 改写成功=0, 归档成功=0, 失败=0");
-        verify(contentRewriter, never()).rewrite(any());
+        verify(contentRewriter, never()).rewrite(any(Tweet.class));
     }
 
     @Test
@@ -343,7 +343,7 @@ class TwitterProcessorTest {
 
         // CommentFilter 全过滤掉, innovationFilter 仍被调用 (空 list), 但 rewrite 阶段循环 0 次
         assertThat(output.getOut()).contains("Pipeline 完成: 发现=1, 评论筛选通过=0");
-        verify(contentRewriter, never()).rewrite(any());
+        verify(contentRewriter, never()).rewrite(any(Tweet.class));
     }
 
     @Test
@@ -356,7 +356,7 @@ class TwitterProcessorTest {
         when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1, t2));
         // InnovationFilter 剔除 t2
         when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1));
-        when(contentRewriter.rewrite(any())).thenReturn(article("art-1"));
+        when(contentRewriter.rewrite(any(Tweet.class))).thenReturn(article("art-1"));
 
         processor.process();
 
@@ -373,7 +373,7 @@ class TwitterProcessorTest {
         when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1));
         when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1));
         // 业务侧异常 message 是结构化错误码, 不携带正文 (N4 规范)
-        when(contentRewriter.rewrite(any()))
+        when(contentRewriter.rewrite(any(Tweet.class)))
                 .thenThrow(new RetryableException(ErrorCode.EXTERNAL_API_ERROR,
                         "LLM 调用失败"));
 
@@ -404,7 +404,7 @@ class TwitterProcessorTest {
         when(twitterSource.fetch()).thenReturn(List.of(t1));
         when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1));
         when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1));
-        when(contentRewriter.rewrite(any())).thenReturn(article("art-1"));
+        when(contentRewriter.rewrite(any(Tweet.class))).thenReturn(article("art-1"));
 
         processor.process();
 
@@ -439,7 +439,7 @@ class TwitterProcessorTest {
         processor.process();
 
         verify(articleStatusService, never()).markPending(any());
-        verify(contentRewriter, never()).rewrite(any());
+        verify(contentRewriter, never()).rewrite(any(Tweet.class));
         verify(contentPublisher, never()).publish(any());
     }
 
@@ -460,7 +460,7 @@ class TwitterProcessorTest {
         when(twitterSource.fetch()).thenReturn(List.of(t1));
         when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1));
         when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1));
-        when(contentRewriter.rewrite(any())).thenReturn(article("art-1"));
+        when(contentRewriter.rewrite(any(Tweet.class))).thenReturn(article("art-1"));
         doThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "Redis 连接失败"))
                 .when(redisRepository).set(eq("article:tw-id-1:status"),
                         eq(ArticleStatus.PENDING.name()), eq(java.time.Duration.ofDays(30)));

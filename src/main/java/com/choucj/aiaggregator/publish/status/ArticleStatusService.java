@@ -49,8 +49,12 @@ public class ArticleStatusService {
     /** Story 3.5 §5.5: PENDING 状态 TTL = 30 天, 覆盖出差 + 周末审核场景. */
     private static final Duration PENDING_TTL = Duration.ofDays(30);
 
-    /** B8: Article.id 由 Twitter tweetId 确定性生成, 形如 tw-{tweetId}. */
-    private static final Pattern ARTICLE_ID_PATTERN = Pattern.compile("tw-[A-Za-z0-9_-]+");
+    /**
+     * Story 3.5 B8 + Story 4.4: Article.id 确定性前缀格式 — {@code tw-{tweetId}} (Twitter) /
+     * {@code gh-{owner}-{repo}} (GitHub). 字符集 {@code [A-Za-z0-9_-]+} 两者兼容
+     * (同 {@code WeChatPublisher.ARTICLE_ID_PATTERN}).
+     */
+    private static final Pattern ARTICLE_ID_PATTERN = Pattern.compile("(tw|gh)-[A-Za-z0-9_-]+");
 
     private final RedisRepository redisRepository;
 
@@ -136,7 +140,7 @@ public class ArticleStatusService {
         }
         if (!ARTICLE_ID_PATTERN.matcher(articleId).matches()) {
             throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
-                    "非法 articleId (必须匹配 tw-[A-Za-z0-9_-]+): " + articleId);
+                    "非法 articleId (必须匹配 (tw|gh)-[A-Za-z0-9_-]+): " + articleId);
         }
     }
 

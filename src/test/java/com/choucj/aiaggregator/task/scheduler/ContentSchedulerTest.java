@@ -2,6 +2,7 @@ package com.choucj.aiaggregator.task.scheduler;
 
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.processor.GitHubProcessor;
 import com.choucj.aiaggregator.processor.TwitterProcessor;
 import com.choucj.aiaggregator.processor.config.ProcessorProperties;
 import com.choucj.aiaggregator.task.queue.TaskQueue;
@@ -14,6 +15,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 
+import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.Set;
 
@@ -57,6 +59,9 @@ class ContentSchedulerTest {
     private TwitterProcessor twitterProcessor;
 
     @Mock
+    private GitHubProcessor githubProcessor;
+
+    @Mock
     private ProcessorProperties processorProperties;
 
     private ContentScheduler scheduler;
@@ -68,7 +73,7 @@ class ContentSchedulerTest {
         lenient().when(taskQueue.getProcessingTasks()).thenReturn(Set.of());
         lenient().when(taskQueue.isQueued("twitter:run")).thenReturn(false);
         scheduler = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
-                processorProperties, true);
+                Optional.of(githubProcessor), processorProperties, true);
     }
 
     @Test
@@ -149,7 +154,7 @@ class ContentSchedulerTest {
     @Test
     void shouldSkipStartupProcessingWhenRunOnStartupIsFalse() {
         ContentScheduler disabled = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
-                processorProperties, false);
+                Optional.of(githubProcessor), processorProperties, false);
 
         disabled.onStartup();
 
@@ -162,7 +167,7 @@ class ContentSchedulerTest {
     void shouldStillHonorCronWhenRunOnStartupIsFalse() {
         // run-on-startup=false 不影响 cron 触发的 processContent
         ContentScheduler disabled = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
-                processorProperties, false);
+                Optional.of(githubProcessor), processorProperties, false);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
         disabled.processContent();
@@ -244,7 +249,7 @@ class ContentSchedulerTest {
     void shouldRouteTaskByConfiguredPrefix() {
         when(processorProperties.getTaskIdPrefix()).thenReturn("twitter-stage");
         ContentScheduler staged = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
-                processorProperties, true);
+                Optional.of(githubProcessor), processorProperties, true);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
                 .thenReturn("twitter-stage:run")
                 .thenReturn(null);
@@ -263,7 +268,7 @@ class ContentSchedulerTest {
     void shouldTreatOldPrefixAsUnknownAfterConfigChange(CapturedOutput output) {
         when(processorProperties.getTaskIdPrefix()).thenReturn("twitter-stage");
         ContentScheduler staged = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
-                processorProperties, true);
+                Optional.of(githubProcessor), processorProperties, true);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
                 .thenReturn("twitter:run")
                 .thenReturn(null);
@@ -272,6 +277,40 @@ class ContentSchedulerTest {
 
         verify(twitterProcessor, never()).process();
         assertThat(output.getOut()).contains("未知 taskId 前缀");
+    }
+
+    // ============ Story 4.4 Task 4.5: github: 路由 (AC-7) ============
+
+    @Test
+    void shouldRouteGithubTaskToGitHubProcessor() {
+        // AC-7: github: 前缀 → GitHubProcessor.process(), 不调 TwitterProcessor
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("github:run")
+                .thenReturn(null);
+
+        scheduler.processContent();
+
+        verify(githubProcessor).process();
+        verify(twitterProcessor, never()).process();
+        verify(taskQueue).complete("github:run");
+    }
+
+    @Test
+    void shouldWarnAndSkipGithubTaskWhenProcessorNotRegistered(CapturedOutput output) {
+        // AC-7: github.enabled=false → GitHubProcessor Bean 未注册, Optional.empty
+        // github: 任务走 warn 日志跳过, 不抛异常 (仍 complete 避免队列阻塞)
+        ContentScheduler withoutGithub = new ContentScheduler(taskQueue, recoveryRunner,
+                twitterProcessor, Optional.empty(), processorProperties, true);
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("github:run")
+                .thenReturn(null);
+
+        withoutGithub.processContent();
+
+        verify(twitterProcessor, never()).process();
+        verify(taskQueue).complete("github:run");
+        assertThat(output.getOut()).contains("GitHubProcessor 未注册");
+        assertThat(output.getOut()).contains("taskId=github:run");
     }
 
     @Test

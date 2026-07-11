@@ -145,4 +145,34 @@ public final class RedisKeys {
     public static String articleStatus(String articleId) {
         return "article:" + articleId + ":status";
     }
+
+    /**
+     * Story 4.1: GitHub Trending 仓库列表缓存键 (Redis JSON, List&lt;GitHubRepo&gt;).
+     *
+     * <p>键格式: {@code "github:trending:{language}:{lookback-days}"}
+     * (e.g., {@code "github:trending:java:7"}).
+     * 由 {@link com.choucj.aiaggregator.source.github.GitHubSource#fetch()} 写入,
+     * 值为 {@code List<GitHubRepo>} 的 JSON 序列化, TTL 1 小时.
+     *
+     * <p><b>键命名空间分离 (spike-4.1 §2.4):</b>
+     * 与 twitter:* (Story 2.2a) / article:* (Story 3.5) / publish:* (Story 3.4) /
+     * cost:* (Story 2.4) / task:* (Story 1.6) 命名空间不冲突.
+     *
+     * <p><b>TTL 决策:</b> 1 小时 — Trending 抓取 cron 每小时 1 次 (Story 4.4 实施),
+     * 1h TTL 保证开发期间多次重启不触发实际 GitHub API 调用, 节省 Search API 配额
+     * (30/min 认证, spike-4.1 §2.3 实测).
+     *
+     * @param language     主语言 (如 {@code "java"} / {@code "python"}, 不为 null/blank)
+     * @param lookbackDays 回溯天数 (1-90, spike-4.1 §2.1 默认 7)
+     * @return {@code "github:trending:{language}:{lookback-days}"} 键字符串
+     */
+    public static String githubTrending(String language, int lookbackDays) {
+        if (language == null || language.isBlank()) {
+            throw new IllegalArgumentException("language must not be blank");
+        }
+        if (lookbackDays < 1) {
+            throw new IllegalArgumentException("lookbackDays must be >= 1");
+        }
+        return "github:trending:" + language + ":" + lookbackDays;
+    }
 }

@@ -7,6 +7,7 @@ import com.choucj.aiaggregator.common.model.Article;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.content.rewriter.config.RewriterProperties;
 import com.choucj.aiaggregator.monitoring.TokenUsageTracker;
+import com.choucj.aiaggregator.source.github.model.GitHubRepo;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -89,6 +90,31 @@ public class SingleModelRewriter implements ContentRewriter {
             </content>
             """;
 
+    /**
+     * Story 4.4 — GitHub 仓库 User Prompt 模板.
+     *
+     * <p>占位符 {@code {{REPO_FULL_NAME}}} / {@code {{DESCRIPTION}}} / {{LANGUAGE}} /
+     * {{STARS}} / {{FORKS}} / {{VALUE_SUMMARY}} / {{README}} 由 {@link String#replace} 渲染
+     * (B2 模式, 防 README / description 含 {@code %} 抛 {@link IllegalFormatException}).
+     * README 用 {@code <content>} XML 标签包裹 (W4 模式, 缓解 prompt 注入).
+     */
+    static final String GITHUB_USER_PROMPT_TEMPLATE = """
+            请基于以下 GitHub 仓库信息撰写一篇高质量的中文微信公众号文章:
+
+            仓库元数据:
+            - 全名: {{REPO_FULL_NAME}}
+            - 描述: {{DESCRIPTION}}
+            - 主语言: {{LANGUAGE}}
+            - Stars: {{STARS}}
+            - Forks: {{FORKS}}
+            - 价值摘要: {{VALUE_SUMMARY}}
+
+            README 内容:
+            <content>
+            {{README}}
+            </content>
+            """;
+
     /** digest 字段最大长度 (Article 模型约束, 见 Article.digest Javadoc). */
     private static final int DIGEST_MAX_LENGTH = 120;
 
@@ -154,6 +180,130 @@ public class SingleModelRewriter implements ContentRewriter {
                 tweet.getId(), truncateForLog(article.getTitle(), LOG_TITLE_MAX_LENGTH),
                 estimatedTokens, elapsed);
         return article;
+    }
+
+    /**
+     * Story 4.4 — 将 GitHub 仓库改写为微信公众号文章 (复用 callWithRetry / buildArticle 解析逻辑).
+     *
+     * <p>取 {@code repo.readmeContent} (Story 4.2) + 元数据 + {@code valueSummary} (Story 4.3) 作为源,
+     * 调 LLM 生成 Markdown 正文. {@code Article.id} 形如 {@code gh-{owner}-{repo}} (owner/repo
+     * 内 {@code /} 替换为 {@code -}, 与 {@code tw-{tweetId}} 字符集兼容, 不需扩展 ARTICLE_ID_PATTERN 字符集).
+     *
+     * <p><b>D3 nullable 处理:</b> {@code repo.valueScore} (Double) / {@code valueSummary} (String)
+     * nullable. {@code valueScore} 经 {@link #convertInnovationScore} 空安全转 {@code int};
+     * {@code valueSummary} 缺失时降级为 {@code "(无摘要)"} 提示串. {@code readmeContent} 缺失时
+     * 走元数据评分分支 (LLM 仅依据 description/stars 等评分, 与 GitHubValueAnalyzer.buildPrompt 同款).
+     *
+     * <p><b>模式引用:</b> B2 ({@code String.replace} 占位符) + N2 (code point 截断 README) +
+     * W4 ({@code <content>} 标签) + W11 (业务标识日志 repoFullName + 标题 + token + 耗时) +
+     * N4 (异常 message 不含 README 正文).
+     *
+     * @param repo 源 GitHub 仓库 (非 null, {@code fullName} 非 blank)
+     */
+    @Override
+    public Article rewrite(GitHubRepo repo) {
+        if (repo == null || repo.getFullName() == null || repo.getFullName().isBlank()) {
+            throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                    "rewrite(GitHubRepo) 拒绝: repo 或 repo.fullName 为 null/blank");
+        }
+        // 校验 fullName 是 owner/repo 格式 (单 `/` 分隔, 两段均非空)
+        String normalizedFullName = validateAndNormalizeFullName(repo.getFullName());
+
+        String readmeRaw = repo.getReadmeContent();
+        String readmeSafe = (readmeRaw == null || readmeRaw.isBlank())
+                ? "(README 不可用, 仅依据元数据评分)"
+                : truncateByCodePoints(readmeRaw, properties.getContentMaxCodePoints());
+        String descSafe = (repo.getDescription() == null || repo.getDescription().isBlank())
+                ? "(无描述)" : repo.getDescription();
+        String langSafe = (repo.getLanguage() == null || repo.getLanguage().isBlank())
+                ? "(未指定)" : repo.getLanguage();
+        String summarySafe = (repo.getValueSummary() == null || repo.getValueSummary().isBlank())
+                ? "(无摘要)" : repo.getValueSummary();
+
+        // B2: 用 String.replace 占位符替换, 不用 String.format (README/description 含 % 会抛 IllegalFormatException)
+        String userPrompt = GITHUB_USER_PROMPT_TEMPLATE
+                .replace("{{REPO_FULL_NAME}}", repo.getFullName())
+                .replace("{{DESCRIPTION}}", descSafe)
+                .replace("{{LANGUAGE}}", langSafe)
+                .replace("{{STARS}}", String.valueOf(repo.getStars()))
+                .replace("{{FORKS}}", String.valueOf(repo.getForks()))
+                .replace("{{VALUE_SUMMARY}}", summarySafe)
+                .replace("{{README}}", readmeSafe);
+
+        long start = System.currentTimeMillis();
+        // 复用 callWithRetry — 第二参数作为日志业务标识 (tweetId 槽位复用为 repoFullName)
+        String response = callWithRetry(userPrompt, repo.getFullName());
+        long elapsed = System.currentTimeMillis() - start;
+
+        Article article = buildGitHubArticle(repo, response, normalizedFullName);
+
+        String fullPrompt = SYSTEM_PROMPT + userPrompt;
+        int estimatedTokens = TokenUsageTracker.estimateTokens(fullPrompt, response);
+        try {
+            tokenUsageTracker.track(fullPrompt, response, LocalDate.now());
+        } catch (RuntimeException te) {
+            log.warn("Token 追踪异常, 跳过: repoFullName={}, error={}",
+                    repo.getFullName(), truncateForLog(getRootMessage(te), LOG_MSG_MAX_LENGTH));
+        }
+
+        log.info("GitHub 改写成功: repoFullName={}, 标题=\"{}\", 估算 token={}, 耗时={}ms",
+                repo.getFullName(), truncateForLog(article.getTitle(), LOG_TITLE_MAX_LENGTH),
+                estimatedTokens, elapsed);
+        return article;
+    }
+
+    /**
+     * Story 4.4 — 校验 GitHub {@code owner/repo} 格式, 返回 Article.id 用的归一化形式
+     * ({@code /} 替换为 {@code -}, e.g. {@code octocat/Hello-World} → {@code octocat-Hello-World}).
+     *
+     * <p>校验规则: 必须含且仅含一个 {@code /}, 两段均非空, 字符集 {@code [A-Za-z0-9_-]+}
+     * (项目收窄字符集, 与 {@code WeChatPublisher.ARTICLE_ID_PATTERN} /
+     * {@code ArticleStatusService.ARTICLE_ID_PATTERN} 的 {@code (tw|gh)-[A-Za-z0-9_-]+} 一致).
+     * GitHub 实际允许 {@code .}, 但本项目拒绝 (URL-safe 字符集简化 Redis key 治理).
+     */
+    static String validateAndNormalizeFullName(String fullName) {
+        long slashCount = fullName.chars().filter(c -> c == '/').count();
+        if (slashCount != 1) {
+            throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                    "非法 repo.fullName (必须 owner/repo): " + fullName);
+        }
+        String[] parts = fullName.split("/", 2);
+        if (parts[0].isEmpty() || parts[1].isEmpty()) {
+            throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                    "非法 repo.fullName (必须 owner/repo): " + fullName);
+        }
+        for (String p : parts) {
+            if (!p.matches("[A-Za-z0-9_-]+")) {
+                throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                        "非法 repo.fullName 段 (必须 [A-Za-z0-9_-]+): " + fullName);
+            }
+        }
+        return parts[0] + "-" + parts[1];
+    }
+
+    /**
+     * Story 4.4 — Article 字段填充 (GitHub repo 版).
+     *
+     * <p>复用 Tweet 版 {@link #parseTitle} / {@link #parseContent} / {@link #parseDigest}
+     * 解析 LLM Markdown 响应 (相同 {@code # 标题}/{@code > 摘要:} 格式).
+     * D3: {@code valueScore} 经 {@link #convertInnovationScore} 空安全转 int (null → 0).
+     */
+    Article buildGitHubArticle(GitHubRepo repo, String response, String normalizedFullName) {
+        String title = parseTitle(response);
+        if (FALLBACK_TITLE.equals(title)) {
+            log.warn("LLM 响应未识别到 '# 标题' 格式, 使用 fallback 标题: repoFullName={}", repo.getFullName());
+        }
+        return Article.builder()
+                .id("gh-" + normalizedFullName)
+                .title(title)
+                .content(parseContent(response))
+                .digest(parseDigest(response))
+                .source("GitHub Repo:" + repo.getFullName())
+                .aiGenerated(true)
+                .createdAt(LocalDateTime.now())
+                .innovationScore(convertInnovationScore(repo.getValueScore()))
+                .originalUrl(repo.getUrl())
+                .build();
     }
 
     /**

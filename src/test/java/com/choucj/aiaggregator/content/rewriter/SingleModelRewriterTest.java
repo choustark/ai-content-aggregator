@@ -205,7 +205,7 @@ class SingleModelRewriterTest {
     void shouldThrowNonRetryableWhenTweetIsNull() {
         // Patch-10 (Round 3 review): 改抛 NonRetryableException 而非 NPE, 调试模式下被 processQueueOnce
         // 正确分类为 NonRetryable → complete(taskId) 移除避免阻塞整批 (AC-3).
-        assertThatThrownBy(() -> rewriter.rewrite(null))
+        assertThatThrownBy(() -> rewriter.rewrite((Tweet) null))
                 .isInstanceOf(NonRetryableException.class)
                 .hasMessageContaining("tweet 或 tweet.id 为 null");
         verifyNoInteractions(llmClient);

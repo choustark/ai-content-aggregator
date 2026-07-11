@@ -164,6 +164,60 @@ processor:
   # Patch-3 修复: ContentScheduler 注入 ProcessorProperties, 真正按此前缀路由 (不再硬编码 "twitter:").
   task-id-prefix: "twitter"
 
+# 功能开关 — 数据源模块级启停. 默认全部启用 (matchIfMissing=true).
+# Story 4.1: features.github.enabled 与 feature-flags.github.enabled 任一显式 false,
+# 都会关闭 GitHubSource/GitHubClient/GitHubConfig Bean 注册.
+features:
+  github:
+    # GitHub 数据源总开关 — 关闭时整个 source/github/ 子包 Bean 不注册.
+    # 仅故障排查 / 暂时禁用 GitHub 抓取时设为 false.
+    enabled: true
+
+# GitHub 数据源配置 (Story 4.1) — token 实际在 api-keys.yml 维护 (Story 1.2 配置分离原则).
+# 占位符示例 (复制 api-keys.example.yml 为 api-keys.yml 后填写):
+#   github:
+#     token: ${GITHUB_TOKEN:your-github-token}
+# spike-4.1 §2.2 决策: Fine-grained PAT (公开仓库只读, 无 scope 需要) 优于 Classic PAT.
+# 未配置 token 时降级为未认证调用 (Search 10/min vs 认证 30/min, spike-4.1 §2.3 实测).
+github:
+  # GitHubClient 内部开关 (与 features.github.enabled 双层保险).
+  enabled: true
+  # GitHub Fine-grained PAT — 默认空 (未认证模式). 实际值在 api-keys.yml 维护.
+  token: ""
+  # HTTP 调用超时 (秒) — connect + read 均应用. 默认 30s (与 RSSHubClient 一致).
+  timeout-seconds: 30
+  # Trending 抓取配置 (spike-4.1 §2.1 决策: 用 Search API 替代官方无 /trending 端点).
+  trending:
+    # 查询模板 — 占位符 {date} (lookback-days 天前 ISO 日期) / {language}. 用 String.replace 渲染 (B2 模式).
+    # 模板设计: created:>{date} 限制近 N 天新建仓库 + language:{language} 限定语言, sort=stars 取最高.
+    query-template: "created:>{date}+language:{language}"
+    # 回溯天数 — {date} = 今天 - lookback-days. 默认 7 (近一周新仓库). 范围 [1, 90].
+    lookback-days: 7
+    # 返回前 N 条 — per_page 参数. 默认 10. 范围 [1, 100] (GitHub per_page 上限 100).
+    top-n: 10
+    # 主语言 — {language} 占位符替换值. 默认 java. 留空则查询所有语言 (需同步改 query-template).
+    language: "java"
+  # README 截断 (Story 4.2 实施, 本 story 仅声明配置占位).
+  readme:
+    # README 最大字符数 (KB) — spike-4.1 §2.6 决策 100KB (≈60K token, 占 128K 上下文 47%).
+    max-size-kb: 100
+  # 价值分析配置 (Story 4.3) — GitHubValueAnalyzer 对每个 repo 调 LLM 综合评分 (4 维度:
+  # 技术创新/实用价值/社区活跃/AI 相关), 评分 >= score-threshold 才进 Story 4.4 改写环节.
+  # 全批 LLM 失败 (双链全挂 / 全批响应不可解析) 时降级为 stars >= star-fallback-threshold 筛选 (AC-4).
+  value-analyzer:
+    # 价值评分通过阈值 (1-10) — repo.valueScore >= 此值才保留. 默认 7.0 (epics AC-1).
+    # 严格 >= 比较. 范围 [0.0, 10.0] — 下限防负数, 上限防误配 11 静默剔除全部.
+    score-threshold: 7.0
+    # Star 数降级阈值 — LLM 双链全挂 / 全批响应不可解析时, stars >= 此值的 repo 仍保留 (AC-4).
+    # 默认 100 (epics AC-4, spike-4.1 调研结论: 高质量 Java 仓库分水岭).
+    # 范围 [0, 1000000] — 下限防负数, 上限防误配 Integer.MAX_VALUE 静默剔除全部.
+    star-fallback-threshold: 100
+    # README 输入截断 (code point) — 送入 LLM prompt 的 README 长度上限.
+    # 默认 8000 (≈12K token, 占 DeepSeek 64K 上下文 19%, C1 token 估算模式, spike-4.1 §2.6).
+    # 范围 [1000, 50000] — 下限防过短失信息, 上限防 LLM 上下文溢出.
+    # 注意: 与 Story 4.2 的 readme.max-size-kb (字节级硬截断) 不冲突 — 本参数是 codepoint 软截断.
+    readme-max-code-points: 8000
+
 # 微信公众号发布配置 (Story 3.1) — 两层配置: SDK 层 (wx.mp.*) + 项目层 (wechat.mp.*).
 #
 # [SDK 层] wx.mp.* — 由 WxJava starter 4.6.0 WxMpProperties 直接消费, app-id/secret 实际在 api-keys.yml.

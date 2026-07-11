@@ -3,6 +3,7 @@ package com.choucj.aiaggregator.common.util;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * Story 1.5a/1.6 {@link RedisKeys} 单测 — 验证键命名合规(冒号分隔小写).
@@ -55,5 +56,21 @@ class RedisKeysTest {
     @Test
     void shouldFormatArticleStatusKey() {
         assertThat(RedisKeys.articleStatus("tw-123")).isEqualTo("article:tw-123:status");
+    }
+
+    /**
+     * Story 4.1: githubTrending 键格式 — 服务于 GitHubSource.fetch() 缓存.
+     * spike-4.1 §2.4 命名空间分离.
+     */
+    @Test
+    void shouldFormatGithubTrendingKey() {
+        assertThat(RedisKeys.githubTrending("java", 7)).isEqualTo("github:trending:java:7");
+        assertThat(RedisKeys.githubTrending("python", 30)).isEqualTo("github:trending:python:30");
+        assertThatThrownBy(() -> RedisKeys.githubTrending("", 1))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("language");
+        assertThatThrownBy(() -> RedisKeys.githubTrending("java", 0))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("lookbackDays");
     }
 }

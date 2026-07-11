@@ -299,6 +299,31 @@ class WeChatPublisherTest {
     }
 
     @Test
+    void shouldAcceptGithubArticleIdWithGhPrefix(CapturedOutput output) throws WxErrorException {
+        // Story 4.4 Task 3.3 — ARTICLE_ID_PATTERN 扩展为 (tw|gh)-[A-Za-z0-9_-]+,
+        // gh-{owner}-{repo} 应通过校验并到达 draft service (spike-4.1 §3.3 风险 #3 缓解)
+        Article article = Article.builder()
+                .id("gh-octocat-Hello-World")
+                .title("标题-gh")
+                .content("## hello-gh")
+                .aiGenerated(true)
+                .innovationScore(8)
+                .source("GitHub Repo:octocat/Hello-World")
+                .build();
+        WxMpDraftArticles wxArticle = sampleWxArticle("html-body-gh");
+        when(converter.convert(article)).thenReturn(wxArticle);
+        when(wxMpService.getDraftService()).thenReturn(wxMpDraftService);
+        when(wxMpDraftService.addDraft(any(WxMpAddDraft.class))).thenReturn("media-id-gh");
+
+        publisher.publish(article);
+
+        verify(articleStatusService).markProcessing("gh-octocat-Hello-World");
+        verify(articleStatusService).markDraftCreated("gh-octocat-Hello-World");
+        assertThat(output).contains("articleId=gh-octocat-Hello-World")
+                .contains("mediaId=media-id-gh");
+    }
+
+    @Test
     void shouldThrowNonRetryableWhenMediaIdIsEmpty(CapturedOutput output) throws WxErrorException {
         Article article = sampleArticle();
         when(converter.convert(article)).thenReturn(sampleWxArticle("html"));

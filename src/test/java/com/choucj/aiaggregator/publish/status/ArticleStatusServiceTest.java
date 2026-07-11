@@ -128,6 +128,18 @@ class ArticleStatusServiceTest {
     }
 
     @Test
+    void shouldAcceptGithubArticleIdWithGhPrefix() {
+        // Story 4.4 Task 3.3 — ARTICLE_ID_PATTERN 扩展为 (tw|gh)-[A-Za-z0-9_-]+,
+        // gh-{owner}-{repo} 应通过校验并写入对应 Redis key (spike-4.1 §3.3 风险 #3 缓解)
+        String ghArticleId = "gh-octocat-Hello-World";
+        String ghKey = "article:gh-octocat-Hello-World:status";
+
+        service.markPending(ghArticleId);
+
+        verify(redisRepository).set(eq(ghKey), eq(ArticleStatus.PENDING.name()), eq(PENDING_TTL));
+    }
+
+    @Test
     void shouldThrowOnGetStatusWithNullArticleId() {
         assertThatThrownBy(() -> service.getStatus(null))
                 .isInstanceOf(NonRetryableException.class);
