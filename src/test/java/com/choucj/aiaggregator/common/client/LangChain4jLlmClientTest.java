@@ -2,6 +2,9 @@ package com.choucj.aiaggregator.common.client;
 
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
 import dev.langchain4j.model.chat.ChatModel;
@@ -13,8 +16,10 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.mockito.junit.jupiter.MockitoSettings;
 import org.mockito.quality.Strictness;
+import org.slf4j.LoggerFactory;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.catchThrowable;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -76,6 +81,34 @@ class LangChain4jLlmClientTest {
     }
 
     @Test
+    void shouldReturnModelNameWhenDefaultChatUsesDeepSeek() {
+        ChatResponse response = ChatResponse.builder()
+                .aiMessage(AiMessage.from("deepseek rewrite"))
+                .build();
+        when(deepSeekChatModel.chat(any(ChatMessage[].class))).thenReturn(response);
+
+        LlmClient.ChatResult result = client.chatWithResult("system", "user");
+
+        assertThat(result.model()).isEqualTo("deepseek");
+        assertThat(result.text()).isEqualTo("deepseek rewrite");
+    }
+
+    @Test
+    void shouldReturnModelNameWhenDefaultChatFallsBackToGlm() {
+        ChatResponse response = ChatResponse.builder()
+                .aiMessage(AiMessage.from("glm rewrite"))
+                .build();
+        when(deepSeekChatModel.chat(any(ChatMessage[].class)))
+                .thenThrow(new RuntimeException("deepseek timeout"));
+        when(glmChatModel.chat(any(ChatMessage[].class))).thenReturn(response);
+
+        LlmClient.ChatResult result = client.chatWithResult("system", "user");
+
+        assertThat(result.model()).isEqualTo("glm");
+        assertThat(result.text()).isEqualTo("glm rewrite");
+    }
+
+    @Test
     void shouldThrowRetryableWhenBothModelsFail() {
         when(deepSeekChatModel.chat("hello")).thenThrow(new RuntimeException("ds down"));
         when(glmChatModel.chat("hello")).thenThrow(new RuntimeException("glm down"));
@@ -97,6 +130,32 @@ class LangChain4jLlmClientTest {
     }
 
     @Test
+    void shouldUseExplicitModelWithSystemUserPromptWithoutFallback() {
+        ChatResponse response = ChatResponse.builder()
+                .aiMessage(AiMessage.from("glm rewrite"))
+                .build();
+        when(glmChatModel.chat(any(ChatMessage[].class))).thenReturn(response);
+
+        String result = client.chatWithModel("glm", "system", "user");
+
+        assertThat(result).isEqualTo("glm rewrite");
+        verify(deepSeekChatModel, never()).chat(any(ChatMessage[].class));
+    }
+
+    @Test
+    void shouldReturnExplicitModelNameWhenChatWithModelResult() {
+        ChatResponse response = ChatResponse.builder()
+                .aiMessage(AiMessage.from("glm rewrite"))
+                .build();
+        when(glmChatModel.chat(any(ChatMessage[].class))).thenReturn(response);
+
+        LlmClient.ChatResult result = client.chatWithModelResult("glm", "system", "user");
+
+        assertThat(result.model()).isEqualTo("glm");
+        assertThat(result.text()).isEqualTo("glm rewrite");
+    }
+
+    @Test
     void shouldThrowRetryableWhenExplicitModelFailsWithoutFallback() {
         when(deepSeekChatModel.chat("hello")).thenThrow(new RuntimeException("ds down"));
 
@@ -105,6 +164,66 @@ class LangChain4jLlmClientTest {
                 .extracting(e -> ((RetryableException) e).getErrorCode())
                 .isEqualTo(ErrorCode.EXTERNAL_API_ERROR);
         verify(glmChatModel, never()).chat(anyString());
+    }
+
+    @Test
+    void shouldSanitizeExplicitModelFailureLogs() {
+        Logger logger = (Logger) LoggerFactory.getLogger(LangChain4jLlmClient.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            when(deepSeekChatModel.chat("hello"))
+                    .thenThrow(new RuntimeException("SECRET_UPSTREAM_BODY prompt=response"));
+
+            Throwable thrown = catchThrowable(() -> client.chatWithModel("deepseek", "hello"));
+
+            String logs = appender.list.stream()
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .reduce("", (left, right) -> left + "\n" + right);
+            assertThat(thrown)
+                    .isInstanceOf(RetryableException.class)
+                    .hasMessageContaining("RuntimeException")
+                    .hasMessageNotContaining("SECRET_UPSTREAM_BODY")
+                    .hasNoCause();
+            assertThat(logs)
+                    .contains("model=deepseek", "RuntimeException")
+                    .doesNotContain("SECRET_UPSTREAM_BODY", "prompt=response");
+        } finally {
+            logger.detachAppender(appender);
+        }
+    }
+
+    @Test
+    void shouldNotLogPromptOrExceptionMessagesOnDefaultFallbackPath() {
+        Logger logger = (Logger) LoggerFactory.getLogger(LangChain4jLlmClient.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        try {
+            when(deepSeekChatModel.chat("SECRET_PROMPT_BODY"))
+                    .thenThrow(new RuntimeException("SECRET_DEEPSEEK_ERROR"));
+            when(glmChatModel.chat("SECRET_PROMPT_BODY"))
+                    .thenThrow(new RuntimeException("SECRET_GLM_ERROR"));
+
+            Throwable thrown = catchThrowable(() -> client.chat("SECRET_PROMPT_BODY"));
+
+            String logs = appender.list.stream()
+                    .map(ILoggingEvent::getFormattedMessage)
+                    .reduce("", (left, right) -> left + "\n" + right);
+            assertThat(thrown)
+                    .isInstanceOf(RetryableException.class)
+                    .hasMessageContaining("primaryType=RuntimeException")
+                    .hasMessageContaining("fallbackType=RuntimeException")
+                    .hasMessageNotContaining("SECRET_DEEPSEEK_ERROR")
+                    .hasMessageNotContaining("SECRET_GLM_ERROR")
+                    .hasNoCause();
+            assertThat(logs)
+                    .contains("primaryType=RuntimeException", "fallbackType=RuntimeException")
+                    .doesNotContain("SECRET_PROMPT_BODY", "SECRET_DEEPSEEK_ERROR", "SECRET_GLM_ERROR");
+        } finally {
+            logger.detachAppender(appender);
+        }
     }
 
     @Test

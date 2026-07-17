@@ -52,6 +52,7 @@ class RewriterPropertiesTest {
                     assertThat(props.getMaxRetries()).isEqualTo(3);
                     assertThat(props.getRetryBackoffMs()).isEqualTo(1000L);
                     assertThat(props.getContentMaxCodePoints()).isEqualTo(2000);
+                    assertThat(props.getMultiModelDeadlineMs()).isEqualTo(65_000L);
                 });
     }
 
@@ -63,12 +64,14 @@ class RewriterPropertiesTest {
                         .addFirst(new MapPropertySource("test", Map.of(
                                 "rewriter.max-retries", 5,
                                 "rewriter.retry-backoff-ms", 2000L,
-                                "rewriter.content-max-code-points", 3000))))
+                                "rewriter.content-max-code-points", 3000,
+                                "rewriter.multi-model-deadline-ms", 70_000L))))
                 .run(ctx -> {
                     RewriterProperties props = ctx.getBean(RewriterProperties.class);
                     assertThat(props.getMaxRetries()).isEqualTo(5);
                     assertThat(props.getRetryBackoffMs()).isEqualTo(2000L);
                     assertThat(props.getContentMaxCodePoints()).isEqualTo(3000);
+                    assertThat(props.getMultiModelDeadlineMs()).isEqualTo(70_000L);
                 });
     }
 
@@ -126,5 +129,27 @@ class RewriterPropertiesTest {
 
         assertThat(violations).anySatisfy(v ->
                 assertThat(v.getPropertyPath().toString()).isEqualTo("contentMaxCodePoints"));
+    }
+
+    @Test
+    void shouldFailValidationWhenMultiModelDeadlineTooSmall() {
+        RewriterProperties props = new RewriterProperties();
+        props.setMultiModelDeadlineMs(999L);
+
+        Set<ConstraintViolation<RewriterProperties>> violations = validator.validate(props);
+
+        assertThat(violations).anySatisfy(v ->
+                assertThat(v.getPropertyPath().toString()).isEqualTo("multiModelDeadlineMs"));
+    }
+
+    @Test
+    void shouldFailValidationWhenMultiModelDeadlineTooLarge() {
+        RewriterProperties props = new RewriterProperties();
+        props.setMultiModelDeadlineMs(300_001L);
+
+        Set<ConstraintViolation<RewriterProperties>> violations = validator.validate(props);
+
+        assertThat(violations).anySatisfy(v ->
+                assertThat(v.getPropertyPath().toString()).isEqualTo("multiModelDeadlineMs"));
     }
 }

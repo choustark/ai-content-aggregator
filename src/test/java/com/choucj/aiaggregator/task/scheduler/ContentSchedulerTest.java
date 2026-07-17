@@ -2,6 +2,7 @@ package com.choucj.aiaggregator.task.scheduler;
 
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.monitoring.CostMonitor;
 import com.choucj.aiaggregator.processor.GitHubProcessor;
 import com.choucj.aiaggregator.processor.TwitterProcessor;
 import com.choucj.aiaggregator.processor.config.ProcessorProperties;
@@ -12,6 +13,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import java.time.YearMonth;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 
@@ -63,6 +65,9 @@ class ContentSchedulerTest {
 
     @Mock
     private ProcessorProperties processorProperties;
+
+    @Mock
+    private CostMonitor costMonitor;
 
     private ContentScheduler scheduler;
 
@@ -323,8 +328,61 @@ class ContentSchedulerTest {
     }
 
     @Test
+    void shouldSkipAutoProcessingWhenCostBudgetHalted(CapturedOutput output) {
+        ContentScheduler budgetGated = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
+                Optional.of(githubProcessor), processorProperties, Optional.of(costMonitor), true);
+        when(costMonitor.refreshAndCheckProcessingHalted(any(YearMonth.class))).thenReturn(true);
+
+        budgetGated.processContent();
+
+        verify(taskQueue, never()).push(any());
+        verify(taskQueue, never()).poll(any(Long.class), any(TimeUnit.class));
+        verify(twitterProcessor, never()).process();
+        assertThat(output.getOut()).contains("成本预算已停机");
+    }
+
+    @Test
+    void shouldContinueAutoProcessingWhenCostMonitorFails(CapturedOutput output) {
+        ContentScheduler budgetGated = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
+                Optional.of(githubProcessor), processorProperties, Optional.of(costMonitor), true);
+        when(costMonitor.refreshAndCheckProcessingHalted(any(YearMonth.class))).thenThrow(new RuntimeException("redis down"));
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
+
+        budgetGated.processContent();
+
+        verify(taskQueue).push("twitter:run");
+        verify(taskQueue).poll(eq(0L), eq(TimeUnit.SECONDS));
+        assertThat(output.getOut()).contains("读取成本预算 gate 失败");
+    }
+
+    @Test
+    void shouldRefreshCurrentMonthCostBeforeAutomaticProcessing() {
+        ContentScheduler budgetGated = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
+                Optional.of(githubProcessor), processorProperties, Optional.of(costMonitor), true);
+        when(costMonitor.refreshAndCheckProcessingHalted(any(YearMonth.class))).thenReturn(false);
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
+
+        budgetGated.processContent();
+
+        verify(costMonitor).refreshAndCheckProcessingHalted(any(YearMonth.class));
+        verify(taskQueue).push("twitter:run");
+    }
+
+    @Test
+    void shouldNotEnqueueStartupTaskBeforeBudgetGate() {
+        ContentScheduler budgetGated = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
+                Optional.of(githubProcessor), processorProperties, Optional.of(costMonitor), true);
+        when(costMonitor.refreshAndCheckProcessingHalted(any(YearMonth.class))).thenReturn(true);
+
+        budgetGated.onStartup();
+
+        verify(recoveryRunner).recoverPendingTasks();
+        verify(taskQueue, never()).push("twitter:run");
+        verify(taskQueue, never()).poll(any(Long.class), any(TimeUnit.class));
+    }
+
+    @Test
     void shouldPushTwitterRunOnStartup() {
-        when(taskQueue.isQueued("twitter:run")).thenReturn(false, true);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
         scheduler.onStartup();
@@ -354,17 +412,12 @@ class ContentSchedulerTest {
 
     @Test
     void shouldStillTriggerProcessContentWhenStartupEnqueueFails() {
-        // Patch-9 (Round 3 review): onStartup 的 enqueueRunTaskIfAbsent("startup") 包 try/catch,
-        // 即便 Redis 抖动抛 RetryableException, processContent 仍应被调用 (内部 enqueue 兜底).
-        // 第一次 isQueued (startup 路径) 抛 RetryableException, 第二次 (processContent 路径) 返回 false 让 push 成功.
         when(taskQueue.isQueued("twitter:run"))
-                .thenThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "redis down"))
                 .thenReturn(false);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
         scheduler.onStartup();
 
-        // processContent 仍被调用 — 内部 enqueue 成功 push 一次
         verify(taskQueue).push("twitter:run");
     }
 }

@@ -31,13 +31,7 @@ import java.util.Objects;
  * 不细分 LLM 来源 / 状态码 (YAGNI — 调用方按 Retryable / NonRetryable 决策降级即可,
  * Story 5.4 多模型投票若需统计再扩展).
  *
- * <p><b>日志:</b>
- * <ul>
- *   <li>DEBUG 级别记录 prompt 前 200 字符 (避免 token 爆日志)</li>
- *   <li>INFO 级别记录调用耗时 + model + 响应长度</li>
- *   <li>WARN 级别记录 DeepSeek 失败降级 GLM (含异常 message 截断)</li>
- *   <li>ERROR 级别记录双链全失败 (含完整异常堆栈)</li>
- * </ul>
+ * <p><b>日志:</b> 不记录 prompt、响应正文或上游异常 message；仅记录 model、耗时、长度和异常类型.
  *
  * <p>架构 delta (Story 2.3a): 默认 DeepSeek + 降级 GLM 决策, Story 5.4 多模型投票时
  * 本逻辑会被覆盖.
@@ -48,8 +42,6 @@ public class LangChain4jLlmClient implements LlmClient {
 
     private static final String MODEL_DEEPSEEK = "deepseek";
     private static final String MODEL_GLM = "glm";
-    private static final int PROMPT_LOG_LIMIT = 200;
-
     private final ChatModel deepSeekChatModel;
     private final ChatModel glmChatModel;
 
@@ -68,7 +60,7 @@ public class LangChain4jLlmClient implements LlmClient {
     @Override
     public String chat(String prompt) {
         requireNonBlank(prompt);
-        log.debug("LLM chat (default deepseek) prompt: {}", truncate(prompt));
+        log.debug("LLM chat (default deepseek): promptLength={}", prompt.length());
         long start = System.currentTimeMillis();
         try {
             String response = deepSeekChatModel.chat(prompt);
@@ -76,17 +68,22 @@ public class LangChain4jLlmClient implements LlmClient {
                     System.currentTimeMillis() - start, response == null ? 0 : response.length());
             return response;
         } catch (RuntimeException e) {
-            log.warn("DeepSeek 调用失败, 降级 GLM: {}", truncate(e.getMessage()));
+            log.warn("DeepSeek 调用失败, 降级 GLM: errorType={}", e.getClass().getSimpleName());
             return fallbackChat(prompt, start, e);
         }
     }
 
     @Override
     public String chat(String systemPrompt, String userPrompt) {
+        return chatWithResult(systemPrompt, userPrompt).text();
+    }
+
+    @Override
+    public ChatResult chatWithResult(String systemPrompt, String userPrompt) {
         requireNonBlank(systemPrompt);
         requireNonBlank(userPrompt);
-        log.debug("LLM chat (default deepseek) system={}, user={}",
-                truncate(systemPrompt), truncate(userPrompt));
+        log.debug("LLM chat (default deepseek): systemLength={}, userLength={}",
+                systemPrompt.length(), userPrompt.length());
         long start = System.currentTimeMillis();
         try {
             String response = extractText(deepSeekChatModel.chat(
@@ -94,10 +91,10 @@ public class LangChain4jLlmClient implements LlmClient {
                     UserMessage.from(userPrompt)));
             log.info("LLM 调用成功: model=deepseek, 耗时={}ms, 响应长度={}",
                     System.currentTimeMillis() - start, response == null ? 0 : response.length());
-            return response;
+            return new ChatResult(MODEL_DEEPSEEK, response);
         } catch (RuntimeException e) {
-            log.warn("DeepSeek 调用失败, 降级 GLM: {}", truncate(e.getMessage()));
-            return fallbackChat(systemPrompt, userPrompt, start, e);
+            log.warn("DeepSeek 调用失败, 降级 GLM: errorType={}", e.getClass().getSimpleName());
+            return fallbackChatResult(systemPrompt, userPrompt, start, e);
         }
     }
 
@@ -105,7 +102,7 @@ public class LangChain4jLlmClient implements LlmClient {
     public String chatWithModel(String model, String prompt) {
         Objects.requireNonNull(model, "model");
         requireNonBlank(prompt);
-        log.debug("LLM chatWithModel model={}, prompt={}", model, truncate(prompt));
+        log.debug("LLM chatWithModel model={}, promptLength={}", model, prompt.length());
         long start = System.currentTimeMillis();
         ChatModel target = resolveModel(model);
         try {
@@ -114,11 +111,39 @@ public class LangChain4jLlmClient implements LlmClient {
                     model, System.currentTimeMillis() - start, response == null ? 0 : response.length());
             return response;
         } catch (RuntimeException e) {
-            log.error("LLM 调用失败 (model={}, 不降级): {}", model, e.getMessage());
+            log.error("LLM 调用失败 (model={}, 不降级): errorType={}", model, e.getClass().getSimpleName());
             throw new RetryableException(
                     ErrorCode.EXTERNAL_API_ERROR,
-                    "LLM 调用失败(model=" + model + "): " + truncate(e.getMessage()),
-                    e);
+                    "LLM 调用失败(model=" + model + ", errorType=" + e.getClass().getSimpleName() + ")");
+        }
+    }
+
+    @Override
+    public String chatWithModel(String model, String systemPrompt, String userPrompt) {
+        return chatWithModelResult(model, systemPrompt, userPrompt).text();
+    }
+
+    @Override
+    public ChatResult chatWithModelResult(String model, String systemPrompt, String userPrompt) {
+        Objects.requireNonNull(model, "model");
+        requireNonBlank(systemPrompt);
+        requireNonBlank(userPrompt);
+        log.debug("LLM chatWithModel model={}, systemLength={}, userLength={}",
+                model, systemPrompt.length(), userPrompt.length());
+        long start = System.currentTimeMillis();
+        ChatModel target = resolveModel(model);
+        try {
+            String response = extractText(target.chat(
+                    SystemMessage.from(systemPrompt),
+                    UserMessage.from(userPrompt)));
+            log.info("LLM 调用成功: model={}, 耗时={}ms, 响应长度={}",
+                    model, System.currentTimeMillis() - start, response == null ? 0 : response.length());
+            return new ChatResult(model, response);
+        } catch (RuntimeException e) {
+            log.error("LLM 调用失败 (model={}, 不降级): errorType={}", model, e.getClass().getSimpleName());
+            throw new RetryableException(
+                    ErrorCode.EXTERNAL_API_ERROR,
+                    "LLM 调用失败(model=" + model + ", errorType=" + e.getClass().getSimpleName() + ")");
         }
     }
 
@@ -132,16 +157,21 @@ public class LangChain4jLlmClient implements LlmClient {
                     response == null ? 0 : response.length());
             return response;
         } catch (RuntimeException e) {
-            log.error("LLM 调用失败 (deepseek + glm 均失败): primary={}, fallback={}",
-                    primaryCause.getMessage(), e.getMessage());
+            log.error("LLM 调用失败 (deepseek + glm 均失败): primaryType={}, fallbackType={}",
+                    primaryCause.getClass().getSimpleName(), e.getClass().getSimpleName());
             throw new RetryableException(
                     ErrorCode.EXTERNAL_API_ERROR,
-                    "LLM 调用失败 (deepseek + glm 均失败): " + truncate(e.getMessage()),
-                    e);
+                    "LLM 调用失败 (deepseek + glm 均失败, primaryType="
+                            + primaryCause.getClass().getSimpleName()
+                            + ", fallbackType=" + e.getClass().getSimpleName() + ")");
         }
     }
 
     private String fallbackChat(String systemPrompt, String userPrompt, long startMs, Throwable primaryCause) {
+        return fallbackChatResult(systemPrompt, userPrompt, startMs, primaryCause).text();
+    }
+
+    private ChatResult fallbackChatResult(String systemPrompt, String userPrompt, long startMs, Throwable primaryCause) {
         long fallbackStart = System.currentTimeMillis();
         try {
             String response = extractText(glmChatModel.chat(
@@ -151,14 +181,15 @@ public class LangChain4jLlmClient implements LlmClient {
                     System.currentTimeMillis() - fallbackStart,
                     fallbackStart - startMs,
                     response == null ? 0 : response.length());
-            return response;
+            return new ChatResult(MODEL_GLM, response);
         } catch (RuntimeException e) {
-            log.error("LLM 调用失败 (deepseek + glm 均失败): primary={}, fallback={}",
-                    primaryCause.getMessage(), e.getMessage());
+            log.error("LLM 调用失败 (deepseek + glm 均失败): primaryType={}, fallbackType={}",
+                    primaryCause.getClass().getSimpleName(), e.getClass().getSimpleName());
             throw new RetryableException(
                     ErrorCode.EXTERNAL_API_ERROR,
-                    "LLM 调用失败 (deepseek + glm 均失败): " + truncate(e.getMessage()),
-                    e);
+                    "LLM 调用失败 (deepseek + glm 均失败, primaryType="
+                            + primaryCause.getClass().getSimpleName()
+                            + ", fallbackType=" + e.getClass().getSimpleName() + ")");
         }
     }
 
@@ -174,13 +205,6 @@ public class LangChain4jLlmClient implements LlmClient {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException("prompt 不能为空");
         }
-    }
-
-    private static String truncate(String value) {
-        if (value == null) {
-            return "<null>";
-        }
-        return value.length() <= PROMPT_LOG_LIMIT ? value : value.substring(0, PROMPT_LOG_LIMIT) + "...";
     }
 
     private static String extractText(ChatResponse response) {

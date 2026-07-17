@@ -538,7 +538,19 @@ class SingleModelRewriterTest {
         rewriter.rewrite(tweet);
 
         verify(tokenUsageTracker, times(1))
-                .track(anyString(), eq(LLM_RESPONSE), any(java.time.LocalDate.class));
+                .track(eq("deepseek"), anyString(), eq(LLM_RESPONSE), any(java.time.LocalDate.class));
+    }
+
+    @Test
+    void shouldTrackActualFallbackModelWhenLlmClientReturnsResult() {
+        Tweet tweet = sampleTweet("track-glm", "hello content here");
+        when(llmClient.chatWithResult(anyString(), anyString()))
+                .thenReturn(new LlmClient.ChatResult("glm", LLM_RESPONSE));
+
+        rewriter.rewrite(tweet);
+
+        verify(tokenUsageTracker, times(1))
+                .track(eq("glm"), anyString(), eq(LLM_RESPONSE), any(java.time.LocalDate.class));
     }
 
     @Test
@@ -552,7 +564,7 @@ class SingleModelRewriterTest {
         when(llmClient.chat(anyString(), anyString())).thenReturn(LLM_RESPONSE);
         org.mockito.Mockito.doThrow(new RuntimeException("redis down"))
                 .when(tokenUsageTracker)
-                .track(anyString(), anyString(), any(java.time.LocalDate.class));
+                .track(eq("deepseek"), anyString(), anyString(), any(java.time.LocalDate.class));
 
         // 不抛 — SingleModelRewriter.rewrite 内部 catch (RuntimeException) 后 log.warn, 主流程返回 Article
         com.choucj.aiaggregator.common.model.Article article = rewriter.rewrite(tweet);

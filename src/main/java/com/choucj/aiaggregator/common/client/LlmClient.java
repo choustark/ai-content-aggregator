@@ -11,6 +11,8 @@ package com.choucj.aiaggregator.common.client;
  *       (如改写 / 评分)</li>
  *   <li>{@link #chatWithModel(String, String)} 显式指定模型 ({@code "deepseek"} / {@code "glm"}),
  *       绕过降级链. Story 5.4 多模型投票时使用</li>
+ *   <li>{@link #chatWithModel(String, String, String)} 显式指定模型并传入 System + User message,
+ *       绕过降级链. Story 5.4 多模型投票改写使用</li>
  * </ul>
  *
  * <p><b>设计决策 (Story 2.3a):</b>
@@ -25,6 +27,15 @@ package com.choucj.aiaggregator.common.client;
  * Story 2.4 (ContentRewriter 注入) / Story 5.4 (多模型投票).
  */
 public interface LlmClient {
+
+    /**
+     * LLM 调用结果，包含实际产生响应的模型名.
+     *
+     * @param model 实际模型名，如 {@code deepseek} / {@code glm}
+     * @param text 模型输出文本
+     */
+    record ChatResult(String model, String text) {
+    }
 
     /**
      * 同步调用 LLM (默认 DeepSeek 主路径, 失败降级 GLM).
@@ -47,6 +58,17 @@ public interface LlmClient {
     String chat(String systemPrompt, String userPrompt);
 
     /**
+     * 同步调用 LLM, 并返回实际命中的模型名.
+     *
+     * @param systemPrompt 角色 / 指令 prompt
+     * @param userPrompt   实际内容 prompt
+     * @return 含实际模型名的结果
+     */
+    default ChatResult chatWithResult(String systemPrompt, String userPrompt) {
+        return new ChatResult("deepseek", chat(systemPrompt, userPrompt));
+    }
+
+    /**
      * 显式指定模型调用 (绕过降级链).
      *
      * @param model  模型标识 ({@code "deepseek"} / {@code "glm"})
@@ -56,4 +78,28 @@ public interface LlmClient {
      * @throws IllegalArgumentException                                   model 不支持 / prompt 为空
      */
     String chatWithModel(String model, String prompt);
+
+    /**
+     * 显式指定模型调用, 拼 System + User message (绕过降级链).
+     *
+     * @param model        模型标识 ({@code "deepseek"} / {@code "glm"})
+     * @param systemPrompt 角色 / 指令 prompt
+     * @param userPrompt   实际内容 prompt
+     * @return 模型生成文本
+     * @throws com.choucj.aiaggregator.common.exception.RetryableException 指定模型调用失败时抛出 (不降级)
+     * @throws IllegalArgumentException                                   model 不支持 / prompt 为空
+     */
+    String chatWithModel(String model, String systemPrompt, String userPrompt);
+
+    /**
+     * 显式指定模型调用, 并返回模型名.
+     *
+     * @param model        模型标识
+     * @param systemPrompt 角色 / 指令 prompt
+     * @param userPrompt   实际内容 prompt
+     * @return 含模型名的结果
+     */
+    default ChatResult chatWithModelResult(String model, String systemPrompt, String userPrompt) {
+        return new ChatResult(model, chatWithModel(model, systemPrompt, userPrompt));
+    }
 }

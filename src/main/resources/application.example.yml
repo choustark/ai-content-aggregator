@@ -37,7 +37,7 @@ management:
       exposure:
         # env 端点会暴露所有属性 (含密钥), prod 必须收紧到 health,info.
         # dev/test 保留 env 方便调试.
-        include: health,info,env
+        include: health,info,env,features,costs
   endpoint:
     health:
       show-details: when-authorized
@@ -108,8 +108,29 @@ twscrape:
 #       base-url: https://api.deepseek.com
 #     glm:
 #       api-key: ${LLM_GLM_API_KEY:your-glm-api-key}
-#       base-url: https://open.bigmodel.cn
+#       base-url: https://open.bigmodel.cn/api/paas/v4
 # 主路径 DeepSeek + 备用 GLM, LlmConfig 注册两个 ChatModel Bean, LangChain4jLlmClient 自动降级.
+
+# RAG / Embedding 配置 (Story 5.1/5.2) — 默认关闭, 开启后注册 EmbeddingService + ReferenceRetriever.
+# GLM embedding 复用 api-keys.yml 的 llm.glm.api-key / LLM_GLM_API_KEY.
+langchain4j:
+  open-ai:
+    embedding-model:
+      # GLM embedding-3, OpenAI 兼容协议.
+      model-name: embedding-3
+      # GLM embedding-3 默认 2048 维; Story 5.1 显式收窄为 1024 维.
+      dimensions: 1024
+      timeout: 60s
+  community:
+    redis:
+      # standalone Redis-Stack 向量库开关; features.rag.enabled=true 时注册完整存储/检索能力.
+      # RAG 总开关默认 false, 因此这里保持 true 也不会在默认配置下创建 Redis 连接.
+      enabled: true
+      host: localhost
+      port: 7100
+      index-name: aiaggregator-embeddings
+      prefix: "rag:embedding:"
+      dimension: 1024
 
 # 内容筛选器配置 (Story 2.3b) — 两级筛选阈值.
 # 第一级 CommentFilter 按 replyCount >= comment-threshold 剔除低互动推文.
@@ -121,9 +142,11 @@ filter:
   # AI 创新度评分下限 (1-10) — 默认 6.0, 仅保留中等及以上.
   innovation-threshold: 6.0
 
-# 内容改写器配置 (Story 2.4) — DeepSeek 主 + GLM 备单模型改写.
+# 内容改写器配置 (Story 2.4 / 5.4) — 默认 DeepSeek 主 + GLM 备单模型改写.
 # SingleModelRewriter 调 LlmClient.chat(system, user) 改写推文为微信公众号文章,
 # 失败时手动重试 max-retries 次 (总尝试 = 1 + max-retries), 退避间隔递增.
+# 多模型投票由 feature-flags.yml 的 feature-flags.multi-model.enabled 控制; 开启后同一 rewriter.*
+# 重试/截断配置会被 DeepSeek 和 GLM 两条显式模型调用共同复用.
 rewriter:
   # 重试次数 — LLM 调用失败后重试的次数, 总尝试 = 1 + max-retries (默认 4 次).
   # 范围 [0, 10], 0 表示不重试 (单次失败即抛 RetryableException).
@@ -134,6 +157,26 @@ rewriter:
   # 源推文截断上限 (code points) — 防 prompt 过长撑爆 LLM context.
   # 按 code point 截断 (非 char), 防 UTF-16 代理对 emoji 切断产生乱码. 范围 [100, 10000].
   content-max-code-points: 2000
+  # 多模型投票 request-level 等待上限 — 默认略高于 LLM HTTP 60s timeout.
+  # 超时后等待两个 future 收敛并按失败矩阵抛 RetryableException / 返回成功候选. 范围 [1000, 300000].
+  multi-model-deadline-ms: 65000
+
+# 成本监控配置 (Story 5.5) — 单价是运营配置, 不在代码中硬编码.
+# 金额统一用 cents / 1M tokens; monthly-budget-cents=0 表示只观测不阻断自动处理.
+cost:
+  monitor:
+    monthly-budget-cents: 0
+    warning-threshold-percent: 80
+    stop-threshold-percent: 100
+    daily-cron: "0 5 0 * * ?"
+    summary-ttl-days: 400
+  pricing:
+    deepseek:
+      input-cents-per-million: 14
+      output-cents-per-million: 28
+    glm:
+      input-cents-per-million: 20
+      output-cents-per-million: 80
 
 # Markdown 归档器配置 (Story 2.5) — NFR4 双重存储的文件系统侧.
 # MarkdownArchiver implements ContentPublisher, 将 Article 写入 archive/{yyyy-MM-dd}.md 按天归档.
@@ -168,6 +211,19 @@ processor:
 # Story 4.1: features.github.enabled 与 feature-flags.github.enabled 任一显式 false,
 # 都会关闭 GitHubSource/GitHubClient/GitHubConfig Bean 注册.
 features:
+  rag:
+    # RAG 总开关 — false 时 EmbeddingService / EmbeddingModel / ReferenceRetriever Bean 不注册.
+    enabled: false
+    # 历史参考文章相似度阈值, 直接传给 EmbeddingService.searchSimilar minScore.
+    similarity-threshold: 0.75
+    # 单次改写可取的参考文章数量上限.
+    max-references: 3
+    # 异步批量 Embedding future 超时, 默认 120s.
+    async-timeout: 120s
+    # 异步批量 Embedding 专用线程池大小, 避免阻塞 HTTP 占用 commonPool.
+    async-threads: 2
+    # 异步批量 Embedding 等待队列容量, 超过后由调用线程执行以形成背压.
+    async-queue-capacity: 100
   github:
     # GitHub 数据源总开关 — 关闭时整个 source/github/ 子包 Bean 不注册.
     # 仅故障排查 / 暂时禁用 GitHub 抓取时设为 false.

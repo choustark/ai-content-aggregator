@@ -16,9 +16,9 @@ redis:
 langchain4j:
   community:
     redis:
-      enabled: ${LANGCHAIN4J_REDIS_ENABLED:true}
+      enabled: ${LANGCHAIN4J_REDIS_ENABLED:${features.rag.enabled:false}}
       index-name: ${LANGCHAIN4J_REDIS_INDEX:aiaggregator-embeddings}
-      dimension: ${LANGCHAIN4J_REDIS_DIMENSION:1536}
+      dimension: ${LANGCHAIN4J_REDIS_DIMENSION:1024}
 
 management:
   endpoints:

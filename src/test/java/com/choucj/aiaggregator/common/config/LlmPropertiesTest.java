@@ -49,7 +49,7 @@ class LlmPropertiesTest {
                 .run(ctx -> {
                     LlmProperties props = ctx.getBean(LlmProperties.class);
                     assertThat(props.getDeepseek().getBaseUrl()).isEqualTo("https://api.deepseek.com");
-                    assertThat(props.getGlm().getBaseUrl()).isEqualTo("https://open.bigmodel.cn");
+                    assertThat(props.getGlm().getBaseUrl()).isEqualTo("https://open.bigmodel.cn/api/paas/v4");
                 });
     }
 
@@ -59,6 +59,7 @@ class LlmPropertiesTest {
                 .withUserConfiguration(TestConfig.class)
                 .withInitializer(ctx -> ctx.getEnvironment().getPropertySources()
                         .addFirst(new MapPropertySource("test", Map.of(
+                                "llm.deepseek.api-key", "",
                                 "llm.glm.api-key", "glm-key"))))
                 .run(ctx -> assertThat(ctx).hasFailed());
     }

@@ -38,6 +38,8 @@ public class FeatureFlagsProperties {
     @Data
     public static class Rag {
         private boolean enabled = false;
+        /** 批量 Embedding 异步开关；Story 5.1 默认关闭，避免无意放大 GLM 请求并发. */
+        private boolean batchAsyncEnabled = false;
     }
 
     @Data

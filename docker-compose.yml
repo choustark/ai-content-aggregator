@@ -1,0 +1,12 @@
+services:
+  redis-vector:
+    image: redis/redis-stack-server:latest
+    container_name: redis-vector
+    ports:
+      - "127.0.0.1:7100:7000"
+    volumes:
+      - redis-vector-data:/data
+    command: ["redis-stack-server", "--port", "7000", "--appendonly", "yes"]
+
+volumes:
+  redis-vector-data:

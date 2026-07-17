@@ -50,6 +50,7 @@ class LlmConfigTest {
                 .withUserConfiguration(LlmConfig.class, TestConfig.class)
                 .withInitializer(ctx -> ctx.getEnvironment().getPropertySources()
                         .addFirst(new MapPropertySource("test", Map.of(
+                                "llm.deepseek.api-key", "",
                                 "llm.glm.api-key", "glm-key"))))
                 .run(ctx -> assertThat(ctx).hasFailed());
     }
@@ -60,7 +61,8 @@ class LlmConfigTest {
                 .withUserConfiguration(LlmConfig.class, TestConfig.class)
                 .withInitializer(ctx -> ctx.getEnvironment().getPropertySources()
                         .addFirst(new MapPropertySource("test", Map.of(
-                                "llm.deepseek.api-key", "ds-key"))))
+                                "llm.deepseek.api-key", "ds-key",
+                                "llm.glm.api-key", ""))))
                 .run(ctx -> assertThat(ctx).hasFailed());
     }
 }

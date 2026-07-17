@@ -24,9 +24,9 @@ redis:
 langchain4j:
   community:
     redis:
-      enabled: false              # 开发期默认关闭,按需打开
+      enabled: ${features.rag.enabled:false}
       index-name: aiaggregator-embeddings
-      dimension: 1536
+      dimension: 1024
 
 logging:
   level:

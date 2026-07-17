@@ -94,6 +94,19 @@ public interface RedisRepository {
     void expire(String key, Duration ttl);
 
     /**
+     * 原子递增字符串数值键，并设置/刷新 TTL.
+     *
+     * <p>通过单次 Redis Lua 脚本原子执行 {@code INCRBY key delta} 和 {@code PEXPIRE key ttl}；
+     * 调用方用它替代 {@code GET -> SET} 计数，避免多实例并发丢失累计值或在两条命令间丢失 TTL.
+     *
+     * @param key   Redis 键
+     * @param delta 增量值
+     * @param ttl   过期时间(不能为 null 或负数)
+     * @return 递增后的新值
+     */
+    long incrementBy(String key, long delta, Duration ttl);
+
+    /**
      * Story 1.5b: 写入复杂对象(JSON 序列化).
      *
      * <p>使用 {@code GenericJackson2JsonRedisSerializer} 序列化,Redis 中存储为含 {@code @class}

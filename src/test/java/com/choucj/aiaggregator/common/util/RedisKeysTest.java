@@ -73,4 +73,51 @@ class RedisKeysTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("lookbackDays");
     }
+
+    /**
+     * Story 5.1: embeddingKey 键格式 — 服务于 standalone Redis-Stack 向量库.
+     */
+    @Test
+    void shouldFormatEmbeddingKey() {
+        assertThat(RedisKeys.embeddingKey("tw-123")).isEqualTo("rag:embedding:tw-123");
+        assertThat(RedisKeys.embeddingPrefix()).isEqualTo("rag:embedding:");
+        assertThatThrownBy(() -> RedisKeys.embeddingKey(" "))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("articleId");
+    }
+
+    /**
+     * Story 5.3: RAG prompt 增量 token 独立键,不能污染原 cost:daily scalar.
+     */
+    @Test
+    void shouldFormatRagExtraCostDailyKey() {
+        assertThat(RedisKeys.costDailyRagExtra(java.time.LocalDate.of(2026, 7, 15)))
+                .isEqualTo("cost:daily:rag-extra:2026-07-15");
+    }
+
+    /**
+     * Story 5.5: 模型级成本键必须独立于 cost:daily scalar,防止破坏旧合同.
+     */
+    @Test
+    void shouldFormatCostMonitorKeys() {
+        java.time.LocalDate date = java.time.LocalDate.of(2026, 7, 16);
+        java.time.YearMonth month = java.time.YearMonth.of(2026, 7);
+
+        assertThat(RedisKeys.costDailyModelInput(date, "deepseek"))
+                .isEqualTo("cost:daily:model:2026-07-16:deepseek:input");
+        assertThat(RedisKeys.costDailyModelOutput(date, "glm"))
+                .isEqualTo("cost:daily:model:2026-07-16:glm:output");
+        assertThat(RedisKeys.costDailyModelEstimatedMicroCents(date, "deepseek"))
+                .isEqualTo("cost:daily:model:2026-07-16:deepseek:estimated-micro-cents");
+        assertThat(RedisKeys.costMonthly(month)).isEqualTo("cost:monthly:2026-07");
+        assertThat(RedisKeys.costBudgetHalted(month)).isEqualTo("cost:budget:halted:2026-07");
+        assertThat(RedisKeys.costBudgetResume(month)).isEqualTo("cost:budget:resume:2026-07");
+    }
+
+    @Test
+    void shouldRejectBlankCostModelName() {
+        assertThatThrownBy(() -> RedisKeys.costDailyModelInput(java.time.LocalDate.now(), " "))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("model");
+    }
 }

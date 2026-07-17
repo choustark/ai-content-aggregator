@@ -14,6 +14,7 @@ import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.RedisSystemException;
 import org.springframework.data.redis.connection.RedisStringCommands;
 import org.springframework.data.redis.core.RedisCallback;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.types.Expiration;
@@ -79,6 +80,12 @@ public class RedisRepositoryImpl implements RedisRepository {
     private final RedisTemplate<String, Object> objectRedisTemplate;
     private final ObjectMapper objectMapper;
 
+    private static final DefaultRedisScript<Long> INCREMENT_WITH_TTL_SCRIPT = new DefaultRedisScript<>("""
+            local total = redis.call('INCRBY', KEYS[1], ARGV[1])
+            redis.call('PEXPIRE', KEYS[1], ARGV[2])
+            return total
+            """, Long.class);
+
     @Override
     public void set(String key, String value) {
         runWithMapping(() -> stringRedisTemplate.opsForValue().set(key, value), key, "set");
@@ -118,6 +125,13 @@ public class RedisRepositoryImpl implements RedisRepository {
     @Override
     public void expire(String key, Duration ttl) {
         runWithMapping(() -> stringRedisTemplate.expire(key, ttl), key, "expire");
+    }
+
+    @Override
+    public long incrementBy(String key, long delta, Duration ttl) {
+        Long total = supplyWithMapping(() -> stringRedisTemplate.execute(
+                INCREMENT_WITH_TTL_SCRIPT, List.of(key), delta, ttl.toMillis()), key, "incrementBy");
+        return total == null ? delta : total;
     }
 
     @Override

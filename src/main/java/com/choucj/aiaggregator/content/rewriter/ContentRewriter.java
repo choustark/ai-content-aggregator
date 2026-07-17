@@ -11,10 +11,14 @@ import com.choucj.aiaggregator.source.twitter.model.Tweet;
  *
  * <p>实现类:
  * <ul>
- *   <li>{@code SingleModelRewriter} — Story 2.4, DeepSeek 单模型改写(MVP 默认)</li>
- *   <li>{@code MultiModelRewriter} — Story 5.4, 多模型投票(提升质量)</li>
- *   <li>{@code RagEnhancedRewriter} — Story 5.3, RAG 增强(检索相关知识后改写)</li>
+ *   <li>{@code SingleModelRewriter} — Story 2.4 单模型改写, Story 5.3 在该实现内可选注入 RAG 参考上下文;
+ *       {@code feature-flags.multi-model.enabled=false/missing} 时注册</li>
+ *   <li>{@code MultiModelRewriter} — Story 5.4 多模型投票改写;
+ *       {@code feature-flags.multi-model.enabled=true} 时注册, 与 Single 互斥</li>
  * </ul>
+ *
+ * <p>Processor 侧始终只注入一个 {@code ContentRewriter}; 多模型能力是实现层替换, 不要求
+ * Twitter/GitHub Processor 增加条件分支.
  *
  * <p><b>签名设计 (Story 4.4 扩展):</b>
  * 原始 PRD 只有 Twitter → Article 一条改写路径. Story 4.4 GitHub Pipeline Integration
@@ -32,7 +36,8 @@ public interface ContentRewriter {
      * <p>改写流程(由实现类完成):
      * <ol>
      *   <li>从 {@link Tweet#getContent()} / {@link Tweet#getSummary()} 提取源文本</li>
-     *   <li>调用 LLM(DeepSeek / GLM)生成 Markdown 正文 + 标题 + 摘要</li>
+     *   <li>调用 LLM 生成 Markdown 正文 + 标题 + 摘要; 单模型实现走 DeepSeek→GLM fallback,
+     *       多模型实现并行调用 DeepSeek/GLM 后本地评分选优</li>
      *   <li>填充 {@link Article} 的 {@code aiGenerated=true} 标识(合规要求 AR8)</li>
      *   <li>记录 {@code innovationScore}(若由 InnovationFilter 传递, 否则默认 0)</li>
      * </ol>
@@ -65,4 +70,3 @@ public interface ContentRewriter {
                         + (repo == null ? "(repo=null)" : repo.getFullName()));
     }
 }
-

@@ -8,6 +8,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.RedisCallback;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.data.redis.core.ValueOperations;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 
 import java.time.Duration;
 
@@ -150,5 +151,20 @@ class RedisRepositoryImplTest {
 
         verify(valueOps, never()).get(any());
         verify(redisTemplate, times(1)).expire(eq("k"), any(Duration.class));
+    }
+
+    @Test
+    void shouldIncrementByAndSetTtlInOneRedisScript() {
+        Duration ttl = Duration.ofDays(7);
+        when(redisTemplate.execute(any(DefaultRedisScript.class), eq(java.util.List.of("cost:daily:2026-06-28")),
+                eq(2L), eq(ttl.toMillis()))).thenReturn(102L);
+
+        long total = repository.incrementBy("cost:daily:2026-06-28", 2L, ttl);
+
+        assertThat(total).isEqualTo(102L);
+        verify(redisTemplate).execute(any(DefaultRedisScript.class), eq(java.util.List.of("cost:daily:2026-06-28")),
+                eq(2L), eq(ttl.toMillis()));
+        verify(valueOps, never()).get(any());
+        verify(valueOps, never()).set(any(), any());
     }
 }

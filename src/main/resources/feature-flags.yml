@@ -9,6 +9,7 @@ feature-flags:
     enabled: false               # Phase 4 启用
   rag:
     enabled: false               # Phase 4 启用
+    batch-async-enabled: false    # Story 5.1: 历史文章批量 Embedding 异步开关
   multi-model:
     enabled: false               # Phase 4 启用
   wechat:

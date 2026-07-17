@@ -43,6 +43,12 @@ public class LlmProperties {
         @NotBlank(message = "llm.glm.api-key must be configured (set LLM_GLM_API_KEY env var or fill api-keys.yml)")
         private String apiKey;
 
-        private String baseUrl = "https://open.bigmodel.cn";
+        /**
+         * GLM OpenAI 兼容 API base-url.
+         *
+         * <p>迁移提示: 旧值 {@code https://open.bigmodel.cn} 会导致 OpenAI 兼容路径返回 405；
+         * 已显式配置旧值的环境需同步改为 {@code https://open.bigmodel.cn/api/paas/v4}.
+         */
+        private String baseUrl = "https://open.bigmodel.cn/api/paas/v4";
     }
 }

@@ -102,6 +102,100 @@ public final class RedisKeys {
     }
 
     /**
+     * Story 5.3: 每日 RAG prompt 输入增量 token 累计键.
+     *
+     * <p>键格式: {@code "cost:daily:rag-extra:{yyyy-MM-dd}"}。该键只记录注入参考上下文导致的
+     * prompt token 增量，不能替代或污染 {@link #costDaily(java.time.LocalDate)} 的总 token scalar。
+     *
+     * @param date 日期 (LocalDate, 不为 null)
+     * @return {@code "cost:daily:rag-extra:{date}"} 键字符串
+     */
+    public static String costDailyRagExtra(java.time.LocalDate date) {
+        return "cost:daily:rag-extra:" + date.format(java.time.format.DateTimeFormatter.ISO_LOCAL_DATE);
+    }
+
+    /**
+     * Story 5.5: 单日单模型输入 token 累计键.
+     *
+     * @param date 日期
+     * @param model 模型名，如 {@code deepseek} / {@code glm}
+     * @return {@code "cost:daily:model:{date}:{model}:input"}
+     */
+    public static String costDailyModelInput(java.time.LocalDate date, String model) {
+        return costDailyModelMetric(date, model, "input");
+    }
+
+    /**
+     * Story 5.5: 单日单模型输出 token 累计键.
+     *
+     * @param date 日期
+     * @param model 模型名
+     * @return {@code "cost:daily:model:{date}:{model}:output"}
+     */
+    public static String costDailyModelOutput(java.time.LocalDate date, String model) {
+        return costDailyModelMetric(date, model, "output");
+    }
+
+    /**
+     * Story 5.5: 单日单模型估算成本累计键，单位 micro-cents.
+     *
+     * @param date 日期
+     * @param model 模型名
+     * @return {@code "cost:daily:model:{date}:{model}:estimated-micro-cents"}
+     */
+    public static String costDailyModelEstimatedMicroCents(java.time.LocalDate date, String model) {
+        return costDailyModelMetric(date, model, "estimated-micro-cents");
+    }
+
+    /**
+     * Story 5.5: 月度成本汇总键.
+     *
+     * @param month 月份
+     * @return {@code "cost:monthly:{yyyy-MM}"}
+     */
+    public static String costMonthly(java.time.YearMonth month) {
+        return "cost:monthly:" + month.format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM"));
+    }
+
+    /**
+     * Story 5.5: 月度预算停机标记键.
+     *
+     * @param month 月份
+     * @return {@code "cost:budget:halted:{yyyy-MM}"}
+     */
+    public static String costBudgetHalted(java.time.YearMonth month) {
+        return "cost:budget:halted:" + month.format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM"));
+    }
+
+    /**
+     * Story 5.5: 月度预算手动恢复确认键.
+     *
+     * @param month 月份
+     * @return {@code "cost:budget:resume:{yyyy-MM}"}
+     */
+    public static String costBudgetResume(java.time.YearMonth month) {
+        return "cost:budget:resume:" + month.format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM"));
+    }
+
+    private static String costDailyModelMetric(java.time.LocalDate date, String model, String metric) {
+        return "cost:daily:model:"
+                + date.format(java.time.format.DateTimeFormatter.ISO_LOCAL_DATE)
+                + ":" + sanitizeModel(model)
+                + ":" + metric;
+    }
+
+    private static String sanitizeModel(String model) {
+        if (model == null || model.isBlank()) {
+            throw new IllegalArgumentException("model must not be blank");
+        }
+        String normalized = model.trim().toLowerCase(java.util.Locale.ROOT);
+        if (!normalized.matches("[a-z0-9_-]+")) {
+            throw new IllegalArgumentException("model must match [a-z0-9_-]+");
+        }
+        return normalized;
+    }
+
+    /**
      * Story 3.4: 批量发布待办队列键 (Redis List).
      *
      * <p>键格式: {@code "publish:pending:{yyyy-MM-dd}"} (e.g., {@code "publish:pending:2026-07-06"}).
@@ -174,5 +268,31 @@ public final class RedisKeys {
             throw new IllegalArgumentException("lookbackDays must be >= 1");
         }
         return "github:trending:" + language + ":" + lookbackDays;
+    }
+
+    /**
+     * Story 5.1: RAG Embedding 向量存储键 (Redis JSON + RediSearch).
+     *
+     * <p>键格式: {@code "rag:embedding:{articleId}"} (e.g., {@code "rag:embedding:tw-123"}).
+     * 由 {@link com.choucj.aiaggregator.content.embedding.EmbeddingService} 写入独立
+     * standalone Redis-Stack 实例，不进入业务 Redis Cluster.
+     *
+     * @param articleId 文章 ID, 不为 null/blank
+     * @return {@code "rag:embedding:{articleId}"} 键字符串
+     */
+    public static String embeddingKey(String articleId) {
+        if (articleId == null || articleId.isBlank()) {
+            throw new IllegalArgumentException("articleId must not be blank");
+        }
+        return "rag:embedding:" + articleId;
+    }
+
+    /**
+     * Story 5.1: RAG Embedding 键前缀,供 RediSearch 索引创建使用.
+     *
+     * @return {@code "rag:embedding:"}
+     */
+    public static String embeddingPrefix() {
+        return "rag:embedding:";
     }
 }

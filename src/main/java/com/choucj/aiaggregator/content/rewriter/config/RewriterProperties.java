@@ -14,6 +14,7 @@ import org.springframework.validation.annotation.Validated;
  *   <li>{@link #maxRetries} — LLM 调用失败重试次数, 总尝试 = {@code 1 + maxRetries}</li>
  *   <li>{@link #retryBackoffMs} — 重试退避初始毫秒, 实际等待 = {@code backoffMs * attemptIndex}</li>
  *   <li>{@link #contentMaxCodePoints} — 源推文截断上限 (code points, 防 prompt 过长)</li>
+ *   <li>{@link #multiModelDeadlineMs} — 多模型投票单次聚合等待上限</li>
  * </ul>
  *
  * <p>配置示例 ({@code application.yml}):
@@ -22,6 +23,7 @@ import org.springframework.validation.annotation.Validated;
  *   max-retries: 3
  *   retry-backoff-ms: 1000
  *   content-max-code-points: 2000
+ *   multi-model-deadline-ms: 65000
  * }</pre>
  *
  * <p>校验 (W7/W8/N1, Story 2.3b review lessons 复用):
@@ -61,4 +63,12 @@ public class RewriterProperties {
     @Min(value = 100, message = "rewriter.content-max-code-points must be >= 100")
     @Max(value = 10_000, message = "rewriter.content-max-code-points must be <= 10000")
     private int contentMaxCodePoints = 2000;
+
+    /**
+     * 多模型投票单次聚合等待上限. 默认略高于 LlmConfig 中模型 HTTP 60s timeout,
+     * 用作 request-level 防线, 防 future 永久挂起.
+     */
+    @Min(value = 1000, message = "rewriter.multi-model-deadline-ms must be >= 1000")
+    @Max(value = 300_000, message = "rewriter.multi-model-deadline-ms must be <= 300000")
+    private long multiModelDeadlineMs = 65_000L;
 }

@@ -2,12 +2,13 @@ package com.choucj.aiaggregator.task.scheduler;
 
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
+import com.choucj.aiaggregator.monitoring.CostMonitor;
 import com.choucj.aiaggregator.processor.GitHubProcessor;
 import com.choucj.aiaggregator.processor.TwitterProcessor;
 import com.choucj.aiaggregator.processor.config.ProcessorProperties;
 import com.choucj.aiaggregator.task.queue.TaskQueue;
 import com.choucj.aiaggregator.task.queue.TaskRecoveryRunner;
-import lombok.RequiredArgsConstructor;
+import org.springframework.beans.factory.annotation.Autowired;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -16,6 +17,7 @@ import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import java.time.YearMonth;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 
@@ -60,6 +62,7 @@ public class ContentScheduler {
     private final TwitterProcessor twitterProcessor;
     private final Optional<GitHubProcessor> githubProcessorOptional;
     private final ProcessorProperties processorProperties;
+    private final Optional<CostMonitor> costMonitorOptional;
     private final boolean runOnStartup;
 
     /**
@@ -91,11 +94,24 @@ public class ContentScheduler {
                             Optional<GitHubProcessor> githubProcessorOptional,
                             ProcessorProperties processorProperties,
                             @Value("${schedule.run-on-startup:true}") boolean runOnStartup) {
+        this(taskQueue, recoveryRunner, twitterProcessor, githubProcessorOptional, processorProperties,
+                Optional.empty(), runOnStartup);
+    }
+
+    @Autowired
+    public ContentScheduler(TaskQueue taskQueue,
+                            TaskRecoveryRunner recoveryRunner,
+                            TwitterProcessor twitterProcessor,
+                            Optional<GitHubProcessor> githubProcessorOptional,
+                            ProcessorProperties processorProperties,
+                            Optional<CostMonitor> costMonitorOptional,
+                            @Value("${schedule.run-on-startup:true}") boolean runOnStartup) {
         this.taskQueue = taskQueue;
         this.recoveryRunner = recoveryRunner;
         this.twitterProcessor = twitterProcessor;
         this.githubProcessorOptional = githubProcessorOptional;
         this.processorProperties = processorProperties;
+        this.costMonitorOptional = costMonitorOptional;
         this.runOnStartup = runOnStartup;
     }
 
@@ -108,6 +124,10 @@ public class ContentScheduler {
     public void processContent() {
         log.info("开始执行内容处理任务");
         try {
+            if (isBudgetHalted()) {
+                log.error("成本预算已停机, 跳过本次自动内容处理");
+                return;
+            }
             enqueueRunTaskIfAbsent("cron");
             processQueueOnce();
             log.info("内容处理任务完成");
@@ -145,11 +165,6 @@ public class ContentScheduler {
             recoveryRunner.recoverPendingTasks();
         } catch (Exception e) {
             log.warn("启动时断点恢复失败, 继续触发首次内容处理", e);
-        }
-        try {
-            enqueueRunTaskIfAbsent("startup");
-        } catch (Exception e) {
-            log.warn("启动时入队失败, 仍继续触发首次内容处理 (processContent 内部会再次尝试 enqueue)", e);
         }
         processContent();
     }
@@ -240,6 +255,18 @@ public class ContentScheduler {
         }
         log.warn("未知 taskId 前缀, 跳过 (Epic 5+ 其他前缀待扩展): taskId={}, expectedPrefix={}",
                 taskId, prefix);
+    }
+
+    private boolean isBudgetHalted() {
+        if (costMonitorOptional.isEmpty()) {
+            return false;
+        }
+        try {
+            return costMonitorOptional.get().refreshAndCheckProcessingHalted(YearMonth.now());
+        } catch (RuntimeException e) {
+            log.warn("读取成本预算 gate 失败, 继续本次自动处理: errorType={}", e.getClass().getSimpleName());
+            return false;
+        }
     }
 
     private void enqueueRunTaskIfAbsent(String trigger) {

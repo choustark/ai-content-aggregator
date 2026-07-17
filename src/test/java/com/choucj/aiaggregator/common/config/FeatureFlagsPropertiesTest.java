@@ -43,12 +43,16 @@ class FeatureFlagsPropertiesTest {
                                 "feature-flags.twitter.enabled", "true",
                                 "feature-flags.twitter.use-twscrape", "true",
                                 "feature-flags.github.enabled", "true",
+                                "feature-flags.rag.batch-async-enabled", "true",
+                                "feature-flags.multi-model.enabled", "true",
                                 "feature-flags.wechat.auto-publish", "true"))))
                 .run(ctx -> {
                     FeatureFlagsProperties props = ctx.getBean(FeatureFlagsProperties.class);
                     assertThat(props.getTwitter().isEnabled()).isTrue();
                     assertThat(props.getTwitter().isUseTwscrape()).isTrue();
                     assertThat(props.getGithub().isEnabled()).isTrue();
+                    assertThat(props.getRag().isBatchAsyncEnabled()).isTrue();
+                    assertThat(props.getMultiModel().isEnabled()).isTrue();
                     assertThat(props.getWechat().isAutoPublish()).isTrue();
                     // 未配置的开关仍是默认值 false
                     assertThat(props.getRag().isEnabled()).isFalse();

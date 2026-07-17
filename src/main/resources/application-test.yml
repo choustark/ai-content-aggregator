@@ -26,7 +26,7 @@ langchain4j:
     redis:
       enabled: false
       index-name: aiaggregator-embeddings-test
-      dimension: 1536
+      dimension: 1024
 
 logging:
   level:
