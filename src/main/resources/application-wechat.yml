@@ -1,8 +1,0 @@
-# 微信发布启用 profile.
-#
-# application.yml 默认通过 spring.autoconfigure.exclude 排除 WxJava starter 自动配置,
-# 避免 wechat.mp.enabled=false 时仍创建 WxMpService / HttpClient 池.
-# 激活本 profile 后清空排除项, 再配合 wechat.mp.enabled=true 启用微信集成.
-spring:
-  autoconfigure:
-    exclude: []

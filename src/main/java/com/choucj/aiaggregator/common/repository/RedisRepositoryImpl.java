@@ -80,11 +80,11 @@ public class RedisRepositoryImpl implements RedisRepository {
     private final RedisTemplate<String, Object> objectRedisTemplate;
     private final ObjectMapper objectMapper;
 
-    private static final DefaultRedisScript<Long> INCREMENT_WITH_TTL_SCRIPT = new DefaultRedisScript<>("""
+    private static final DefaultRedisScript<Number> INCREMENT_WITH_TTL_SCRIPT = new DefaultRedisScript<>("""
             local total = redis.call('INCRBY', KEYS[1], ARGV[1])
             redis.call('PEXPIRE', KEYS[1], ARGV[2])
             return total
-            """, Long.class);
+            """, Number.class);
 
     @Override
     public void set(String key, String value) {
@@ -129,9 +129,9 @@ public class RedisRepositoryImpl implements RedisRepository {
 
     @Override
     public long incrementBy(String key, long delta, Duration ttl) {
-        Long total = supplyWithMapping(() -> stringRedisTemplate.execute(
+        Number total = supplyWithMapping(() -> stringRedisTemplate.execute(
                 INCREMENT_WITH_TTL_SCRIPT, List.of(key), delta, ttl.toMillis()), key, "incrementBy");
-        return total == null ? delta : total;
+        return total == null ? delta : total.longValue();
     }
 
     @Override

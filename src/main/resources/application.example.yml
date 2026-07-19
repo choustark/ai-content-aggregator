@@ -17,7 +17,7 @@ spring:
     # 通过 SPRING_PROFILES_ACTIVE 环境变量切换 dev/test/prod, 默认 dev.
     active: ${SPRING_PROFILES_ACTIVE:dev}
   config:
-    # 引入 3 个外部 yml. optional: 前缀表示缺失不报错 (如未复制 api-keys.yml 时启动 dev 也能跑).
+    # 引入外部配置. optional: 前缀表示缺失不报错 (如未复制 api-keys.yml 时启动 dev 也能跑).
     # 加载顺序: 后引入的覆盖先引入的. api-keys 最后加载, 优先级最高.
     import:
       - "optional:classpath:api-keys.yml"
@@ -73,9 +73,29 @@ rsshub:
 # Twitter 账号列表 — TwitterSource 编排 RSSHub + FxTwitter 的目标账号.
 # handle 不带 @ 前缀. 空列表时 fetch() 返回空.
 twitter:
+  # 推文发现 provider: rsshub / apify.
+  discovery-provider: rsshub
   accounts:
     - karpathy
     - sama
+
+# Apify Twitter/X Actor 发现配置 — twitter.discovery-provider=apify 时启用.
+# 默认适配 parseforge~x-com-scraper:
+#   https://apify.com/parseforge/x-com-scraper
+apify:
+  twitter:
+    base-url: https://api.apify.com
+    actor-id: parseforge~x-com-scraper
+    token: ${APIFY_API_TOKEN:}
+    max-tweets-per-account: 50
+    timeout-seconds: 180
+    use-search-terms: false
+    search-term-field: searchTerms
+    search-term-template: "from:%s"
+    handle-field: usernames
+    max-items-field: maxItems
+    input-defaults:
+      sort: Latest
 
 # FxTwitter 补全客户端配置 — 通过 /i/status/{id}.json 端点补全 content/互动数/imageUrls.
 # 默认公共实例 https://api.fxtwitter.com (Vercel global edge, 稳定性较好).
@@ -279,8 +299,7 @@ github:
 # [SDK 层] wx.mp.* — 由 WxJava starter 4.6.0 WxMpProperties 直接消费, app-id/secret 实际在 api-keys.yml.
 # starter 自动配置链: WxMpAutoConfiguration → WxMpStorageAutoConfiguration (创建 WxMpDefaultConfigImpl)
 # → WxMpServiceAutoConfiguration (创建 WxMpServiceHttpClientImpl).
-# 默认 application.yml 通过 spring.autoconfigure.exclude 排除 WxMpAutoConfiguration; 启用微信发布时激活 wechat profile
-# 清空排除项, 并设置 wechat.mp.enabled=true.
+# 项目不再排除 WxJava starter 自动配置; 需要微信发布时设置 wechat.mp.enabled=true 并提供 wx.mp.app-id/secret.
 wx:
   mp:
     app-id: ${WX_MP_APP_ID:dev-placeholder}
@@ -300,14 +319,10 @@ wx:
 wechat:
   mp:
     # 发布渠道总开关 — false 时 WeChatClient / WeChatPublisher / 项目层 WeChatConfig Bean 不注册.
-    # 启用时还需激活 wechat profile, 解除 application.yml 对 WxMpAutoConfiguration 的默认排除.
+    # WxMpService 由 WxJava starter 根据 wx.mp.* 标准配置自动创建; 本开关只控制项目层发布链路.
     enabled: false
     # 草稿默认作者名 (微信公众号后台展示)
     default-author: "AI 内容聚合器"
-    # 草稿封面永久素材 media_id — 启用 WeChatPublisher 时必填; 先在公众号后台/素材接口上传封面图获取.
-    thumb-media-id: ${WX_MP_THUMB_MEDIA_ID:}
-    # AI 辅助生成声明模板 — Article.aiGenerated=true 时追加到草稿尾 (合规要求 AR8)
-    ai-generated-disclaimer: "本文由 AI 辅助生成, 已通过人工审核."
     # 人工审核提醒日志开关 (Story 3.5) — 微信草稿创建成功后是否输出
     # "请到微信公众号后台预览并手动发布" log.info 提醒. 关闭时仅跳过提醒日志, DRAFT_CREATED 状态写入不跳过.
     # 默认 true. 若用户已通过其他渠道 (如邮件/IM 通知) 获知草稿创建, 可关闭避免日志冗余.

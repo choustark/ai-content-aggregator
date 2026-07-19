@@ -6,7 +6,6 @@ import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.content.rewriter.SingleModelRewriter;
 import com.choucj.aiaggregator.publish.status.ArticleStatusService;
 import com.choucj.aiaggregator.publish.wechat.client.WxJavaWeChatClient;
-import com.choucj.aiaggregator.publish.wechat.config.WeChatProperties;
 import com.choucj.aiaggregator.publish.wechat.converter.ArticleToWxArticleConverter;
 import lombok.extern.slf4j.Slf4j;
 import me.chanjar.weixin.common.error.WxErrorException;
@@ -70,7 +69,7 @@ public class WeChatPublisher {
 
     private final WxMpService wxMpService;
     private final ArticleToWxArticleConverter converter;
-    private final WeChatProperties weChatProperties;
+    private final WeChatThumbMediaIdResolver thumbMediaIdResolver;
     private final ArticleStatusService articleStatusService;
     private final boolean reviewReminderEnabled;
 
@@ -80,18 +79,18 @@ public class WeChatPublisher {
      *
      * @param wxMpService           WxJava 微信服务
      * @param converter             Article → WxMpDraftArticles 转换器 (Story 3.2)
-     * @param weChatProperties      微信配置 (含 thumbMediaId)
+     * @param thumbMediaIdResolver  草稿封面 media_id 解析器
      * @param articleStatusService  状态机服务 (Story 3.5, 写 DRAFT_CREATED)
      * @param reviewReminderEnabled 人工审核提醒开关 (Story 3.5 AC-12, 默认 true)
      */
     public WeChatPublisher(WxMpService wxMpService,
                            ArticleToWxArticleConverter converter,
-                           WeChatProperties weChatProperties,
+                           WeChatThumbMediaIdResolver thumbMediaIdResolver,
                            ArticleStatusService articleStatusService,
                            @Value("${wechat.mp.review-reminder-enabled:true}") boolean reviewReminderEnabled) {
         this.wxMpService = wxMpService;
         this.converter = converter;
-        this.weChatProperties = weChatProperties;
+        this.thumbMediaIdResolver = thumbMediaIdResolver;
         this.articleStatusService = articleStatusService;
         this.reviewReminderEnabled = reviewReminderEnabled;
     }
@@ -106,14 +105,11 @@ public class WeChatPublisher {
         WxMpDraftArticles wxArticle = converter.convert(article);
 
         // AC-10 (Story 3.3 review D1→Patch): 必须在 addDraft 调用前覆盖 Story 3.2 converter 占位的空串.
-        // 微信 draft/add 接口要求 thumb_media_id 必须为有效的永久素材 media_id. 配置 null/blank 时 fail-fast.
-        String configuredThumbMediaId = weChatProperties.getThumbMediaId();
-        String thumbMediaId = configuredThumbMediaId == null
-                ? null
-                : configuredThumbMediaId.trim();
+        // 微信 draft/add 接口要求 thumb_media_id 必须为有效的永久素材 media_id; 默认按素材名称动态查询并缓存.
+        String thumbMediaId = thumbMediaIdResolver.resolve();
         if (thumbMediaId == null || thumbMediaId.isBlank()) {
             throw new NonRetryableException(ErrorCode.WECHAT_API_ERROR,
-                    "wechat.mp.thumb-media-id 未配置, articleId=" + articleId);
+                    "微信草稿封面 media_id 解析为空, articleId=" + articleId);
         }
         wxArticle.setThumbMediaId(thumbMediaId);
 

@@ -40,12 +40,12 @@ import static org.assertj.core.api.Assumptions.assumeThat;
  */
 @SpringBootTest
 @TestPropertySource(properties = {
-        "spring.autoconfigure.exclude=",
         "wechat.mp.enabled=true",
         "archive.enabled=false",
         "schedule.run-on-startup=false"
 })
 @Slf4j
+@org.junit.jupiter.api.Tag("external")
 class WxJavaConnectivitySmokeTest {
 
     @Autowired

@@ -167,4 +167,15 @@ class RedisRepositoryImplTest {
         verify(valueOps, never()).get(any());
         verify(valueOps, never()).set(any(), any());
     }
+
+    @Test
+    void shouldAcceptAnyNumericRedisScriptReturnTypeOnIncrementBy() {
+        Duration ttl = Duration.ofDays(7);
+        when(redisTemplate.execute(any(DefaultRedisScript.class), eq(java.util.List.of("cost:daily:2026-06-28")),
+                eq(2L), eq(ttl.toMillis()))).thenReturn(102);
+
+        long total = repository.incrementBy("cost:daily:2026-06-28", 2L, ttl);
+
+        assertThat(total).isEqualTo(102L);
+    }
 }

@@ -24,6 +24,11 @@ import java.util.List;
 public class TwitterProperties {
 
     /**
+     * 推文发现 provider. 默认 rsshub; 可切换为 apify.
+     */
+    private String discoveryProvider = "rsshub";
+
+    /**
      * Twitter 账号 handle 列表(不带 @).
      * <p>配置示例:
      * <pre>{@code

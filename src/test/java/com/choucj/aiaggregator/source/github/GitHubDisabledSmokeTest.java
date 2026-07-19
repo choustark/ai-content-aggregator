@@ -30,6 +30,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @ExtendWith(OutputCaptureExtension.class)
 @TestPropertySource(properties = {
         "features.github.enabled=false",
+        "wechat.mp.enabled=false",
         "schedule.run-on-startup=false"
 })
 class GitHubDisabledSmokeTest {

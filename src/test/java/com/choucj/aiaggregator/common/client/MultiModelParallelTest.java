@@ -38,6 +38,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  *
  * <p>仅当 {@code LLM_INTEGRATION_TEST=true} + {@code LLM_DEEPSEEK_API_KEY} 配置时运行, 否则跳过.
  */
+@org.junit.jupiter.api.Tag("external")
 class MultiModelParallelTest {
 
     @BeforeAll

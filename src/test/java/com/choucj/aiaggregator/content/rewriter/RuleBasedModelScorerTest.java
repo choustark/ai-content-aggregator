@@ -46,6 +46,23 @@ class RuleBasedModelScorerTest {
     }
 
     @Test
+    void shouldPenalizeThinWechatDrafts() {
+        Article thin = Article.builder()
+                .title("Kimi K3 发布")
+                .content("Kimi K3 发布了。这说明大模型竞争还在继续, 对开发者来说成本可能更低。")
+                .digest("Kimi K3 发布, 大模型竞争继续。")
+                .build();
+
+        ModelScorer.ScoreResult result = scorer.score(thin,
+                new ModelScorer.SourceContext("tw-1", "Kimi K3 发布 大模型 成本 开发者"), "glm");
+
+        assertThat(result.reasonCodes())
+                .contains("CONTENT_TOO_SHORT", "READABILITY_SHORT");
+        assertThat(result.coherenceScore()).isLessThan(25);
+        assertThat(result.readabilityScore()).isLessThan(25);
+    }
+
+    @Test
     void shouldKeepDimensionScoresWithinBounds() {
         Article article = Article.builder()
                 .title("标题")

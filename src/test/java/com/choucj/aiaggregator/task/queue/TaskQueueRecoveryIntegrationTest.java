@@ -34,6 +34,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @SpringBootTest
 @ActiveProfiles("test")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
+@org.junit.jupiter.api.Tag("external")
 class TaskQueueRecoveryIntegrationTest {
 
     @Autowired

@@ -31,6 +31,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * <p>默认跳过。需要本地 {@code redis-vector} 可达且 {@code api-keys.yml} 或进程环境可解析
  * {@code llm.glm.api-key} 后运行。
  */
+@org.junit.jupiter.api.Tag("external")
 class EmbeddingConnectivitySmokeTest {
 
     private static final String INDEX = "aiaggregator-embeddings-smoke";

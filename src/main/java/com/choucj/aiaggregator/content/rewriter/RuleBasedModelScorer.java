@@ -62,9 +62,13 @@ public class RuleBasedModelScorer implements ModelScorer {
             score -= 5;
             reasonCodes.add("STRUCTURE_FLAT");
         }
-        if (content.length() < 80) {
-            score -= 6;
+        int contentLength = content.codePointCount(0, content.length());
+        if (contentLength < 300) {
+            score -= 10;
             reasonCodes.add("CONTENT_TOO_SHORT");
+        } else if (contentLength < 700) {
+            score -= 5;
+            reasonCodes.add("CONTENT_THIN");
         }
         return clamp(score);
     }
@@ -102,9 +106,12 @@ public class RuleBasedModelScorer implements ModelScorer {
     private static int scoreReadability(String content, String digest, List<String> reasonCodes) {
         int score = 25;
         int contentLength = content.codePointCount(0, content.length());
-        if (contentLength < 120) {
-            score -= 5;
+        if (contentLength < 300) {
+            score -= 10;
             reasonCodes.add("READABILITY_SHORT");
+        } else if (contentLength < 700) {
+            score -= 5;
+            reasonCodes.add("READABILITY_THIN");
         } else if (contentLength > 3000) {
             score -= 5;
             reasonCodes.add("READABILITY_LONG");

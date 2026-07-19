@@ -136,6 +136,22 @@ class SingleModelRewriterTest {
     }
 
     @Test
+    void shouldIncludeWechatLongFormQualityConstraintsInSystemPrompt() {
+        Tweet tweet = sampleTweet("quality-123", "Kimi 发布新模型, 声称在推理成本上有明显下降。");
+        when(llmClient.chat(anyString(), anyString())).thenReturn(LLM_RESPONSE);
+
+        ArgumentCaptor<String> systemCaptor = ArgumentCaptor.forClass(String.class);
+        rewriter.rewrite(tweet);
+
+        verify(llmClient).chat(systemCaptor.capture(), anyString());
+        assertThat(systemCaptor.getValue())
+                .contains("900-1300 个中文字符")
+                .contains("至少 5 个自然段")
+                .contains("发生了什么、为什么重要、对普通读者/开发者意味着什么、需要注意的边界")
+                .contains("不要编造源内容没有提供的具体事实");
+    }
+
+    @Test
     void shouldUseEmptyStringWhenContentAndSummaryBothNull() {
         Tweet tweet = Tweet.builder()
                 .id("123")

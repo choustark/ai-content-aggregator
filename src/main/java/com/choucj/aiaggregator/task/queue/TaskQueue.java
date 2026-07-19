@@ -81,8 +81,12 @@ public class TaskQueue {
      * @throws RetryableException Redis 连接异常
      */
     public String poll(long timeout, TimeUnit unit) {
-        String task = supplyWithMapping("poll", RedisKeys.taskQueue(), () ->
-                stringRedisTemplate.opsForList().leftPop(RedisKeys.taskQueue(), timeout, unit));
+        String task = supplyWithMapping("poll", RedisKeys.taskQueue(), () -> {
+            if (timeout <= 0) {
+                return stringRedisTemplate.opsForList().leftPop(RedisKeys.taskQueue());
+            }
+            return stringRedisTemplate.opsForList().leftPop(RedisKeys.taskQueue(), timeout, unit);
+        });
         if (task != null) {
             String finalTask = task;
             supplyWithMapping("poll-add-processing", RedisKeys.taskProcessing(), () ->

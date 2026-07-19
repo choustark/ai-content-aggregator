@@ -50,6 +50,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
         "schedule.run-on-startup=false"
 })
 @Slf4j
+@org.junit.jupiter.api.Tag("external")
 class GitHubConnectivitySmokeTest {
 
     @Autowired

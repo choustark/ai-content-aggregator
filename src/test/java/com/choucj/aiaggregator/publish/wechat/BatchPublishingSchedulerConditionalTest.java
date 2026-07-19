@@ -16,9 +16,6 @@ import static org.assertj.core.api.Assertions.assertThat;
  */
 @SpringBootTest
 @TestPropertySource(properties = {
-        // 清空 application.yml 默认的 spring.autoconfigure.exclude, 让 WxMpAutoConfiguration 生效
-        // (Story 3.1 设计: 默认排除 WxMpAutoConfiguration, 仅 wechat profile 或显式清空时启用)
-        "spring.autoconfigure.exclude=",
         "wechat.mp.enabled=true",
         "wechat.mp.publishing.batch-enabled=false",
         "archive.enabled=false",

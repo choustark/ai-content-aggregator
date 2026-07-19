@@ -6,11 +6,11 @@ feature-flags:
     enabled: true
     use-twscrape: false          # FxTwitter 优先, twscrape 作为降级
   github:
-    enabled: false               # Phase 4 启用
+    enabled: true               # Phase 4 启用
   rag:
     enabled: false               # Phase 4 启用
     batch-async-enabled: false    # Story 5.1: 历史文章批量 Embedding 异步开关
   multi-model:
-    enabled: false               # Phase 4 启用
+    enabled: true               # Phase 4 启用
   wechat:
     auto-publish: false          # 默认人工审核

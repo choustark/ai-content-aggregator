@@ -20,6 +20,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@code LLM_GLM_API_KEY} 均配置时运行, 否则 {@link BeforeAll} {@code assumeTrue} 跳过.
  * 默认在 CI / 未配置 API key 的开发机上跳过, 避免产生真实 API 调用费用.
  */
+@org.junit.jupiter.api.Tag("external")
 class LlmIntegrationTest {
 
     @BeforeAll

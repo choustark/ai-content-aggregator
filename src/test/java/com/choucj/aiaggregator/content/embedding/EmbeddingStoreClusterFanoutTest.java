@@ -46,6 +46,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * Redis-Stack 实例 (或触发 correct-course 评估 Epic 1 存储架构).
  */
 @EnabledIfSystemProperty(named = "spike.h3", matches = "true")
+@org.junit.jupiter.api.Tag("external")
 class EmbeddingStoreClusterFanoutTest {
 
     private static final String INDEX = "spike-h3-fanout";

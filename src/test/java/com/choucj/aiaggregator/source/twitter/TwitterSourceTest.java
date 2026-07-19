@@ -6,11 +6,11 @@ import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.common.repository.RedisRepository;
 import com.choucj.aiaggregator.common.util.RedisKeys;
 import com.choucj.aiaggregator.source.twitter.client.FxTwitterClient;
-import com.choucj.aiaggregator.source.twitter.client.RSSHubClient;
 import com.choucj.aiaggregator.source.twitter.client.TwscrapeClient;
 import com.choucj.aiaggregator.source.twitter.config.FxTwitterProperties;
 import com.choucj.aiaggregator.source.twitter.config.TwitterProperties;
 import com.choucj.aiaggregator.source.twitter.config.TwscrapeProperties;
+import com.choucj.aiaggregator.source.twitter.discovery.TwitterDiscoveryClient;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -45,7 +45,7 @@ import static org.mockito.Mockito.when;
 class TwitterSourceTest {
 
     @Mock
-    private RSSHubClient rssHubClient;
+    private TwitterDiscoveryClient discoveryClient;
     @Mock
     private FxTwitterClient fxTwitterClient;
     @Mock
@@ -68,7 +68,7 @@ class TwitterSourceTest {
         // 默认关闭 twscrape — 让 2.2a 兼容测试无须额外配置即可跑通
         twscrapeProperties = new TwscrapeProperties();
         twscrapeProperties.setEnabled(false);
-        source = new TwitterSource(rssHubClient, fxTwitterClient, twscrapeClient, redisRepository,
+        source = new TwitterSource(discoveryClient, fxTwitterClient, twscrapeClient, redisRepository,
                 twitterProperties, fxTwitterProperties, twscrapeProperties);
     }
 
@@ -79,13 +79,13 @@ class TwitterSourceTest {
         twitterProperties.setAccounts(List.of());
 
         assertThat(source.fetch()).isEmpty();
-        verify(rssHubClient, never()).discoverTweets(anyString());
+        verify(discoveryClient, never()).discoverTweets(anyString());
     }
 
     @Test
     void shouldMergeFxTwitterFieldsOnHappyPath() {
         Tweet partial = baseTweet("1", "summary-rsshub");
-        when(rssHubClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
+        when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
         when(redisRepository.getObject(eq(RedisKeys.tweet("1")), eq(Tweet.class))).thenReturn(null);
         Tweet enriched = Tweet.builder()
                 .id("1").content("full content").replyCount(5).retweetCount(10).likeCount(100)
@@ -109,7 +109,7 @@ class TwitterSourceTest {
     @Test
     void shouldUseCacheWhenHitAndSkipFxTwitterCall() {
         Tweet partial = baseTweet("1", "summary");
-        when(rssHubClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
+        when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
         Tweet cached = Tweet.builder()
                 .id("1").content("cached content").replyCount(7).retweetCount(8).likeCount(9)
                 .imageUrls(List.of("https://img.example/c.jpg")).build();
@@ -129,7 +129,7 @@ class TwitterSourceTest {
     @Test
     void shouldSkipTweetWhenFxTwitterFailsAndNotWriteCache() {
         Tweet partial = baseTweet("1", "summary");
-        when(rssHubClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
+        when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
         when(redisRepository.getObject(eq(RedisKeys.tweet("1")), eq(Tweet.class))).thenReturn(null);
         when(fxTwitterClient.fetchTweetDetail("1"))
                 .thenThrow(new NonRetryableException(ErrorCode.EXTERNAL_API_ERROR, "404"));
@@ -144,7 +144,7 @@ class TwitterSourceTest {
     void shouldReturnPartialWhenBothClientsDisabled() {
         fxTwitterProperties.setEnabled(false);
         Tweet partial = baseTweet("1", "summary");
-        when(rssHubClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
+        when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
 
         List<Tweet> result = source.fetch();
 
@@ -160,8 +160,8 @@ class TwitterSourceTest {
     @Test
     void shouldSkipAccountWhenRssHubFails() {
         twitterProperties.setAccounts(List.of("good", "bad"));
-        when(rssHubClient.discoverTweets("good")).thenReturn(List.of(baseTweet("1", "s1")));
-        when(rssHubClient.discoverTweets("bad"))
+        when(discoveryClient.discoverTweets("good")).thenReturn(List.of(baseTweet("1", "s1")));
+        when(discoveryClient.discoverTweets("bad"))
                 .thenThrow(new RetryableException(ErrorCode.EXTERNAL_API_ERROR, "5xx"));
         when(redisRepository.getObject(anyString(), eq(Tweet.class))).thenReturn(null);
         when(fxTwitterClient.fetchTweetDetail(anyString()))
@@ -170,14 +170,14 @@ class TwitterSourceTest {
         List<Tweet> result = source.fetch();
 
         assertThat(result).hasSize(1);
-        verify(rssHubClient, times(1)).discoverTweets("good");
-        verify(rssHubClient, times(1)).discoverTweets("bad");
+        verify(discoveryClient, times(1)).discoverTweets("good");
+        verify(discoveryClient, times(1)).discoverTweets("bad");
     }
 
     @Test
     void shouldTreatCacheReadFailureAsMissAndContinue() {
         Tweet partial = baseTweet("1", "summary");
-        when(rssHubClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
+        when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
         when(redisRepository.getObject(eq(RedisKeys.tweet("1")), eq(Tweet.class)))
                 .thenThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "down"));
         Tweet enriched = Tweet.builder().id("1").content("c").replyCount(1).build();
@@ -192,7 +192,7 @@ class TwitterSourceTest {
     @Test
     void shouldIgnoreCacheWriteFailure() {
         Tweet partial = baseTweet("1", "summary");
-        when(rssHubClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
+        when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
         when(redisRepository.getObject(anyString(), eq(Tweet.class))).thenReturn(null);
         when(fxTwitterClient.fetchTweetDetail("1"))
                 .thenReturn(Tweet.builder().id("1").content("c").build());
@@ -206,7 +206,7 @@ class TwitterSourceTest {
 
     @Test
     void shouldProcessMultipleTweetsFromOneAccount() {
-        when(rssHubClient.discoverTweets("karpathy")).thenReturn(List.of(
+        when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(
                 baseTweet("1", "s1"), baseTweet("2", "s2")));
         when(redisRepository.getObject(anyString(), eq(Tweet.class))).thenReturn(null);
         when(fxTwitterClient.fetchTweetDetail("1"))
@@ -225,7 +225,7 @@ class TwitterSourceTest {
     void shouldUseTwscrapeAsPrimaryWhenEnabled() {
         twscrapeProperties.setEnabled(true);
         Tweet partial = baseTweet("1", "summary");
-        when(rssHubClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
+        when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
         when(redisRepository.getObject(eq(RedisKeys.tweet("1")), eq(Tweet.class))).thenReturn(null);
         Tweet twscrapeEnriched = Tweet.builder()
                 .id("1").content("from-twscrape").replyCount(11).retweetCount(22).likeCount(33)
@@ -249,7 +249,7 @@ class TwitterSourceTest {
     void shouldFallbackToFxTwitterWhenTwscrapeFails() {
         twscrapeProperties.setEnabled(true);
         Tweet partial = baseTweet("1", "summary");
-        when(rssHubClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
+        when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
         when(redisRepository.getObject(eq(RedisKeys.tweet("1")), eq(Tweet.class))).thenReturn(null);
         when(twscrapeClient.fetchTweetDetail(eq("1"), anyString()))
                 .thenThrow(new RetryableException(ErrorCode.EXTERNAL_API_ERROR, "twscrape timeout"));
@@ -273,7 +273,7 @@ class TwitterSourceTest {
     void shouldDropTweetWhenTwscrapeAndFxTwitterBothFail() {
         twscrapeProperties.setEnabled(true);
         Tweet partial = baseTweet("1", "summary");
-        when(rssHubClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
+        when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
         when(redisRepository.getObject(eq(RedisKeys.tweet("1")), eq(Tweet.class))).thenReturn(null);
         when(twscrapeClient.fetchTweetDetail(eq("1"), anyString()))
                 .thenThrow(new RetryableException(ErrorCode.EXTERNAL_API_ERROR, "twscrape 5xx"));
@@ -292,7 +292,7 @@ class TwitterSourceTest {
         twscrapeProperties.setEnabled(true);
         fxTwitterProperties.setEnabled(false);
         Tweet partial = baseTweet("1", "summary");
-        when(rssHubClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
+        when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
         when(redisRepository.getObject(eq(RedisKeys.tweet("1")), eq(Tweet.class))).thenReturn(null);
         when(twscrapeClient.fetchTweetDetail(eq("1"), anyString()))
                 .thenThrow(new RetryableException(ErrorCode.EXTERNAL_API_ERROR, "twscrape down"));
@@ -308,7 +308,7 @@ class TwitterSourceTest {
     void shouldSkipBothClientsWhenCacheHitOnDualChain() {
         twscrapeProperties.setEnabled(true);
         Tweet partial = baseTweet("1", "summary");
-        when(rssHubClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
+        when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
         Tweet cached = Tweet.builder()
                 .id("1").content("cached").replyCount(9).likeCount(99).build();
         when(redisRepository.getObject(eq(RedisKeys.tweet("1")), eq(Tweet.class))).thenReturn(cached);
@@ -327,7 +327,7 @@ class TwitterSourceTest {
         twscrapeProperties.setEnabled(false);
         fxTwitterProperties.setEnabled(false);
         Tweet partial = baseTweet("1", "summary-rsshub");
-        when(rssHubClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
+        when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
 
         List<Tweet> result = source.fetch();
 

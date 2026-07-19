@@ -27,9 +27,8 @@ import static org.mockito.Mockito.when;
  *   <li>AC-1 title 映射 + 64 codepoint 截断 (含 emoji UTF-16 代理对)</li>
  *   <li>AC-2 digest 映射 + content 120 codepoint fallback + <b>P2 (非空 digest 也强制 120 cp 截断)</b></li>
  *   <li>AC-3 Markdown → HTML (headings/code/link/image/list/table)</li>
- *   <li>AC-4 footer 拼接 + AR8 合规 + 防二次解析
+ *   <li>AC-4 footer 拼接 + 防二次解析
  *       + <b>P1 (source 规范化 + HTML escape)</b>
- *       + <b>P5 (disclaimer null/blank fallback)</b>
  *       + <b>R3-P3 (source normalize 后为空 → 不输出空来源行)</b></li>
  *   <li>AC-5 图片 URL 原样保留</li>
  *   <li>AC-6 default author</li>
@@ -52,7 +51,6 @@ import static org.mockito.Mockito.when;
 @ExtendWith({MockitoExtension.class, OutputCaptureExtension.class})
 class ArticleToWxArticleConverterTest {
 
-    private static final String DEFAULT_DISCLAIMER = "本文由 AI 辅助生成, 已通过人工审核.";
     private static final String DEFAULT_AUTHOR = "AI 内容聚合器";
 
     private WeChatProperties properties;
@@ -64,7 +62,6 @@ class ArticleToWxArticleConverterTest {
         properties = new WeChatProperties();
         properties.setEnabled(true);
         properties.setDefaultAuthor(DEFAULT_AUTHOR);
-        properties.setAiGeneratedDisclaimer(DEFAULT_DISCLAIMER);
         converter = new ArticleToWxArticleConverter(properties);
     }
 
@@ -270,10 +267,10 @@ class ArticleToWxArticleConverterTest {
                 .contains("</table>");
     }
 
-    // ============ AC-4: footer 拼接 + P1 normalize/escape + P5 disclaimer fallback ============
+    // ============ AC-4: footer 拼接 + P1 normalize/escape ============
 
     @Test
-    void shouldAppendFooterWithSourceAndDisclaimer_WhenAiGeneratedAndSourcePresent() {
+    void shouldAppendSourceFooterOnly_WhenSourcePresent() {
         Article article = sampleArticleBuilder("标题", "# 正文")
                 .source("来源:@elonmusk")
                 .build();
@@ -286,11 +283,12 @@ class ArticleToWxArticleConverterTest {
                 .contains("@elonmusk")  // P1 normalize 后的 source 内容
                 // P1: source 中的 "来源:" 前缀已移除, 不会重复输出
                 .doesNotContain("来源:@elonmusk")
-                .contains("<em>" + DEFAULT_DISCLAIMER + "</em>");
+                .doesNotContain("本文由 AI 辅助生成")
+                .doesNotContain("已通过人工审核");
     }
 
     @Test
-    void shouldAppendFooterWithoutSource_WhenAiGeneratedAndSourceMissing() {
+    void shouldNotAppendFooter_WhenSourceMissing() {
         Article article = sampleArticleBuilder("标题", "# 正文")
                 .source(null)
                 .build();
@@ -298,13 +296,13 @@ class ArticleToWxArticleConverterTest {
         WxMpDraftArticles result = converter.convert(article);
 
         assertThat(result.getContent())
-                .contains("<hr/>")
-                .contains("<em>" + DEFAULT_DISCLAIMER + "</em>")
+                .doesNotContain("<hr/>")
+                .doesNotContain("本文由 AI 辅助生成")
                 .doesNotContain("<strong>来源:</strong>");
     }
 
     @Test
-    void shouldAppendFooterWithoutSource_WhenSourceIsBlank() {
+    void shouldNotAppendFooter_WhenSourceIsBlank() {
         Article article = sampleArticleBuilder("标题", "# 正文")
                 .source("   ")
                 .build();
@@ -312,12 +310,13 @@ class ArticleToWxArticleConverterTest {
         WxMpDraftArticles result = converter.convert(article);
 
         assertThat(result.getContent())
-                .contains("<em>" + DEFAULT_DISCLAIMER + "</em>")
+                .doesNotContain("<hr/>")
+                .doesNotContain("本文由 AI 辅助生成")
                 .doesNotContain("<strong>来源:</strong>");
     }
 
     @Test
-    void shouldAppendSourceOnly_WhenNotAiGeneratedAndSourcePresent() {
+    void shouldAppendSourceFooter_WhenNotAiGeneratedAndSourcePresent() {
         Article article = sampleArticleBuilder("标题", "# 正文")
                 .source("来源:@manual")
                 .aiGenerated(false)
@@ -329,7 +328,7 @@ class ArticleToWxArticleConverterTest {
                 .contains("<strong>来源:</strong>")
                 .contains("@manual")  // P1 normalize 后的内容
                 .doesNotContain("来源:@manual")  // P1: 不重复前缀
-                .doesNotContain(DEFAULT_DISCLAIMER);
+                .doesNotContain("本文由 AI 辅助生成");
     }
 
     @Test
@@ -342,27 +341,20 @@ class ArticleToWxArticleConverterTest {
         WxMpDraftArticles result = converter.convert(article);
 
         assertThat(result.getContent()).doesNotContain("<hr/>");
-        assertThat(result.getContent()).doesNotContain(DEFAULT_DISCLAIMER);
+        assertThat(result.getContent()).doesNotContain("本文由 AI 辅助生成");
         assertThat(result.getContent()).doesNotContain("<strong>来源:</strong>");
     }
 
     @Test
-    void shouldNotDoubleProcessFooterDisclaimerAsMarkdown() {
-        // 关键测试: 即使 disclaimer 含 Markdown 特殊字符 (如 #), 也不应被 commonmark 二次解析
-        // 因为 footer 是在 renderMarkdown 之后追加的纯 HTML
-        properties.setAiGeneratedDisclaimer("# 这不是标题 而是 AI 声明 *保留原文*");
-
+    void shouldNotAppendAiDisclaimerToWechatDraft() {
         Article article = sampleArticleBuilder("标题", "# 正文")
-                .source(null)
                 .build();
 
         WxMpDraftArticles result = converter.convert(article);
 
-        // 验证 # 字符被 verbatim 保留在 <em> 内, 而非被转成 <h1>
-        // P1 escapeHtml 不转义 # 或 *, 所以 disclaimer 内容 verbatim 进入 <em>
         assertThat(result.getContent())
-                .contains("<em># 这不是标题 而是 AI 声明 *保留原文*</em>")
-                .doesNotContain("<h1>这不是标题");
+                .doesNotContain("本文由 AI 辅助生成")
+                .doesNotContain("已通过人工审核");
     }
 
     /**
@@ -409,54 +401,6 @@ class ArticleToWxArticleConverterTest {
         assertThat(result.getContent())
                 .contains("Tom &amp; Jerry")
                 .doesNotContain("Tom & J");  // 原 & 后跟 J 的形式已被转义
-    }
-
-    /**
-     * P5 review fix: aiGeneratedDisclaimer 配置为 null 时, fallback 到默认声明 (防 NPE + AR8 合规).
-     */
-    @Test
-    void shouldFallbackToDefaultDisclaimer_WhenConfigIsNull() {
-        properties.setAiGeneratedDisclaimer(null);
-        Article article = sampleArticleBuilder("标题", "# 正文")
-                .source(null)
-                .build();
-
-        WxMpDraftArticles result = converter.convert(article);
-
-        assertThat(result.getContent())
-                .contains("<em>" + DEFAULT_DISCLAIMER + "</em>");
-    }
-
-    /**
-     * P5 review fix: aiGeneratedDisclaimer 配置为 blank 时, fallback 到默认声明.
-     */
-    @Test
-    void shouldFallbackToDefaultDisclaimer_WhenConfigIsBlank() {
-        properties.setAiGeneratedDisclaimer("   ");
-        Article article = sampleArticleBuilder("标题", "# 正文")
-                .source(null)
-                .build();
-
-        WxMpDraftArticles result = converter.convert(article);
-
-        assertThat(result.getContent())
-                .contains("<em>" + DEFAULT_DISCLAIMER + "</em>");
-    }
-
-    /**
-     * P5 review fix: fallback 时 log.warn 提示运维检查配置.
-     */
-    @Test
-    void shouldLogWarn_WhenDisclaimerFallsBack(CapturedOutput output) {
-        properties.setAiGeneratedDisclaimer(null);
-        Article article = sampleArticle("标题", "# 正文");
-
-        converter.convert(article);
-
-        assertThat(output.getOut())
-                .contains("WARN")
-                .contains("aiGeneratedDisclaimer")
-                .contains("fallback");
     }
 
     // ============ AC-5: 图片 URL 原样保留 ============
@@ -773,15 +717,14 @@ class ArticleToWxArticleConverterTest {
 
     @Test
     void shouldNotEmitEmptySourceLine_WhenSourceIsOnlyColonPrefix() {
-        // R3-P3: source="来源:" normalize 后为空, 应走 FOOTER_TEMPLATE_NO_SOURCE 分支,
-        // 不输出 <p><strong>来源:</strong> </p>.
+        // R3-P3: source="来源:" normalize 后为空, 不输出空来源行.
         Article article = sampleArticleBuilder("标题", "# 正文")
                 .source("来源:").build();
 
         WxMpDraftArticles result = converter.convert(article);
 
         assertThat(result.getContent())
-                .contains("<em>" + DEFAULT_DISCLAIMER + "</em>")
+                .doesNotContain("<hr/>")
                 .doesNotContain("<strong>来源:</strong> ")
                 .doesNotContain("<strong>来源:</strong></p>");
     }
@@ -795,7 +738,7 @@ class ArticleToWxArticleConverterTest {
         WxMpDraftArticles result = converter.convert(article);
 
         assertThat(result.getContent())
-                .contains("<em>" + DEFAULT_DISCLAIMER + "</em>")
+                .doesNotContain("<hr/>")
                 .doesNotContain("<strong>来源:</strong> ")
                 .doesNotContain("<strong>来源:</strong></p>");
     }

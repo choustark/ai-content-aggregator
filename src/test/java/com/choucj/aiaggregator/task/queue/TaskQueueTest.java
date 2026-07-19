@@ -101,14 +101,26 @@ class TaskQueueTest {
     void shouldPollTaskAndAddToProcessingSet() {
         when(stringRedisTemplate.opsForList()).thenReturn(listOps);
         when(stringRedisTemplate.opsForSet()).thenReturn(setOps);
-        when(listOps.leftPop(anyString(), anyLong(), any(TimeUnit.class))).thenReturn("task-1");
+        when(listOps.leftPop("task:queue")).thenReturn("task-1");
         when(setOps.add(anyString(), eq("task-1"))).thenReturn(1L);
 
         String result = taskQueue.poll(0, TimeUnit.SECONDS);
 
         assertThat(result).isEqualTo("task-1");
-        verify(listOps).leftPop("task:queue", 0L, TimeUnit.SECONDS);
+        verify(listOps).leftPop("task:queue");
         verify(setOps).add("task:processing", "task-1");
+    }
+
+    @Test
+    void shouldUseNonBlockingLeftPopWhenTimeoutIsZero() {
+        when(stringRedisTemplate.opsForList()).thenReturn(listOps);
+        when(listOps.leftPop("task:queue")).thenReturn(null);
+
+        String result = taskQueue.poll(0, TimeUnit.SECONDS);
+
+        assertThat(result).isNull();
+        verify(listOps).leftPop("task:queue");
+        verifyNoInteractions(setOps);
     }
 
     @Test

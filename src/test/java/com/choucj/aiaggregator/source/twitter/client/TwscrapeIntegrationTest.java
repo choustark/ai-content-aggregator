@@ -16,6 +16,7 @@ import java.io.InputStreamReader;
  * <p>仅当环境变量 {@code TWSCRAPE_INTEGRATION_TEST=true} 且 {@code which twscrape} 能找到可执行文件时运行,
  * 否则 {@link BeforeAll} {@code assumeTrue} 跳过. 默认在 CI / 未装 twscrape 的开发机上跳过.
  */
+@org.junit.jupiter.api.Tag("external")
 class TwscrapeIntegrationTest {
 
     /** 已知存在的历史公开推文 URL — twscrape tweet 子命令直接吃 URL. */

@@ -27,6 +27,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * <p>仅当环境变量 {@code LLM_INTEGRATION_TEST=true} 且 {@code LLM_GLM_API_KEY} 配置时运行,
  * 否则 {@link BeforeAll} {@code assumeTrue} 跳过.
  */
+@org.junit.jupiter.api.Tag("external")
 class GlmBaseUrlVerificationTest {
 
     @BeforeAll

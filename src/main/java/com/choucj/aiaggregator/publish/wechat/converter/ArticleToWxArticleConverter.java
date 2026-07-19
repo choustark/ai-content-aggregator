@@ -36,7 +36,7 @@ import java.util.Map;
  *   <li>AC-3: Markdown → HTML (commonmark-java 0.22.0 + GFM 表格扩展);
  *       <b>raw HTML inline/block 在 converter 层强制 sanitize</b>
  *       (P0 review fix: 转 Text 节点让 renderer 自动 HTML 实体转义, 严格满足 AC-3 防 XSS)</li>
- *   <li>AC-4: footer 拼接 (来源标注 + AR8 AI 声明, 必须在 Markdown→HTML 后追加防二次解析;
+ *   <li>AC-4: footer 拼接 (仅来源标注, 必须在 Markdown→HTML 后追加防二次解析;
  *       <b>footer 字段强制 HTML escape</b> (P1 review fix) + source 规范化移除前缀防重复)</li>
  *   <li>AC-1/2: title / digest 字段映射 (含 64/120 codepoint 截断, N2 模式;
  *       <b>digest 120 cp 截断应用到所有路径</b> (P2 review fix);
@@ -49,7 +49,7 @@ import java.util.Map;
  *
  * <p><b>lessons-learned 模式引用 (Epic 2 retro B1 行动项):</b>
  * <ul>
- *   <li><b>B2</b> — footer 模板用 {@link String#replace(CharSequence, CharSequence)} 占位符, 防 disclaimer 含 {@code %} 抛 {@code IllegalFormatException}</li>
+ *   <li><b>B2</b> — footer 模板用 {@link String#replace(CharSequence, CharSequence)} 占位符, 防 source 含 {@code %} 抛 {@code IllegalFormatException}</li>
  *   <li><b>D3</b> — Article.title/digest/source nullable String 必须 null-check (P3 强化: title 缺失抛异常而非传 null 给微信 API); Article.aiGenerated primitive boolean 不需 null-check; Article.innovationScore primitive int 无对应字段不映射</li>
  *   <li><b>W11</b> — log.info 含 articleId + 标题截断 + markdown 长度 + html 长度</li>
  *   <li><b>N4</b> — 异常 message 仅含 articleId + 根因 message 截断, 不含 content/html 正文</li>
@@ -57,16 +57,12 @@ import java.util.Map;
  *   <li><b>跨包可见性</b> — 直接调用 {@code SingleModelRewriter.truncateForLog} + {@code getRootMessage} (Story 2.6 已提升 public static); {@code truncateByCodePoints} 仍 package-private, 在本类重新实现 4 行 (YAGNI, 不为 1 个调用提升可见性)</li>
  * </ul>
  *
- * <p><b>AR8 合规实现:</b>
- * Article 默认 {@code aiGenerated=true} (@Builder.Default), footer 拼接
- * {@link WeChatProperties#getAiGeneratedDisclaimer()} 模板到 content HTML 末尾.
- * <b>P5 review fix</b>: disclaimer null/blank 时 fallback 到 {@link #DEFAULT_DISCLAIMER_FALLBACK},
- * 防 {@code String.replace("{{DISCLAIMER}}", null)} 抛 NPE, 同时保证 AR8 声明语义完整.
+ * <p><b>微信草稿展示策略:</b>
+ * 草稿 HTML 只追加来源标注, 不追加 AI 辅助生成声明; Markdown 归档器保留独立声明逻辑.
  *
  * <p>引用源: Story 3.2 (本 story) / Story 3.3 (WeChatPublisher 消费转换结果).
  *
  * @see WxMpDraftArticles WxJava 草稿实体
- * @see WeChatProperties#getAiGeneratedDisclaimer() AR8 声明模板
  */
 @Slf4j
 @Component
@@ -92,34 +88,15 @@ public class ArticleToWxArticleConverter {
     private static final int ERROR_MSG_MAX_CODEPOINTS = 200;
 
     /**
-     * P5 review fix: aiGeneratedDisclaimer null/blank 时的 fallback 声明.
-     *
-     * <p>与 {@link WeChatProperties} 的默认值一致, 保证 AR8 合规语义不破坏.
-     * 仅在运维误配置 (yaml 删除 disclaimer 或显式设空) 时触发, 同时 log.warn 提示.
-     */
-    private static final String DEFAULT_DISCLAIMER_FALLBACK = "本文由 AI 辅助生成, 已通过人工审核.";
-
-    /**
-     * Footer 模板 (含来源 + AI 声明) — B2 模式: 用 {@code {{SOURCE}}} / {@code {{DISCLAIMER}}}
+     * Footer 模板 (仅来源) — B2 模式: 用 {@code {{SOURCE}}}
      * 占位符, 由 {@link String#replace(CharSequence, CharSequence)} 替换, 不用 {@code String.format}
-     * (防 disclaimer / source 含 {@code %} 抛 {@code IllegalFormatException}).
+     * (防 source 含 {@code %} 抛 {@code IllegalFormatException}).
      *
-     * <p>P1 review fix: 占位符替换前 source 与 disclaimer 均经 {@link #escapeHtml(String)}
+     * <p>P1 review fix: 占位符替换前 source 经 {@link #escapeHtml(String)}
      * 强制 HTML 实体转义, 防外部字段含 {@code <}/{@code &}/{@code "} 注入 footer HTML.
      * source 还需经 {@link #normalizeSource(String)} 移除前缀 {@code 来源:}/{@code 来源：}
      * 防与模板中的 {@code <strong>来源:</strong>} 重复输出.
      */
-    private static final String FOOTER_TEMPLATE_WITH_SOURCE = """
-            <hr/>
-            <p><strong>来源:</strong> {{SOURCE}}</p>
-            <p><em>{{DISCLAIMER}}</em></p>""";
-
-    /** Footer 模板 (无来源, 仅 AI 声明) — Article.source 为 null/blank 时使用. */
-    private static final String FOOTER_TEMPLATE_NO_SOURCE = """
-            <hr/>
-            <p><em>{{DISCLAIMER}}</em></p>""";
-
-    /** Footer 模板 (仅来源, 无 AI 声明) — Article.aiGenerated=false 时使用 (极少见, 人工编辑补丁). */
     private static final String FOOTER_TEMPLATE_SOURCE_ONLY = """
             <hr/>
             <p><strong>来源:</strong> {{SOURCE}}</p>""";
@@ -313,25 +290,18 @@ public class ArticleToWxArticleConverter {
     }
 
     /**
-     * 在 HTML 末尾追加 footer (AC-4 AR8 合规) + P1 review fix (HTML escape + source 规范化).
+     * 在 HTML 末尾追加来源 footer (AC-4) + P1 review fix (HTML escape + source 规范化).
      *
      * <p><b>关键:</b> footer 必须在 {@link #renderMarkdown(String, String)} 之后追加,
-     * 否则 disclaimer 文本会被 commonmark 当 Markdown 二次解析 (e.g., 含 {@code *} 或 {@code #} 字符).
+     * 否则 footer 文本会被 commonmark 当 Markdown 二次解析.
      *
      * <p><b>P1 review fix:</b>
      * <ul>
      *   <li>{@link #normalizeSource(String)} — source trim + 移除前缀 {@code 来源:}/{@code 来源：} 防重复 + HTML escape</li>
-     *   <li>{@link #escapeHtml(String)} — disclaimer HTML escape (防外部字段注入 footer HTML)</li>
-     *   <li>P5: disclaimer null/blank 时 fallback 到 {@link #DEFAULT_DISCLAIMER_FALLBACK} (防 NPE + AR8 完整)</li>
      * </ul>
      *
      * <p>组合逻辑:
-     * <ul>
-     *   <li>aiGenerated=true + source 有值 → FOOTER_TEMPLATE_WITH_SOURCE</li>
-     *   <li>aiGenerated=true + source 缺失 → FOOTER_TEMPLATE_NO_SOURCE</li>
-     *   <li>aiGenerated=false + source 有值 → FOOTER_TEMPLATE_SOURCE_ONLY</li>
-     *   <li>aiGenerated=false + source 缺失 → 不追加 footer</li>
-     * </ul>
+     * source 有值时追加来源行; source 缺失时不追加 footer. AI 声明不进入微信草稿 HTML.
      */
     private String appendFooter(String html, Article article) {
         // R3-P3 review fix: 先 normalize source 再判 hasSource,
@@ -341,43 +311,12 @@ public class ArticleToWxArticleConverter {
                 ? normalizeSource(article.getSource())
                 : "";
         boolean hasSource = !normalizedSource.isEmpty();
-        boolean aiGenerated = article.isAiGenerated();
 
-        if (!aiGenerated && !hasSource) {
+        if (!hasSource) {
             return html;
         }
 
-        // P5: disclaimer null/blank 时 fallback 到默认声明
-        String disclaimer = escapeHtml(resolveDisclaimer());
-
-        String footer;
-        if (aiGenerated && hasSource) {
-            footer = FOOTER_TEMPLATE_WITH_SOURCE
-                    .replace("{{SOURCE}}", normalizedSource)
-                    .replace("{{DISCLAIMER}}", disclaimer);
-        } else if (aiGenerated) {
-            footer = FOOTER_TEMPLATE_NO_SOURCE.replace("{{DISCLAIMER}}", disclaimer);
-        } else {
-            // hasSource=true, aiGenerated=false
-            footer = FOOTER_TEMPLATE_SOURCE_ONLY.replace("{{SOURCE}}", normalizedSource);
-        }
-        return html + footer;
-    }
-
-    /**
-     * P5 review fix: 解析 disclaimer, null/blank 时 fallback 到 {@link #DEFAULT_DISCLAIMER_FALLBACK}.
-     *
-     * <p>防 {@code String.replace("{{DISCLAIMER}}", null)} 抛 NPE, 同时防 blank 生成空 AR8 声明
-     * ({@code <em></em>}) 破坏合规意图. fallback 时 log.warn 提示运维检查配置.
-     */
-    private String resolveDisclaimer() {
-        String disclaimer = weChatProperties.getAiGeneratedDisclaimer();
-        if (disclaimer == null || disclaimer.isBlank()) {
-            log.warn("WeChatProperties.aiGeneratedDisclaimer 为 null/blank, 使用 fallback 声明 (AR8 合规). "
-                    + "请检查 application.yml wechat.mp.ai-generated-disclaimer 配置.");
-            return DEFAULT_DISCLAIMER_FALLBACK;
-        }
-        return disclaimer;
+        return html + FOOTER_TEMPLATE_SOURCE_ONLY.replace("{{SOURCE}}", normalizedSource);
     }
 
     /**
@@ -400,7 +339,7 @@ public class ArticleToWxArticleConverter {
     }
 
     /**
-     * P1 review fix: HTML 实体转义 (用于 footer 拼接的外部字段 source/disclaimer).
+     * P1 review fix: HTML 实体转义 (用于 footer 拼接的外部字段 source).
      *
      * <p>转义 5 个 HTML 特殊字符: {@code &} {@code <} {@code >} {@code "} {@code '}.
      * 与 commonmark HtmlRenderer 对 Text 节点的转义规则对齐.

@@ -43,6 +43,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 @SpringBootTest
 @ActiveProfiles("test")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
+@org.junit.jupiter.api.Tag("external")
 class RedisClusterConnectivityTest {
 
     private static final String KEY_PREFIX = "test:1.5a:connectivity:";

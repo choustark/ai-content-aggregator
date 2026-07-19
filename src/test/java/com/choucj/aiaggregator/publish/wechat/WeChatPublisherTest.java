@@ -6,7 +6,6 @@ import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.Article;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.publish.status.ArticleStatusService;
-import com.choucj.aiaggregator.publish.wechat.config.WeChatProperties;
 import com.choucj.aiaggregator.publish.wechat.converter.ArticleToWxArticleConverter;
 import me.chanjar.weixin.common.error.WxError;
 import me.chanjar.weixin.common.error.WxErrorException;
@@ -26,6 +25,7 @@ import org.springframework.boot.test.system.OutputCaptureExtension;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -51,14 +51,15 @@ class WeChatPublisherTest {
     @Mock
     private ArticleStatusService articleStatusService;
 
-    private WeChatProperties weChatProperties;
+    @Mock
+    private WeChatThumbMediaIdResolver thumbMediaIdResolver;
+
     private WeChatPublisher publisher;
 
     @BeforeEach
     void setUp() {
-        weChatProperties = new WeChatProperties();
-        weChatProperties.setThumbMediaId("test-thumb-media-id");
-        publisher = new WeChatPublisher(wxMpService, converter, weChatProperties,
+        lenient().when(thumbMediaIdResolver.resolve()).thenReturn("test-thumb-media-id");
+        publisher = new WeChatPublisher(wxMpService, converter, thumbMediaIdResolver,
                 articleStatusService, true);
     }
 
@@ -355,7 +356,7 @@ class WeChatPublisherTest {
     // ===== Task 6: AC-10 thumbMediaId 决策 (Story 3.3 review D1→Patch: 配置覆盖 + fail-fast) =====
 
     @Test
-    void shouldOverrideThumbMediaIdFromConfig(CapturedOutput output) throws WxErrorException {
+    void shouldOverrideThumbMediaIdFromResolver(CapturedOutput output) throws WxErrorException {
         Article article = sampleArticle();
         WxMpDraftArticles wxArticle = sampleWxArticle("html");
         // converter 占位 thumbMediaId="" (Story 3.2 行为); WeChatPublisher 必须用配置覆盖
@@ -372,8 +373,8 @@ class WeChatPublisherTest {
     }
 
     @Test
-    void shouldTrimThumbMediaIdFromConfigBeforeAddDraft() throws WxErrorException {
-        weChatProperties.setThumbMediaId("  test-thumb-media-id  ");
+    void shouldUseResolvedThumbMediaIdBeforeAddDraft() throws WxErrorException {
+        when(thumbMediaIdResolver.resolve()).thenReturn("resolved-thumb-media-id");
         Article article = sampleArticle();
         WxMpDraftArticles wxArticle = sampleWxArticle("html");
         when(converter.convert(article)).thenReturn(wxArticle);
@@ -385,12 +386,12 @@ class WeChatPublisherTest {
         ArgumentCaptor<WxMpAddDraft> captor = ArgumentCaptor.forClass(WxMpAddDraft.class);
         verify(wxMpDraftService).addDraft(captor.capture());
         WxMpDraftArticles passed = captor.getValue().getArticles().get(0);
-        assertThat(passed.getThumbMediaId()).isEqualTo("test-thumb-media-id");
+        assertThat(passed.getThumbMediaId()).isEqualTo("resolved-thumb-media-id");
     }
 
     @Test
-    void shouldThrowNonRetryableWhenThumbMediaIdConfigIsBlank() {
-        weChatProperties.setThumbMediaId("   ");
+    void shouldThrowNonRetryableWhenResolvedThumbMediaIdIsBlank() {
+        when(thumbMediaIdResolver.resolve()).thenReturn("   ");
         Article article = sampleArticle();
         when(converter.convert(article)).thenReturn(sampleWxArticle("html"));
 
@@ -398,14 +399,15 @@ class WeChatPublisherTest {
                 .isInstanceOf(NonRetryableException.class)
                 .satisfies(ex -> assertThat(((AggregatorException) ex).getErrorCode())
                         .isEqualTo(ErrorCode.WECHAT_API_ERROR))
-                .hasMessageContaining("wechat.mp.thumb-media-id 未配置")
+                .hasMessageContaining("微信草稿封面 media_id 解析为空")
                 .hasMessageContaining("articleId=tw-art-001");
         verify(wxMpService, never()).getDraftService();
     }
 
     @Test
-    void shouldThrowNonRetryableWhenThumbMediaIdConfigIsNull() {
-        weChatProperties.setThumbMediaId(null);
+    void shouldPropagateNonRetryableWhenThumbMediaIdResolverFails() {
+        when(thumbMediaIdResolver.resolve()).thenThrow(new NonRetryableException(
+                ErrorCode.WECHAT_API_ERROR, "未找到微信草稿封面永久图片素材"));
         Article article = sampleArticle();
         when(converter.convert(article)).thenReturn(sampleWxArticle("html"));
 
@@ -413,7 +415,7 @@ class WeChatPublisherTest {
                 .isInstanceOf(NonRetryableException.class)
                 .satisfies(ex -> assertThat(((AggregatorException) ex).getErrorCode())
                         .isEqualTo(ErrorCode.WECHAT_API_ERROR))
-                .hasMessageContaining("wechat.mp.thumb-media-id 未配置");
+                .hasMessageContaining("未找到微信草稿封面永久图片素材");
         verify(wxMpService, never()).getDraftService();
     }
 
@@ -440,7 +442,7 @@ class WeChatPublisherTest {
     @Test
     void shouldSkipReminderLogWhenReviewReminderDisabled(CapturedOutput output) throws WxErrorException {
         // reviewReminderEnabled=false 时提醒日志跳过, 但 markDraftCreated 仍调用
-        publisher = new WeChatPublisher(wxMpService, converter, weChatProperties,
+        publisher = new WeChatPublisher(wxMpService, converter, thumbMediaIdResolver,
                 articleStatusService, false);
         Article article = sampleArticle();
         when(converter.convert(article)).thenReturn(sampleWxArticle("html"));

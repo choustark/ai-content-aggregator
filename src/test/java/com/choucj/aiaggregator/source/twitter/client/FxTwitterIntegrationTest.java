@@ -17,6 +17,7 @@ import java.net.URI;
  * <p>仅当环境变量 {@code FXTWITTER_INTEGRATION_TEST=true} 且 {@code https://api.fxtwitter.com} 可达时运行,
  * 否则 {@link BeforeAll} {@code assumeTrue} 跳过.
  */
+@org.junit.jupiter.api.Tag("external")
 class FxTwitterIntegrationTest {
 
     private static final String INSTANCE = System.getenv()

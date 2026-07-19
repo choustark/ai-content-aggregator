@@ -39,6 +39,7 @@ import static org.mockito.Mockito.when;
 @SpringBootTest
 @ActiveProfiles("test")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
+@org.junit.jupiter.api.Tag("external")
 class TwitterProcessorIntegrationTest {
 
     @Autowired

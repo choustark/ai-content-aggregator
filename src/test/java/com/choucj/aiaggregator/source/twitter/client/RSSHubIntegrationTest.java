@@ -25,6 +25,7 @@ import java.util.List;
  *   <li>调用耗时 &lt; 30s</li>
  * </ul>
  */
+@org.junit.jupiter.api.Tag("external")
 class RSSHubIntegrationTest {
 
     private static final String INSTANCE = System.getenv()

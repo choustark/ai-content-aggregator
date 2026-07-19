@@ -6,11 +6,11 @@ import com.choucj.aiaggregator.common.repository.RedisRepository;
 import com.choucj.aiaggregator.common.util.RedisKeys;
 import com.choucj.aiaggregator.source.DataSource;
 import com.choucj.aiaggregator.source.twitter.client.FxTwitterClient;
-import com.choucj.aiaggregator.source.twitter.client.RSSHubClient;
 import com.choucj.aiaggregator.source.twitter.client.TwscrapeClient;
 import com.choucj.aiaggregator.source.twitter.config.FxTwitterProperties;
 import com.choucj.aiaggregator.source.twitter.config.TwitterProperties;
 import com.choucj.aiaggregator.source.twitter.config.TwscrapeProperties;
+import com.choucj.aiaggregator.source.twitter.discovery.TwitterDiscoveryClient;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -23,14 +23,14 @@ import java.util.List;
 /**
  * Twitter 数据源编排器 — 实现 {@link DataSource} 通用接口.
  *
- * <p>编排 {@link RSSHubClient}(发现) + {@link TwscrapeClient}(主路径补全) +
+ * <p>编排 {@link TwitterDiscoveryClient}(发现) + {@link TwscrapeClient}(主路径补全) +
  * {@link FxTwitterClient}(降级补全) + Redis 缓存(tweet:{id}, 24h TTL),
  * 对外暴露统一的 {@link #fetch()} 方法供 Pipeline / Scheduler 调用.
  *
  * <p><b>fetch() 编排流程:</b>
  * <ol>
- *   <li>遍历 {@code twitter.accounts} 列表, 逐个调 {@link RSSHubClient#discoverTweets(String)}</li>
- *   <li>对每条 RSSHub 返回的 Tweet 调 {@link #enrichTweet(Tweet)}</li>
+ *   <li>遍历 {@code twitter.accounts} 列表, 逐个调 {@link TwitterDiscoveryClient#discoverTweets(String)}</li>
+ *   <li>对每条发现返回的 Tweet 调 {@link #enrichTweet(Tweet)}</li>
  *   <li>enrichTweet: 先查 {@code tweet:{id}} Redis 缓存 → 命中直接合并 →
  *       未命中走 twscrape 主 → FxTwitter 备 双链降级, 用 {@link Tweet#toBuilder()} 合并 → 写回缓存</li>
  * </ol>
@@ -63,7 +63,7 @@ public class TwitterSource implements DataSource<Tweet> {
     /** tweet:{id} 缓存 TTL. 24h 平衡新鲜度与限流风险. */
     private static final Duration CACHE_TTL = Duration.ofHours(24);
 
-    private final RSSHubClient rssHubClient;
+    private final TwitterDiscoveryClient discoveryClient;
     private final FxTwitterClient fxTwitterClient;
     private final TwscrapeClient twscrapeClient;
     private final RedisRepository redisRepository;
@@ -81,14 +81,14 @@ public class TwitterSource implements DataSource<Tweet> {
         List<Tweet> all = new ArrayList<>();
         for (String account : accounts) {
             try {
-                List<Tweet> discovered = rssHubClient.discoverTweets(account);
+                List<Tweet> discovered = discoveryClient.discoverTweets(account);
                 for (Tweet partial : discovered) {
                     Tweet enriched = enrichTweet(partial);
                     if (enriched != null) {
                         all.add(enriched);
                     }
                 }
-                log.info("账号 {} 抓取完成, RSSHub 发现 {} 条, 累计入库 {} 条",
+                log.info("账号 {} 抓取完成, 发现 {} 条, 累计入库 {} 条",
                         account, discovered.size(), all.size());
             } catch (RetryableException | NonRetryableException e) {
                 log.warn("账号 {} 抓取失败, 跳过: {}", account, e.getMessage());
@@ -115,7 +115,7 @@ public class TwitterSource implements DataSource<Tweet> {
      * <p>架构 delta (Story 2.2b): 双链降级编排 — twscrape(主, 已登录账号) → FxTwitter(备, 公共实例).
      * 缓存命中优先级最高, 避免无谓的双链调用. 失败时不写缓存(避免 24h 毒化).
      *
-     * @param partial RSSHub 返回的部分 Tweet(id/author/summary/url/publishedAt 已填)
+     * @param partial discovery provider 返回的部分 Tweet(id/author/summary/url/publishedAt 已填)
      * @return 合并后的完整 Tweet; null 表示该 Tweet 应被剔除
      */
     Tweet enrichTweet(Tweet partial) {
