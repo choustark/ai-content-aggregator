@@ -2,6 +2,9 @@ package com.choucj.aiaggregator.common.model;
 
 import com.choucj.aiaggregator.source.github.model.GitHubRepo;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
+import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
+import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
+import com.choucj.aiaggregator.source.twitter.model.TweetMediaVariant;
 import com.choucj.aiaggregator.task.model.ProcessingTask;
 import org.junit.jupiter.api.Test;
 
@@ -82,6 +85,59 @@ class ModelSmokeTest {
         assertThat(tweet.getPublishedAt()).isEqualTo(now);
         assertThat(tweet.getReplyCount()).isEqualTo(5);
         assertThat(tweet.getImageUrls()).containsExactly("https://img.example.com/1.jpg");
+    }
+
+    @Test
+    void shouldBuildTweetWithOriginalPostFidelityDefaults() {
+        Tweet tweet = Tweet.builder()
+                .id("123")
+                .content("content")
+                .build();
+
+        assertThat(tweet.getImageUrls()).isEmpty();
+        assertThat(tweet.getMedia()).isEmpty();
+        assertThat(tweet.getLinks()).isEmpty();
+        assertThat(tweet.getMentions()).isEmpty();
+        assertThat(tweet.getRawText()).isNull();
+        assertThat(tweet.getFormattedText()).isNull();
+    }
+
+    @Test
+    void shouldBuildTweetMediaWithVariantsAndNullableFields() {
+        TweetMediaVariant variant = TweetMediaVariant.builder()
+                .url("https://video.example/high.mp4")
+                .contentType("video/mp4")
+                .bitrate(2_176_000L)
+                .width(1280)
+                .height(720)
+                .build();
+
+        TweetMedia media = TweetMedia.builder()
+                .id("m1")
+                .type(TweetMediaType.VIDEO)
+                .sourceUrl("https://video.example/high.mp4")
+                .previewImageUrl("https://img.example/thumb.jpg")
+                .order(1)
+                .variants(java.util.List.of(variant))
+                .allowDownload(true)
+                .provider("fxtwitter")
+                .providerRawSummary("type=video,variants=1")
+                .build();
+
+        assertThat(media.getType()).isEqualTo(TweetMediaType.VIDEO);
+        assertThat(media.getVariants()).containsExactly(variant);
+        assertThat(media.getFailureReason()).isNull();
+        assertThat(media.isAllowDownload()).isTrue();
+    }
+
+    @Test
+    void shouldDefaultTweetMediaListsToEmpty() {
+        TweetMedia media = TweetMedia.builder()
+                .id("photo-1")
+                .type(TweetMediaType.PHOTO)
+                .build();
+
+        assertThat(media.getVariants()).isEmpty();
     }
 
     @Test

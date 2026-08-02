@@ -6,6 +6,8 @@ import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.content.rewriter.config.RewriterProperties;
 import com.choucj.aiaggregator.monitoring.TokenUsageTracker;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
+import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
+import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -133,6 +135,38 @@ class SingleModelRewriterTest {
 
         verify(llmClient).chat(anyString(), promptCaptor.capture());
         assertThat(promptCaptor.getValue()).contains("summary text");
+    }
+
+    @Test
+    void shouldKeepOriginalStructureFieldsOutOfRewritePrompt() {
+        Tweet tweet = Tweet.builder()
+                .id("structure-123")
+                .author("user")
+                .content("canonical content for rewrite")
+                .rawText("raw text should stay out")
+                .formattedText("formatted text should stay out")
+                .imageUrls(java.util.List.of("https://img.example/photo.jpg"))
+                .media(java.util.List.of(TweetMedia.builder()
+                        .type(TweetMediaType.VIDEO)
+                        .sourceUrl("https://video.example/high.mp4")
+                        .previewImageUrl("https://img.example/thumb.jpg")
+                        .build()))
+                .links(java.util.List.of("https://example.com"))
+                .mentions(java.util.List.of("@openai"))
+                .quotedTweetText("quoted text should stay out")
+                .build();
+        when(llmClient.chat(anyString(), anyString())).thenReturn(LLM_RESPONSE);
+
+        ArgumentCaptor<String> promptCaptor = ArgumentCaptor.forClass(String.class);
+        rewriter.rewrite(tweet);
+
+        verify(llmClient).chat(anyString(), promptCaptor.capture());
+        assertThat(promptCaptor.getValue())
+                .contains("canonical content for rewrite")
+                .doesNotContain("raw text should stay out")
+                .doesNotContain("formatted text should stay out")
+                .doesNotContain("https://video.example/high.mp4")
+                .doesNotContain("quoted text should stay out");
     }
 
     @Test

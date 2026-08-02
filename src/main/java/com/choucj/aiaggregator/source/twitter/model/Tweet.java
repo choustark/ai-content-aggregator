@@ -6,6 +6,7 @@ import lombok.Data;
 import lombok.NoArgsConstructor;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -20,6 +21,7 @@ import java.util.List;
  *   <li>Story 2.4 — {@code ContentRewriter} 输入(content + summary 是改写源文本)</li>
  *   <li>Story 2.6 — Pipeline 流转的核心载体</li>
  *   <li>Story 3.2 — imageUrls 用于微信草稿图片转换</li>
+ *   <li>Story 6.3 — rawText/formattedText/media/links/mentions/quotedTweetUrl 用于原帖保真</li>
  * </ul>
  *
  * <p><b>toBuilder 决策(Story 2.2a delta):</b> 开启 {@code @Builder(toBuilder=true)},
@@ -39,8 +41,14 @@ public class Tweet {
     /** 作者 handle({@code @username}). */
     private String author;
 
-    /** 完整文本(Story 2.2 通过 FxTwitter 补全). */
+    /** 完整文本(Story 2.2 通过 FxTwitter 补全)，继续作为 REWRITE 路径的兼容输入。 */
     private String content;
+
+    /** Provider 原始文本；provider 未返回原始形态时为 null。 */
+    private String rawText;
+
+    /** 展开链接/mention 后的可读文本；provider 未返回格式化形态时为 null。 */
+    private String formattedText;
 
     /** 摘要(Story 2.1 RSSHub 提供, 长推文的简介). */
     private String summary;
@@ -60,8 +68,30 @@ public class Tweet {
     /** 点赞数. */
     private int likeCount;
 
-    /** 图片 URL 列表(Story 3.2 转换需要). */
-    private List<String> imageUrls;
+    /** 图片 URL 列表(Story 3.2 转换需要)，Story 6.3 后只包含 PHOTO sourceUrl 投影。 */
+    @Builder.Default
+    private List<String> imageUrls = new ArrayList<>();
+
+    /** 原帖权威媒体单元列表；无媒体时为空列表。 */
+    @Builder.Default
+    private List<TweetMedia> media = new ArrayList<>();
+
+    /** 原帖中解析出的链接；provider 未返回或无链接时为空列表。 */
+    @Builder.Default
+    private List<String> links = new ArrayList<>();
+
+    /** 原帖中解析出的 mention；provider 未返回或无 mention 时为空列表。 */
+    @Builder.Default
+    private List<String> mentions = new ArrayList<>();
+
+    /** 引用推 URL；无引用或 provider 无法解析时为 null。 */
+    private String quotedTweetUrl;
+
+    /** 引用推可读摘要文本；provider 未返回完整引用上下文时为 null。 */
+    private String quotedTweetText;
+
+    /** 源访问或字段级降级提示；正常可访问时为 null。 */
+    private String sourceAccessNote;
 
     /**
      * AI 创新度评分 (1-10, nullable).

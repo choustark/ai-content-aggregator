@@ -1,6 +1,7 @@
 package com.choucj.aiaggregator.source.github.service;
 
 import com.choucj.aiaggregator.common.client.LlmClient;
+import com.choucj.aiaggregator.common.util.TextTruncateUtil;
 import com.choucj.aiaggregator.content.rewriter.SingleModelRewriter;
 import com.choucj.aiaggregator.source.github.config.GitHubProperties;
 import com.choucj.aiaggregator.source.github.model.GitHubRepo;
@@ -277,15 +278,7 @@ public class GitHubValueAnalyzer {
      * (Story 4.2 cross-check 发现), 遵循 Story 3.2 / 4.2 项目模式内联 4 行, 不跨包提升.
      */
     private static String truncateByCodePoints(String content, int maxCodePoints) {
-        if (content == null) {
-            return "";
-        }
-        int totalCodePoints = content.codePointCount(0, content.length());
-        if (totalCodePoints <= maxCodePoints) {
-            return content;
-        }
-        int endIndex = content.offsetByCodePoints(0, maxCodePoints);
-        return content.substring(0, endIndex);
+        return TextTruncateUtil.truncateByCodePoints(content, maxCodePoints);
     }
 
     /**

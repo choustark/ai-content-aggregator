@@ -5,6 +5,9 @@ import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.source.twitter.config.TwscrapeProperties;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
+import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
+import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
+import com.choucj.aiaggregator.source.twitter.model.TweetMediaVariant;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -13,7 +16,9 @@ import org.springframework.stereotype.Component;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -156,14 +161,24 @@ public class TwscrapeClient {
         int retweetCount = intOrZero(root, "retweetCount");
         int likeCount = intOrZero(root, "likeCount");
         List<String> imageUrls = extractPhotos(root);
+        List<TweetMedia> media = extractMedia(root);
+        JsonNode quote = firstObject(root, "quotedStatus", "quoted_status", "quote", "quotedTweet");
 
         Tweet enriched = Tweet.builder()
                 .id(tweetId)
                 .content(content)
+                .rawText(content)
+                .formattedText(content)
                 .replyCount(replyCount)
                 .retweetCount(retweetCount)
                 .likeCount(likeCount)
                 .imageUrls(imageUrls)
+                .media(media)
+                .links(extractLinks(root))
+                .mentions(extractMentions(root))
+                .quotedTweetUrl(parseQuotedTweetUrl(quote))
+                .quotedTweetText(quote == null ? null : firstText(quote, "text", "fullText", "full_text"))
+                .sourceAccessNote(content == null ? "源文本为空或 provider 未返回文本" : null)
                 .build();
         log.debug("twscrape 补全成功: tweetId={}, replies={}, retweets={}, likes={}, images={}",
                 tweetId, replyCount, retweetCount, likeCount, imageUrls.size());
@@ -203,7 +218,7 @@ public class TwscrapeClient {
         }
         List<String> result = new ArrayList<>(photos.size());
         for (JsonNode photo : photos) {
-            String url = textOrNull(photo, "url");
+            String url = firstText(photo, "url", "media_url_https", "media_url");
             if (url != null) {
                 result.add(url);
             }
@@ -211,12 +226,198 @@ public class TwscrapeClient {
         return result;
     }
 
-    private String textOrNull(JsonNode node, String field) {
-        JsonNode child = node.get(field);
-        if (child == null || child.isNull() || !child.isTextual()) {
+    private List<TweetMedia> extractMedia(JsonNode root) {
+        List<TweetMedia> result = new ArrayList<>();
+        Set<String> seenIds = new HashSet<>();
+        JsonNode photos = root.get("photos");
+        if (photos != null && photos.isArray()) {
+            int order = 0;
+            for (JsonNode photo : photos) {
+                addIfNew(result, seenIds, parseMediaItem(photo, TweetMediaType.PHOTO, order++));
+            }
+        }
+        JsonNode media = root.get("media");
+        if (media != null && media.isArray()) {
+            int order = result.size();
+            for (JsonNode item : media) {
+                addIfNew(result, seenIds, parseMediaItem(item, parseMediaType(firstText(item, "type")), order++));
+            }
+        }
+        return result;
+    }
+
+    private TweetMedia parseMediaItem(JsonNode item, TweetMediaType type, int order) {
+        JsonNode videoInfo = item.get("video_info");
+        List<TweetMediaVariant> variants = parseVariants(firstArray(videoInfo, "variants"));
+        return TweetMedia.builder()
+                .id(firstText(item, "id", "id_str"))
+                .type(type)
+                .sourceUrl(type == TweetMediaType.PHOTO
+                        ? firstText(item, "url", "media_url_https", "media_url")
+                        : firstNonBlank(bestVariantUrl(variants), firstText(item, "url", "src", "media_url_https", "media_url")))
+                .previewImageUrl(firstText(item, "thumbnail_url", "thumbnailUrl", "media_url_https", "media_url"))
+                .variants(variants)
+                .order(order)
+                .width(firstInteger(item, "width"))
+                .height(firstInteger(item, "height"))
+                .allowDownload(true)
+                .provider("twscrape")
+                .providerRawSummary(type + ":variants=" + variants.size())
+                .build();
+    }
+
+    private List<TweetMediaVariant> parseVariants(JsonNode variantsNode) {
+        if (variantsNode == null || !variantsNode.isArray() || variantsNode.isEmpty()) {
+            return List.of();
+        }
+        List<TweetMediaVariant> variants = new ArrayList<>(variantsNode.size());
+        for (JsonNode variant : variantsNode) {
+            String url = textOrNull(variant, "url");
+            if (url == null) {
+                continue;
+            }
+            variants.add(TweetMediaVariant.builder()
+                    .url(url)
+                    .contentType(firstText(variant, "content_type", "contentType"))
+                    .bitrate(firstLong(variant, "bitrate"))
+                    .width(firstInteger(variant, "width"))
+                    .height(firstInteger(variant, "height"))
+                    .build());
+        }
+        return variants;
+    }
+
+    private String bestVariantUrl(List<TweetMediaVariant> variants) {
+        if (variants == null || variants.isEmpty()) {
             return null;
         }
-        String text = child.asText();
+        TweetMediaVariant best = null;
+        for (TweetMediaVariant variant : variants) {
+            if (variant.getUrl() == null) {
+                continue;
+            }
+            if (best == null || nullToZero(variant.getBitrate()) > nullToZero(best.getBitrate())) {
+                best = variant;
+            }
+        }
+        return best == null ? null : best.getUrl();
+    }
+
+    private long nullToZero(Long value) {
+        return value == null ? 0L : value;
+    }
+
+    private void addIfNew(List<TweetMedia> result, Set<String> seenIds, TweetMedia media) {
+        String id = media.getId();
+        if (id != null && !seenIds.add(id)) {
+            return;
+        }
+        result.add(media);
+    }
+
+    private TweetMediaType parseMediaType(String value) {
+        if (value == null) {
+            return TweetMediaType.UNKNOWN;
+        }
+        return switch (value.toLowerCase()) {
+            case "photo", "image" -> TweetMediaType.PHOTO;
+            case "video" -> TweetMediaType.VIDEO;
+            case "gif", "animated_gif" -> TweetMediaType.GIF;
+            default -> TweetMediaType.UNKNOWN;
+        };
+    }
+
+    private List<String> extractLinks(JsonNode root) {
+        JsonNode urls = firstArray(firstObject(root, "entities"), "urls");
+        if (urls == null || urls.isEmpty()) {
+            return List.of();
+        }
+        List<String> links = new ArrayList<>();
+        for (JsonNode url : urls) {
+            String value = firstText(url, "expanded_url", "expandedUrl", "url");
+            if (value != null) {
+                links.add(value);
+            }
+        }
+        return links;
+    }
+
+    private List<String> extractMentions(JsonNode root) {
+        JsonNode userMentions = firstArray(firstObject(root, "entities"), "user_mentions");
+        if (userMentions == null || userMentions.isEmpty()) {
+            return List.of();
+        }
+        List<String> mentions = new ArrayList<>();
+        for (JsonNode userMention : userMentions) {
+            String value = firstText(userMention, "screen_name", "screenName", "username", "userName");
+            if (value != null) {
+                mentions.add(value.startsWith("@") ? value : "@" + value);
+            }
+        }
+        return mentions;
+    }
+
+    private String parseQuotedTweetUrl(JsonNode quote) {
+        if (quote == null) {
+            return null;
+        }
+        String url = firstText(quote, "url", "tweetUrl", "tweet_url");
+        if (url != null) {
+            return url;
+        }
+        String id = firstText(quote, "id", "id_str");
+        return id == null ? null : "https://x.com/i/status/" + id;
+    }
+
+    private JsonNode firstObject(JsonNode node, String... fields) {
+        if (node == null) {
+            return null;
+        }
+        for (String field : fields) {
+            JsonNode child = node.get(field);
+            if (child != null && child.isObject()) {
+                return child;
+            }
+        }
+        return null;
+    }
+
+    private JsonNode firstArray(JsonNode node, String... fields) {
+        if (node == null) {
+            return null;
+        }
+        for (String field : fields) {
+            JsonNode child = node.get(field);
+            if (child != null && child.isArray()) {
+                return child;
+            }
+        }
+        return null;
+    }
+
+    private String firstText(JsonNode node, String... fields) {
+        if (node == null) {
+            return null;
+        }
+        for (String field : fields) {
+            String value = textOrNull(node, field);
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private String firstNonBlank(String preferred, String fallback) {
+        return preferred == null || preferred.isBlank() ? fallback : preferred;
+    }
+
+    private String textOrNull(JsonNode node, String field) {
+        JsonNode child = node.get(field);
+        if (child == null || child.isNull() || child.isContainerNode()) {
+            return null;
+        }
+        String text = child.asText(null);
         return text.isBlank() ? null : text;
     }
 
@@ -226,6 +427,16 @@ public class TwscrapeClient {
             return 0;
         }
         return child.asInt();
+    }
+
+    private Integer firstInteger(JsonNode node, String field) {
+        JsonNode child = node.get(field);
+        return child == null || child.isNull() || !child.canConvertToInt() ? null : child.asInt();
+    }
+
+    private Long firstLong(JsonNode node, String field) {
+        JsonNode child = node.get(field);
+        return child == null || child.isNull() || !child.canConvertToLong() ? null : child.asLong();
     }
 
     private String truncate(String s, int maxLen) {

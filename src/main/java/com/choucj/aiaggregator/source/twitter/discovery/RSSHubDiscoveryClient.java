@@ -3,7 +3,6 @@ package com.choucj.aiaggregator.source.twitter.discovery;
 import com.choucj.aiaggregator.source.twitter.client.RSSHubClient;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
 import lombok.RequiredArgsConstructor;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -13,10 +12,14 @@ import java.util.List;
  */
 @Component
 @RequiredArgsConstructor
-@ConditionalOnProperty(prefix = "twitter", name = "discovery-provider", havingValue = "rsshub", matchIfMissing = true)
-public class RSSHubDiscoveryClient implements TwitterDiscoveryClient {
+public class RSSHubDiscoveryClient implements NamedTwitterDiscoveryProvider {
 
     private final RSSHubClient rssHubClient;
+
+    @Override
+    public String providerName() {
+        return "rsshub";
+    }
 
     @Override
     public List<Tweet> discoverTweets(String username) {

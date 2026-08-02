@@ -73,13 +73,45 @@ rsshub:
 # Twitter 账号列表 — TwitterSource 编排 RSSHub + FxTwitter 的目标账号.
 # handle 不带 @ 前缀. 空列表时 fetch() 返回空.
 twitter:
-  # 推文发现 provider: rsshub / apify.
+  # 推文发现 provider 优先级链: scraper / apify / rsshub.
+  # scraper: 本地 x-author-self-scraper 服务(默认推荐, 不走 Apify 云配额)
+  # apify: Apify 云端 Actor parseforge~x-com-scraper 或自定义 Actor
+  # rsshub: RSSHub 发现 + twscrape/FxTwitter 补全
+  discovery-providers:
+    - scraper
+    - apify
+    - rsshub
+  # 旧版单 provider 配置: discovery-providers 为空时才使用.
   discovery-provider: rsshub
   accounts:
     - karpathy
     - sama
+  # Story 6.4: 指定 X 内容抓取入口(post URL / post ID / Article URL).
+  # 集成型开关, 默认 false; 关闭时不调 Apify、不消费配额, 账号发现链路零回归.
+  target:
+    enabled: false
+    urls: []
+    # urls 示例(取消注释后使用):
+    #   - https://x.com/OpenAI/status/1234567890
+    #   - 1234567890          # 纯 post ID(spike Q1a 未测变体, 默认归一化为 /i/status/{id})
+    #   - https://x.com/i/article/...   # Article URL(spike Q1b 未测变体, best-effort 透传)
 
-# Apify Twitter/X Actor 发现配置 — twitter.discovery-provider=apify 时启用.
+scraper:
+  # 本地 x-author-self-scraper API 服务. 该服务内部运行 Apify SDK/Crawlee Actor,
+  # 但 HTTP 协议不是 Apify 云端 /v2/acts/*, 因此独立配置.
+  base-url: http://127.0.0.1:3100
+  timeout-seconds: 180
+  poll-interval-ms: 1000
+  max-wait-seconds: 180
+  include-posts: true
+  include-articles: false
+  include-replies: false
+  max-items-per-author: 50
+  max-articles-per-author: 10
+  max-scrolls: 30
+  scroll-delay-ms: 1800
+
+# Apify Twitter/X Actor 发现配置 — twitter.discovery-providers 包含 apify 时可用.
 # 默认适配 parseforge~x-com-scraper:
 #   https://apify.com/parseforge/x-com-scraper
 apify:
@@ -94,6 +126,8 @@ apify:
     search-term-template: "from:%s"
     handle-field: usernames
     max-items-field: maxItems
+    # Story 6.4: 指定内容 Actor input 字段名(spike-6.1 F1 实测为 startUrls, 勿改).
+    start-urls-field: startUrls
     input-defaults:
       sort: Latest
 

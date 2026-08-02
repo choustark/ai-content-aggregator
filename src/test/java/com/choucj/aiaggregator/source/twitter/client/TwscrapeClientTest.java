@@ -5,6 +5,7 @@ import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.source.twitter.config.TwscrapeProperties;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
+import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -67,6 +68,84 @@ class TwscrapeClientTest {
         assertThat(result.getLikeCount()).isEqualTo(42);
         assertThat(result.getImageUrls()).containsExactly(
                 "https://example.com/1.jpg", "https://example.com/2.jpg");
+    }
+
+    @Test
+    void shouldParseFixtureMediaAndQuotedStatusWithoutClaimingRealCall() {
+        TwscrapeClient client = new TwscrapeClient(newProperties(true), objectMapper);
+        String stdout = """
+                {
+                  "id": "abc",
+                  "text": "Hello twscrape with quote",
+                  "replyCount": 3,
+                  "retweetCount": 7,
+                  "likeCount": 42,
+                  "photos": [
+                    {"id": "p1", "url": "https://example.com/1.jpg"}
+                  ],
+                  "media": [
+                    {
+                      "id_str": "v1",
+                      "type": "video",
+                      "media_url_https": "https://img.example/thumb.jpg",
+                      "video_info": {
+                        "variants": [
+                          {"url": "https://video.example/high.mp4", "bitrate": 2176000, "content_type": "video/mp4"}
+                        ]
+                      }
+                    }
+                  ],
+                  "quotedStatus": {
+                    "id": "987",
+                    "text": "quoted text"
+                  },
+                  "entities": {
+                    "urls": [{"expanded_url": "https://example.com"}],
+                    "user_mentions": [{"screen_name": "openai"}]
+                  }
+                }
+                """;
+
+        Tweet result = client.parseResponse(stdout, "123");
+
+        assertThat(result.getRawText()).isEqualTo("Hello twscrape with quote");
+        assertThat(result.getFormattedText()).isEqualTo("Hello twscrape with quote");
+        assertThat(result.getImageUrls()).containsExactly("https://example.com/1.jpg");
+        assertThat(result.getLinks()).containsExactly("https://example.com");
+        assertThat(result.getMentions()).containsExactly("@openai");
+        assertThat(result.getQuotedTweetUrl()).isEqualTo("https://x.com/i/status/987");
+        assertThat(result.getQuotedTweetText()).isEqualTo("quoted text");
+        assertThat(result.getMedia()).extracting("type")
+                .contains(TweetMediaType.PHOTO, TweetMediaType.VIDEO);
+        assertThat(result.getMedia().get(1).getSourceUrl()).isEqualTo("https://video.example/high.mp4");
+        assertThat(result.getMedia().get(1).getPreviewImageUrl()).isEqualTo("https://img.example/thumb.jpg");
+    }
+
+    @Test
+    void shouldParseNumericIdsAndSetSourceAccessNoteWhenTextIsEmpty() {
+        TwscrapeClient client = new TwscrapeClient(newProperties(true), objectMapper);
+        String stdout = """
+                {
+                  "id": "abc",
+                  "text": "",
+                  "quotedStatus": {
+                    "id": 987,
+                    "text": "quoted text"
+                  },
+                  "photos": [
+                    {"id": 123, "media_url_https": "https://example.com/1.jpg"}
+                  ]
+                }
+                """;
+
+        Tweet result = client.parseResponse(stdout, "123");
+
+        assertThat(result.getContent()).isNull();
+        assertThat(result.getSourceAccessNote()).contains("源文本为空");
+        assertThat(result.getQuotedTweetUrl()).isEqualTo("https://x.com/i/status/987");
+        assertThat(result.getImageUrls()).containsExactly("https://example.com/1.jpg");
+        assertThat(result.getMedia()).hasSize(1);
+        assertThat(result.getMedia().get(0).getId()).isEqualTo("123");
     }
 
     @Test

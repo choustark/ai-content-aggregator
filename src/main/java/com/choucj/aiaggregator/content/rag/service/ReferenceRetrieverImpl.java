@@ -3,6 +3,7 @@ package com.choucj.aiaggregator.content.rag.service;
 import com.choucj.aiaggregator.content.embedding.EmbeddingService;
 import com.choucj.aiaggregator.content.rag.config.RagProperties;
 import com.choucj.aiaggregator.content.rag.model.ReferenceArticle;
+import com.choucj.aiaggregator.common.util.TextTruncateUtil;
 import com.choucj.aiaggregator.content.rewriter.SingleModelRewriter;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.store.embedding.EmbeddingMatch;
@@ -213,11 +214,7 @@ public class ReferenceRetrieverImpl implements ReferenceRetriever {
     }
 
     private static String truncateByCodePoints(String value, int maxCodePoints) {
-        if (value == null || value.codePointCount(0, value.length()) <= maxCodePoints) {
-            return value;
-        }
-        int end = value.offsetByCodePoints(0, maxCodePoints);
-        return value.substring(0, end);
+        return value == null ? null : TextTruncateUtil.truncateByCodePoints(value, maxCodePoints);
     }
 
     private static int codePointLength(String value) {

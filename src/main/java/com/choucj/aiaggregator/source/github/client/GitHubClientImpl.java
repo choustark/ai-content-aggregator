@@ -3,6 +3,7 @@ package com.choucj.aiaggregator.source.github.client;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.util.TextTruncateUtil;
 import com.choucj.aiaggregator.source.github.config.GitHubProperties;
 import com.choucj.aiaggregator.source.github.config.GitHubProperties.Trending;
 import com.choucj.aiaggregator.source.github.model.GitHubRepo;
@@ -305,15 +306,7 @@ public class GitHubClientImpl implements GitHubClient {
      * 仍为 package-private, 跨包调用时在调用方内联实现 4 行 (YAGNI, 不为单调用点提升可见性).
      */
     static String truncateByCodePoints(String content, int maxCodePoints) {
-        if (content == null || content.isEmpty()) {
-            return "";
-        }
-        int total = content.codePointCount(0, content.length());
-        if (total <= maxCodePoints) {
-            return content;
-        }
-        int endIndex = content.offsetByCodePoints(0, maxCodePoints);
-        return content.substring(0, endIndex);
+        return TextTruncateUtil.truncateByCodePoints(content, maxCodePoints);
     }
 
     String renderQuery(Trending trending, String date) {

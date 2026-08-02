@@ -1,7 +1,6 @@
 package com.choucj.aiaggregator.source.twitter.config;
 
 import org.springframework.beans.factory.annotation.Qualifier;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -15,8 +14,7 @@ import java.time.Duration;
  * Apify Twitter/X 客户端配置.
  */
 @Configuration
-@ConditionalOnProperty(prefix = "twitter", name = "discovery-provider", havingValue = "apify")
-@EnableConfigurationProperties(ApifyTwitterProperties.class)
+@EnableConfigurationProperties({ApifyTwitterProperties.class, TwitterTargetProperties.class})
 public class ApifyTwitterConfig {
 
     @Bean

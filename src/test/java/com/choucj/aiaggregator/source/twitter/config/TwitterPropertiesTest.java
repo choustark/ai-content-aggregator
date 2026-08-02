@@ -15,6 +15,7 @@ class TwitterPropertiesTest {
     void shouldUseDefaultsWhenUnset() {
         TwitterProperties p = new TwitterProperties();
         assertThat(p.getAccounts()).isEmpty();
+        assertThat(p.effectiveDiscoveryProviders()).containsExactly("rsshub");
     }
 
     @Test
@@ -23,5 +24,14 @@ class TwitterPropertiesTest {
         p.setAccounts(List.of("karpathy", "sama"));
 
         assertThat(p.getAccounts()).containsExactly("karpathy", "sama");
+    }
+
+    @Test
+    void shouldPreferDiscoveryProviderChainOverLegacySingleProvider() {
+        TwitterProperties p = new TwitterProperties();
+        p.setDiscoveryProvider("rsshub");
+        p.setDiscoveryProviders(List.of(" Scraper ", "apify", "scraper"));
+
+        assertThat(p.effectiveDiscoveryProviders()).containsExactly("scraper", "apify");
     }
 }

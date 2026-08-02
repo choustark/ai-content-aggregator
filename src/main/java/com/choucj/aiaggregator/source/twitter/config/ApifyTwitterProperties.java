@@ -48,6 +48,15 @@ public class ApifyTwitterProperties {
     /** Actor input 中数量限制字段名. */
     private String maxItemsField = "maxItems";
 
+    /**
+     * Actor input 中指定内容 URL 列表字段名 (Story 6.4).
+     *
+     * <p>spike-6.1 F1 实测字段名为 {@code startUrls} (非 {@code tweetUrls}), 必须对象数组
+     * {@code [{url: "..."}]}. 外置此字段名以遵循 AD-8「不硬编码 Actor 字段名」; 除非 Apify
+     * Actor 变更字段名, 否则勿改默认值.
+     */
+    private String startUrlsField = "startUrls";
+
     /** 透传给 Actor 的默认 input 字段. */
     private Map<String, Object> inputDefaults = new LinkedHashMap<>();
 }

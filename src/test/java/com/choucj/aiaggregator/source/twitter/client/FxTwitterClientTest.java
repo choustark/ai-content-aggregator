@@ -5,6 +5,7 @@ import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.source.twitter.config.FxTwitterProperties;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
+import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -78,6 +79,112 @@ class FxTwitterClientTest {
         assertThat(result.getLikeCount()).isEqualTo(100);
         assertThat(result.getImageUrls()).containsExactly(
                 "https://example.com/1.jpg", "https://example.com/2.jpg");
+    }
+
+    @Test
+    void shouldParseRawTextFacetsVideoVariantsAndQuoteContext() {
+        String body = """
+                {
+                  "tweet": {
+                    "text": "Readable text",
+                    "raw_text": {
+                      "text": "Raw text https://t.co/abc @openai",
+                      "facets": [
+                        {"type": "url", "replacement": "https://openai.com"},
+                        {"type": "mention", "screen_name": "openai"}
+                      ]
+                    },
+                    "replies": 5,
+                    "retweets": 10,
+                    "likes": 100,
+                    "quote": {
+                      "id": "987",
+                      "text": "quoted text"
+                    },
+                    "media": {
+                      "photos": [
+                        {"id": "p1", "url": "https://img.example/photo.jpg"}
+                      ],
+                      "all": [
+                        {
+                          "id": "v1",
+                          "type": "video",
+                          "url": "https://video.example/high.mp4",
+                          "thumbnail_url": "https://img.example/thumb.jpg",
+                          "width": 1280,
+                          "height": 720,
+                          "variants": [
+                            {"url": "https://video.example/pl.m3u8", "content_type": "application/x-mpegURL"},
+                            {"url": "https://video.example/high.mp4", "bitrate": 2176000, "content_type": "video/mp4"}
+                          ]
+                        }
+                      ]
+                    }
+                  }
+                }
+                """;
+        stubReturn(body);
+
+        Tweet result = client.fetchTweetDetail("12345");
+
+        assertThat(result.getRawText()).isEqualTo("Raw text https://t.co/abc @openai");
+        assertThat(result.getFormattedText()).isEqualTo("Readable text");
+        assertThat(result.getLinks()).containsExactly("https://openai.com");
+        assertThat(result.getMentions()).containsExactly("@openai");
+        assertThat(result.getQuotedTweetUrl()).isEqualTo("https://x.com/i/status/987");
+        assertThat(result.getQuotedTweetText()).isEqualTo("quoted text");
+        assertThat(result.getImageUrls()).containsExactly("https://img.example/photo.jpg");
+        assertThat(result.getMedia()).hasSize(2);
+        assertThat(result.getMedia().get(1).getType()).isEqualTo(TweetMediaType.VIDEO);
+        assertThat(result.getMedia().get(1).getSourceUrl()).isEqualTo("https://video.example/high.mp4");
+        assertThat(result.getMedia().get(1).getPreviewImageUrl()).isEqualTo("https://img.example/thumb.jpg");
+        assertThat(result.getMedia().get(1).getVariants()).hasSize(2);
+    }
+
+    @Test
+    void shouldParseTextualRawTextNumericIdsAndPhotoProjectionFallbacks() {
+        String body = """
+                {
+                  "tweet": {
+                    "text": "Readable text",
+                    "raw_text": "Raw text as scalar",
+                    "quote": {
+                      "id": 987,
+                      "text": "quoted text"
+                    },
+                    "media": {
+                      "photos": [
+                        {"id": 123, "media_url_https": "https://img.example/photo.jpg"}
+                      ],
+                      "all": [
+                        {"id": 123, "type": "photo", "media_url_https": "https://img.example/photo.jpg"}
+                      ]
+                    }
+                  }
+                }
+                """;
+        stubReturn(body);
+
+        Tweet result = client.fetchTweetDetail("12345");
+
+        assertThat(result.getRawText()).isEqualTo("Raw text as scalar");
+        assertThat(result.getQuotedTweetUrl()).isEqualTo("https://x.com/i/status/987");
+        assertThat(result.getImageUrls()).containsExactly("https://img.example/photo.jpg");
+        assertThat(result.getMedia()).hasSize(1);
+        assertThat(result.getMedia().get(0).getId()).isEqualTo("123");
+    }
+
+    @Test
+    void shouldSetSourceAccessNoteWhenFxTwitterTextIsEmpty() {
+        String body = """
+                {"tweet": {"text": ""}}
+                """;
+        stubReturn(body);
+
+        Tweet result = client.fetchTweetDetail("12345");
+
+        assertThat(result.getContent()).isNull();
+        assertThat(result.getSourceAccessNote()).contains("源文本为空");
     }
 
     @Test

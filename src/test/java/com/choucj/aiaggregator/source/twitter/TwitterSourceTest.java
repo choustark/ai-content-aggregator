@@ -12,6 +12,8 @@ import com.choucj.aiaggregator.source.twitter.config.TwitterProperties;
 import com.choucj.aiaggregator.source.twitter.config.TwscrapeProperties;
 import com.choucj.aiaggregator.source.twitter.discovery.TwitterDiscoveryClient;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
+import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
+import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -127,6 +129,45 @@ class TwitterSourceTest {
     }
 
     @Test
+    void shouldMergeCachedOriginalStructureFieldsWithoutDroppingPartialMetadata() {
+        Tweet partial = baseTweet("1", "summary");
+        when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
+        Tweet cached = Tweet.builder()
+                .id("1")
+                .content("cached content")
+                .rawText("raw cached content")
+                .formattedText("formatted cached content")
+                .imageUrls(List.of("https://img.example/cached.jpg"))
+                .media(List.of(TweetMedia.builder()
+                        .type(TweetMediaType.PHOTO)
+                        .sourceUrl("https://img.example/cached.jpg")
+                        .provider("cache")
+                        .build()))
+                .links(List.of("https://example.com"))
+                .mentions(List.of("@openai"))
+                .quotedTweetUrl("https://x.com/i/status/987")
+                .quotedTweetText("quoted")
+                .sourceAccessNote("provider note")
+                .build();
+        when(redisRepository.getObject(eq(RedisKeys.tweet("1")), eq(Tweet.class))).thenReturn(cached);
+
+        List<Tweet> result = source.fetch();
+
+        assertThat(result).hasSize(1);
+        Tweet merged = result.get(0);
+        assertThat(merged.getAuthor()).isEqualTo("@karpathy");
+        assertThat(merged.getSummary()).isEqualTo("summary");
+        assertThat(merged.getRawText()).isEqualTo("raw cached content");
+        assertThat(merged.getFormattedText()).isEqualTo("formatted cached content");
+        assertThat(merged.getMedia()).hasSize(1);
+        assertThat(merged.getLinks()).containsExactly("https://example.com");
+        assertThat(merged.getMentions()).containsExactly("@openai");
+        assertThat(merged.getQuotedTweetUrl()).isEqualTo("https://x.com/i/status/987");
+        assertThat(merged.getQuotedTweetText()).isEqualTo("quoted");
+        assertThat(merged.getSourceAccessNote()).isEqualTo("provider note");
+    }
+
+    @Test
     void shouldSkipTweetWhenFxTwitterFailsAndNotWriteCache() {
         Tweet partial = baseTweet("1", "summary");
         when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
@@ -229,7 +270,18 @@ class TwitterSourceTest {
         when(redisRepository.getObject(eq(RedisKeys.tweet("1")), eq(Tweet.class))).thenReturn(null);
         Tweet twscrapeEnriched = Tweet.builder()
                 .id("1").content("from-twscrape").replyCount(11).retweetCount(22).likeCount(33)
-                .imageUrls(List.of("https://img.example/tw.jpg")).build();
+                .rawText("raw from twscrape")
+                .formattedText("formatted from twscrape")
+                .imageUrls(List.of("https://img.example/tw.jpg"))
+                .media(List.of(TweetMedia.builder()
+                        .type(TweetMediaType.PHOTO)
+                        .sourceUrl("https://img.example/tw.jpg")
+                        .build()))
+                .links(List.of("https://example.com/tw"))
+                .mentions(List.of("@tw"))
+                .quotedTweetUrl("https://x.com/i/status/222")
+                .quotedTweetText("tw quote")
+                .build();
         when(twscrapeClient.fetchTweetDetail(eq("1"), anyString())).thenReturn(twscrapeEnriched);
 
         List<Tweet> result = source.fetch();
@@ -240,6 +292,13 @@ class TwitterSourceTest {
         assertThat(merged.getReplyCount()).isEqualTo(11);
         assertThat(merged.getRetweetCount()).isEqualTo(22);
         assertThat(merged.getLikeCount()).isEqualTo(33);
+        assertThat(merged.getRawText()).isEqualTo("raw from twscrape");
+        assertThat(merged.getFormattedText()).isEqualTo("formatted from twscrape");
+        assertThat(merged.getMedia()).hasSize(1);
+        assertThat(merged.getLinks()).containsExactly("https://example.com/tw");
+        assertThat(merged.getMentions()).containsExactly("@tw");
+        assertThat(merged.getQuotedTweetUrl()).isEqualTo("https://x.com/i/status/222");
+        assertThat(merged.getQuotedTweetText()).isEqualTo("tw quote");
         // twscrape 成功 → 不调 FxTwitter + 写缓存
         verify(fxTwitterClient, never()).fetchTweetDetail(anyString());
         verify(redisRepository).setObject(eq(RedisKeys.tweet("1")), any(Tweet.class), eq(Duration.ofHours(24)));
@@ -254,7 +313,21 @@ class TwitterSourceTest {
         when(twscrapeClient.fetchTweetDetail(eq("1"), anyString()))
                 .thenThrow(new RetryableException(ErrorCode.EXTERNAL_API_ERROR, "twscrape timeout"));
         Tweet fxFallback = Tweet.builder()
-                .id("1").content("from-fx").replyCount(1).likeCount(2).build();
+                .id("1")
+                .content("from-fx")
+                .rawText("raw from fx")
+                .formattedText("formatted from fx")
+                .replyCount(1)
+                .likeCount(2)
+                .media(List.of(TweetMedia.builder()
+                        .type(TweetMediaType.VIDEO)
+                        .sourceUrl("https://video.example/fx.mp4")
+                        .build()))
+                .links(List.of("https://example.com/fx"))
+                .mentions(List.of("@fx"))
+                .quotedTweetUrl("https://x.com/i/status/333")
+                .quotedTweetText("fx quote")
+                .build();
         when(fxTwitterClient.fetchTweetDetail("1")).thenReturn(fxFallback);
 
         List<Tweet> result = source.fetch();
@@ -263,6 +336,13 @@ class TwitterSourceTest {
         Tweet merged = result.get(0);
         assertThat(merged.getContent()).isEqualTo("from-fx");
         assertThat(merged.getReplyCount()).isEqualTo(1);
+        assertThat(merged.getRawText()).isEqualTo("raw from fx");
+        assertThat(merged.getFormattedText()).isEqualTo("formatted from fx");
+        assertThat(merged.getMedia()).hasSize(1);
+        assertThat(merged.getLinks()).containsExactly("https://example.com/fx");
+        assertThat(merged.getMentions()).containsExactly("@fx");
+        assertThat(merged.getQuotedTweetUrl()).isEqualTo("https://x.com/i/status/333");
+        assertThat(merged.getQuotedTweetText()).isEqualTo("fx quote");
         // 双链均尝试 + 缓存写入(用 FxTwitter 结果)
         verify(twscrapeClient, times(1)).fetchTweetDetail(eq("1"), anyString());
         verify(fxTwitterClient, times(1)).fetchTweetDetail("1");
@@ -326,7 +406,18 @@ class TwitterSourceTest {
     void shouldFallbackToPartialWhenBothChainsDisabled() {
         twscrapeProperties.setEnabled(false);
         fxTwitterProperties.setEnabled(false);
-        Tweet partial = baseTweet("1", "summary-rsshub");
+        Tweet partial = baseTweet("1", "summary-rsshub").toBuilder()
+                .rawText("partial raw")
+                .formattedText("partial formatted")
+                .media(List.of(TweetMedia.builder()
+                        .type(TweetMediaType.PHOTO)
+                        .sourceUrl("https://img.example/partial.jpg")
+                        .build()))
+                .links(List.of("https://example.com/partial"))
+                .mentions(List.of("@partial"))
+                .quotedTweetUrl("https://x.com/i/status/444")
+                .quotedTweetText("partial quote")
+                .build();
         when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
 
         List<Tweet> result = source.fetch();
@@ -336,6 +427,13 @@ class TwitterSourceTest {
         // 双链禁用 → 返回 RSSHub partial 字段, content null
         assertThat(merged.getSummary()).isEqualTo("summary-rsshub");
         assertThat(merged.getContent()).isNull();
+        assertThat(merged.getRawText()).isEqualTo("partial raw");
+        assertThat(merged.getFormattedText()).isEqualTo("partial formatted");
+        assertThat(merged.getMedia()).hasSize(1);
+        assertThat(merged.getLinks()).containsExactly("https://example.com/partial");
+        assertThat(merged.getMentions()).containsExactly("@partial");
+        assertThat(merged.getQuotedTweetUrl()).isEqualTo("https://x.com/i/status/444");
+        assertThat(merged.getQuotedTweetText()).isEqualTo("partial quote");
         verify(redisRepository, never()).getObject(anyString(), eq(Tweet.class));
     }
 

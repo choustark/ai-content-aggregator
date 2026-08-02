@@ -5,6 +5,7 @@ import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.Article;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.util.TextTruncateUtil;
 import com.choucj.aiaggregator.content.rag.model.ReferenceArticle;
 import com.choucj.aiaggregator.content.rag.service.ReferenceRetriever;
 import com.choucj.aiaggregator.content.rewriter.config.RewriterProperties;
@@ -621,15 +622,7 @@ public class SingleModelRewriter implements ContentRewriter {
      * 按 code point 截断 (N2 模式, 防 UTF-16 代理对 emoji 切断产生乱码).
      */
     static String truncateByCodePoints(String content, int maxCodePoints) {
-        if (content == null || content.isEmpty()) {
-            return "";
-        }
-        int total = content.codePointCount(0, content.length());
-        if (total <= maxCodePoints) {
-            return content;
-        }
-        int endIndex = content.offsetByCodePoints(0, maxCodePoints);
-        return content.substring(0, endIndex);
+        return TextTruncateUtil.truncateByCodePoints(content, maxCodePoints);
     }
 
     /**
@@ -779,10 +772,6 @@ public class SingleModelRewriter implements ContentRewriter {
      * {@code processor/} 包) 跨包复用 (N2 + R3-1 修复版, 避免重复实现导致 stale).
      */
     public static String truncateForLog(String s, int max) {
-        if (s == null || s.isEmpty()) return "";
-        int total = s.codePointCount(0, s.length());
-        if (total <= max) return s;
-        if (max <= 3) return truncateByCodePoints(s, max);
-        return truncateByCodePoints(s, max - 3) + "...";
+        return TextTruncateUtil.truncateForLog(s, max);
     }
 }

@@ -165,18 +165,35 @@ public class TwitterSource implements DataSource<Tweet> {
     }
 
     /**
-     * 合并 RSSHub partial 与 FxTwitter 补全结果.
+     * 合并 discovery partial 与补全结果.
      * <p>使用 {@link Tweet#toBuilder()} 保留 RSSHub 已填字段(id/author/summary/url/publishedAt),
-     * 覆盖 FxTwitter 补全字段(content/互动数/imageUrls). id 字段两边相同, 覆盖无副作用.
+     * 覆盖 provider 补全字段(content/互动数/imageUrls 等). 对文本/集合等可空字段采用非空优先,
+     * 避免缓存或降级 provider 返回局部字段时擦掉 discovery 已有信息.
      */
-    private Tweet mergeTweet(Tweet partial, Tweet fxTweet) {
+    private Tweet mergeTweet(Tweet partial, Tweet enrichedTweet) {
         return partial.toBuilder()
-                .content(fxTweet.getContent())
-                .replyCount(fxTweet.getReplyCount())
-                .retweetCount(fxTweet.getRetweetCount())
-                .likeCount(fxTweet.getLikeCount())
-                .imageUrls(fxTweet.getImageUrls())
+                .content(firstText(enrichedTweet.getContent(), partial.getContent()))
+                .rawText(firstText(enrichedTweet.getRawText(), partial.getRawText()))
+                .formattedText(firstText(enrichedTweet.getFormattedText(), partial.getFormattedText()))
+                .replyCount(enrichedTweet.getReplyCount())
+                .retweetCount(enrichedTweet.getRetweetCount())
+                .likeCount(enrichedTweet.getLikeCount())
+                .imageUrls(firstList(enrichedTweet.getImageUrls(), partial.getImageUrls()))
+                .media(firstList(enrichedTweet.getMedia(), partial.getMedia()))
+                .links(firstList(enrichedTweet.getLinks(), partial.getLinks()))
+                .mentions(firstList(enrichedTweet.getMentions(), partial.getMentions()))
+                .quotedTweetUrl(firstText(enrichedTweet.getQuotedTweetUrl(), partial.getQuotedTweetUrl()))
+                .quotedTweetText(firstText(enrichedTweet.getQuotedTweetText(), partial.getQuotedTweetText()))
+                .sourceAccessNote(firstText(enrichedTweet.getSourceAccessNote(), partial.getSourceAccessNote()))
                 .build();
+    }
+
+    private String firstText(String preferred, String fallback) {
+        return preferred == null || preferred.isBlank() ? fallback : preferred;
+    }
+
+    private <T> List<T> firstList(List<T> preferred, List<T> fallback) {
+        return preferred == null || preferred.isEmpty() ? fallback : preferred;
     }
 
     private Tweet readCacheOrNull(String key) {

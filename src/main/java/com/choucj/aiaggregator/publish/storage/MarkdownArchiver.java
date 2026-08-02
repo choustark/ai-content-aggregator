@@ -3,6 +3,7 @@ package com.choucj.aiaggregator.publish.storage;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.model.Article;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.util.TextTruncateUtil;
 import com.choucj.aiaggregator.publish.ContentPublisher;
 import com.choucj.aiaggregator.publish.storage.config.ArchiverProperties;
 import jakarta.annotation.PostConstruct;
@@ -256,26 +257,14 @@ public class MarkdownArchiver implements ContentPublisher {
      * 按 code point 截断 (N2 模式, 复用 Story 2.4 实现).
      */
     static String truncateByCodePoints(String content, int maxCodePoints) {
-        if (content == null || content.isEmpty()) {
-            return "";
-        }
-        int total = content.codePointCount(0, content.length());
-        if (total <= maxCodePoints) {
-            return content;
-        }
-        int endIndex = content.offsetByCodePoints(0, maxCodePoints);
-        return content.substring(0, endIndex);
+        return TextTruncateUtil.truncateByCodePoints(content, maxCodePoints);
     }
 
     /**
      * 日志字符串截断 — 返回值总 codepoint 数 ≤ max (R3-1 修复, 复用 Story 2.4 实现).
      */
     static String truncateForLog(String s, int max) {
-        if (s == null || s.isEmpty()) return "";
-        int total = s.codePointCount(0, s.length());
-        if (total <= max) return s;
-        if (max <= 3) return truncateByCodePoints(s, max);
-        return truncateByCodePoints(s, max - 3) + "...";
+        return TextTruncateUtil.truncateForLog(s, max);
     }
 
     private static String getRootMessage(Throwable e) {

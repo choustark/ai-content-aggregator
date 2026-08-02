@@ -5,6 +5,9 @@ import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.source.twitter.config.FxTwitterProperties;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
+import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
+import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
+import com.choucj.aiaggregator.source.twitter.model.TweetMediaVariant;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -17,6 +20,8 @@ import org.springframework.web.client.RestClient;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * FxTwitter 单条推文补全客户端.
@@ -135,22 +140,179 @@ public class FxTwitterClient {
                     "FxTwitter 响应缺少 tweet 字段: tweetId=" + tweetId);
         }
         String content = textOrNull(tweetNode, "text");
+        JsonNode rawTextNode = tweetNode.get("raw_text");
+        String rawText = rawTextNode == null ? content : textValueOrFirst(rawTextNode, "text", "full_text", "fullText");
+        String formattedText = content == null ? rawText : content;
         int replyCount = intOrZero(tweetNode, "replies");
         int retweetCount = intOrZero(tweetNode, "retweets");
         int likeCount = intOrZero(tweetNode, "likes");
         List<String> imageUrls = extractPhotos(tweetNode);
+        List<TweetMedia> media = extractMedia(tweetNode);
+        List<String> links = extractFacetLinks(rawTextNode);
+        List<String> mentions = extractFacetMentions(rawTextNode);
+        JsonNode quote = firstObject(tweetNode, "quote", "quoted_tweet", "quotedTweet");
 
         Tweet enriched = Tweet.builder()
                 .id(tweetId)
                 .content(content)
+                .rawText(rawText)
+                .formattedText(formattedText)
                 .replyCount(replyCount)
                 .retweetCount(retweetCount)
                 .likeCount(likeCount)
                 .imageUrls(imageUrls)
+                .media(media)
+                .links(links)
+                .mentions(mentions)
+                .quotedTweetUrl(parseQuotedTweetUrl(quote))
+                .quotedTweetText(quote == null ? null : firstText(quote, "text", "full_text", "fullText"))
+                .sourceAccessNote(firstNonBlank(content, rawText) == null ? "源文本为空或 provider 未返回文本" : null)
                 .build();
         log.debug("FxTwitter 补全成功: tweetId={}, replies={}, retweets={}, likes={}, images={}",
                 tweetId, replyCount, retweetCount, likeCount, imageUrls.size());
         return enriched;
+    }
+
+    private List<TweetMedia> extractMedia(JsonNode tweetNode) {
+        JsonNode mediaNode = tweetNode.get("media");
+        if (mediaNode == null || mediaNode.isMissingNode() || mediaNode.isNull()) {
+            return List.of();
+        }
+        List<TweetMedia> result = new ArrayList<>();
+        Set<String> seenIds = new HashSet<>();
+
+        JsonNode photos = mediaNode.get("photos");
+        if (photos != null && photos.isArray()) {
+            int order = 0;
+            for (JsonNode photo : photos) {
+                TweetMedia media = parseMediaItem(photo, TweetMediaType.PHOTO, order++);
+                addIfNew(result, seenIds, media);
+            }
+        }
+
+        JsonNode all = mediaNode.get("all");
+        if (all != null && all.isArray()) {
+            int order = result.size();
+            for (JsonNode item : all) {
+                TweetMedia media = parseMediaItem(item, parseMediaType(firstText(item, "type")), order++);
+                addIfNew(result, seenIds, media);
+            }
+        }
+        JsonNode videos = mediaNode.get("videos");
+        if (videos != null && videos.isArray()) {
+            int order = result.size();
+            for (JsonNode video : videos) {
+                TweetMedia media = parseMediaItem(video, TweetMediaType.VIDEO, order++);
+                addIfNew(result, seenIds, media);
+            }
+        }
+        return result;
+    }
+
+    private TweetMedia parseMediaItem(JsonNode item, TweetMediaType type, int order) {
+        List<TweetMediaVariant> variants = parseVariants(firstArray(item, "variants"));
+        return TweetMedia.builder()
+                .id(firstText(item, "id", "id_str"))
+                .type(type)
+                .sourceUrl(type == TweetMediaType.PHOTO
+                        ? firstText(item, "url", "media_url_https", "media_url")
+                        : firstNonBlank(bestVariantUrl(variants), firstText(item, "url", "src", "media_url_https", "media_url")))
+                .previewImageUrl(firstText(item, "thumbnail_url", "thumbnailUrl", "media_url_https", "media_url"))
+                .variants(variants)
+                .order(order)
+                .width(firstInteger(item, "width"))
+                .height(firstInteger(item, "height"))
+                .allowDownload(true)
+                .provider("fxtwitter")
+                .providerRawSummary(type + ":variants=" + variants.size())
+                .build();
+    }
+
+    private List<TweetMediaVariant> parseVariants(JsonNode variantsNode) {
+        if (variantsNode == null || !variantsNode.isArray() || variantsNode.isEmpty()) {
+            return List.of();
+        }
+        List<TweetMediaVariant> variants = new ArrayList<>(variantsNode.size());
+        for (JsonNode variant : variantsNode) {
+            String url = textOrNull(variant, "url");
+            if (url == null) {
+                continue;
+            }
+            variants.add(TweetMediaVariant.builder()
+                    .url(url)
+                    .contentType(firstText(variant, "content_type", "contentType"))
+                    .bitrate(firstLong(variant, "bitrate"))
+                    .width(firstInteger(variant, "width"))
+                    .height(firstInteger(variant, "height"))
+                    .build());
+        }
+        return variants;
+    }
+
+    private String bestVariantUrl(List<TweetMediaVariant> variants) {
+        if (variants == null || variants.isEmpty()) {
+            return null;
+        }
+        TweetMediaVariant best = null;
+        for (TweetMediaVariant variant : variants) {
+            if (variant.getUrl() == null) {
+                continue;
+            }
+            if (best == null || nullToZero(variant.getBitrate()) > nullToZero(best.getBitrate())) {
+                best = variant;
+            }
+        }
+        return best == null ? null : best.getUrl();
+    }
+
+    private long nullToZero(Long value) {
+        return value == null ? 0L : value;
+    }
+
+    private void addIfNew(List<TweetMedia> result, Set<String> seenIds, TweetMedia media) {
+        String id = media.getId();
+        if (id != null && !seenIds.add(id)) {
+            return;
+        }
+        result.add(media);
+    }
+
+    private TweetMediaType parseMediaType(String value) {
+        if (value == null) {
+            return TweetMediaType.UNKNOWN;
+        }
+        return switch (value.toLowerCase()) {
+            case "photo", "image" -> TweetMediaType.PHOTO;
+            case "video" -> TweetMediaType.VIDEO;
+            case "gif", "animated_gif" -> TweetMediaType.GIF;
+            default -> TweetMediaType.UNKNOWN;
+        };
+    }
+
+    private JsonNode firstArray(JsonNode node, String... fields) {
+        if (node == null) {
+            return null;
+        }
+        for (String field : fields) {
+            JsonNode child = node.get(field);
+            if (child != null && child.isArray()) {
+                return child;
+            }
+        }
+        return null;
+    }
+
+    private JsonNode firstObject(JsonNode node, String... fields) {
+        if (node == null) {
+            return null;
+        }
+        for (String field : fields) {
+            JsonNode child = node.get(field);
+            if (child != null && child.isObject()) {
+                return child;
+            }
+        }
+        return null;
     }
 
     private List<String> extractPhotos(JsonNode tweetNode) {
@@ -164,7 +326,7 @@ public class FxTwitterClient {
         }
         List<String> result = new ArrayList<>(photos.size());
         for (JsonNode photo : photos) {
-            String url = textOrNull(photo, "url");
+            String url = firstText(photo, "url", "media_url_https", "media_url");
             if (url != null) {
                 result.add(url);
             }
@@ -172,12 +334,86 @@ public class FxTwitterClient {
         return result;
     }
 
-    private String textOrNull(JsonNode node, String field) {
-        JsonNode child = node.get(field);
-        if (child == null || child.isNull() || !child.isTextual()) {
+    private List<String> extractFacetLinks(JsonNode rawTextNode) {
+        JsonNode facets = firstArray(rawTextNode, "facets");
+        if (facets == null || facets.isEmpty()) {
+            return List.of();
+        }
+        List<String> links = new ArrayList<>();
+        for (JsonNode facet : facets) {
+            if ("url".equalsIgnoreCase(firstText(facet, "type"))) {
+                String link = firstText(facet, "replacement", "expanded_url", "expandedUrl", "url");
+                if (link != null) {
+                    links.add(link);
+                }
+            }
+        }
+        return links;
+    }
+
+    private List<String> extractFacetMentions(JsonNode rawTextNode) {
+        JsonNode facets = firstArray(rawTextNode, "facets");
+        if (facets == null || facets.isEmpty()) {
+            return List.of();
+        }
+        List<String> mentions = new ArrayList<>();
+        for (JsonNode facet : facets) {
+            if ("mention".equalsIgnoreCase(firstText(facet, "type"))) {
+                String mention = firstText(facet, "screen_name", "screenName", "username", "userName");
+                if (mention != null) {
+                    mentions.add(mention.startsWith("@") ? mention : "@" + mention);
+                }
+            }
+        }
+        return mentions;
+    }
+
+    private String parseQuotedTweetUrl(JsonNode quote) {
+        if (quote == null) {
             return null;
         }
-        String text = child.asText();
+        String url = firstText(quote, "url", "tweetUrl", "tweet_url");
+        if (url != null) {
+            return url;
+        }
+        String id = firstText(quote, "id", "id_str");
+        return id == null ? null : "https://x.com/i/status/" + id;
+    }
+
+    private String firstText(JsonNode node, String... fields) {
+        if (node == null) {
+            return null;
+        }
+        for (String field : fields) {
+            String value = textOrNull(node, field);
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
+    }
+
+    private String textValueOrFirst(JsonNode node, String... fields) {
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (node.isValueNode()) {
+            String text = node.asText(null);
+            return text == null || text.isBlank() ? null : text;
+        }
+        return firstText(node, fields);
+    }
+
+    private String firstNonBlank(String preferred, String fallback) {
+        return preferred == null || preferred.isBlank() ? fallback : preferred;
+    }
+
+    private String textOrNull(JsonNode node, String field) {
+        JsonNode child = node.get(field);
+        if (child == null || child.isNull() || child.isContainerNode()) {
+            return null;
+        }
+        String text = child.asText(null);
         return text.isBlank() ? null : text;
     }
 
@@ -187,5 +423,15 @@ public class FxTwitterClient {
             return 0;
         }
         return child.asInt();
+    }
+
+    private Integer firstInteger(JsonNode node, String field) {
+        JsonNode child = node.get(field);
+        return child == null || child.isNull() || !child.canConvertToInt() ? null : child.asInt();
+    }
+
+    private Long firstLong(JsonNode node, String field) {
+        JsonNode child = node.get(field);
+        return child == null || child.isNull() || !child.canConvertToLong() ? null : child.asLong();
     }
 }

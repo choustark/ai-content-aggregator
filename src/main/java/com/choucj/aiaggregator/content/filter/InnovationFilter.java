@@ -2,6 +2,7 @@ package com.choucj.aiaggregator.content.filter;
 
 import com.choucj.aiaggregator.common.client.LlmClient;
 import com.choucj.aiaggregator.common.exception.RetryableException;
+import com.choucj.aiaggregator.common.util.TextTruncateUtil;
 import com.choucj.aiaggregator.content.filter.config.FilterProperties;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
 import lombok.extern.slf4j.Slf4j;
@@ -205,15 +206,7 @@ public class InnovationFilter implements ContentFilter<Tweet> {
      * 切在中间产生半个代理对, LLM 看到乱码影响评分准确性.
      */
     private static String truncateByCodePoints(String content, int maxCodePoints) {
-        if (content == null) {
-            return "";
-        }
-        int totalCodePoints = content.codePointCount(0, content.length());
-        if (totalCodePoints <= maxCodePoints) {
-            return content;
-        }
-        int endIndex = content.offsetByCodePoints(0, maxCodePoints);
-        return content.substring(0, endIndex);
+        return TextTruncateUtil.truncateByCodePoints(content, maxCodePoints);
     }
 
     private static String truncate(String value) {
