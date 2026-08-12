@@ -67,3 +67,6 @@ Thumbs.db
 ### 自定义工作流 / 设计产物 (本地实验, 不入主干) ###
 custom-workflows/
 design-artifacts/
+
+### Sisyphus 运行时状态 (临时状态文件, 不入版本控制) ###
+.sisyphus/

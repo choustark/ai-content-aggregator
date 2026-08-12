@@ -4,6 +4,7 @@ import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
+import com.fasterxml.jackson.annotation.JsonInclude;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -17,6 +18,7 @@ import java.util.List;
 @Builder(toBuilder = true)
 @NoArgsConstructor
 @AllArgsConstructor
+@JsonInclude(JsonInclude.Include.NON_NULL)
 public class TweetMedia {
 
     /** 媒体 ID；provider 未返回时可由 {@code tweetId:index:type} 生成。 */
@@ -59,4 +61,40 @@ public class TweetMedia {
 
     /** 字段级失败或降级原因；无失败时为 null。 */
     private String failureReason;
+
+    // ===== Story 7.1: 媒体归档与发布生命周期状态字段 =====
+
+    /**
+     * 本地归档文件相对/绝对路径；未下载时为 null（Story 7.2/7.3 填）。
+     * <p>路径以确定性归档目录 {@code media/twitter/{yyyy-MM-dd}/{tweetId}/} 为基准。
+     */
+    private String localPath;
+
+    /**
+     * 下载状态；默认 {@link MediaDownloadStatus#PENDING}（Story 7.2/7.3 填）。
+     */
+    @Builder.Default
+    private MediaDownloadStatus downloadStatus = MediaDownloadStatus.PENDING;
+
+    /**
+     * 微信上传状态；默认 {@link MediaUploadStatus#PENDING}（Story 8.4 填）。
+     */
+    @Builder.Default
+    private MediaUploadStatus uploadStatus = MediaUploadStatus.PENDING;
+
+    /**
+     * 可发布性状态；默认 {@link PublishabilityStatus#UNKNOWN}（Story 7.5 gate 填）。
+     */
+    @Builder.Default
+    private PublishabilityStatus publishability = PublishabilityStatus.UNKNOWN;
+
+    /**
+     * 微信正文图片上传后的 URL；未上传时为 null（Story 8.4 填）。
+     */
+    private String wechatUrl;
+
+    /**
+     * 微信媒体 ID；未上传时为 null（Story 8.4 填）。
+     */
+    private String wechatMediaId;
 }

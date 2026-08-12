@@ -95,6 +95,18 @@ twitter:
     #   - https://x.com/OpenAI/status/1234567890
     #   - 1234567890          # 纯 post ID(spike Q1a 未测变体, 默认归一化为 /i/status/{id})
     #   - https://x.com/i/article/...   # Article URL(spike Q1b 未测变体, best-effort 透传)
+  # Story 7.1: X 媒体本地归档(确定性目录 + media.json sidecar).
+  # 集成型开关, 默认 false; 关闭时 TweetMediaArchiveWriter Bean 不注册, 媒体归档不激活, 既有 Pipeline 零回归.
+  media:
+    enabled: false
+    # base-directory 为空时 fallback 到 archive.base-directory(Story 2.5), 复用同一 Docker 卷挂载点.
+    # 归档目录 = {base-directory}/media/twitter/{yyyy-MM-dd}/{tweetId}/media.json
+    base-directory:
+    date-pattern: yyyy-MM-dd
+    sidecar-filename: media.json
+    # Story 7.2: 图片下载参数
+    download-timeout-seconds: 30
+    max-file-size-mb: 10
 
 scraper:
   # 本地 x-author-self-scraper API 服务. 该服务内部运行 Apify SDK/Crawlee Actor,
