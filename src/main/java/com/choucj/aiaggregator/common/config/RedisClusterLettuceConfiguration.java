@@ -1,5 +1,8 @@
 package com.choucj.aiaggregator.common.config;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import dev.langchain4j.community.store.embedding.redis.spring.RedisEmbeddingStoreProperties;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -114,7 +117,7 @@ public class RedisClusterLettuceConfiguration {
      * Story 1.5b: 复杂对象 JSON 序列化路径.
      *
      * <p>与 {@link StringRedisTemplate} 共存 — 后者服务纯字符串(任务队列 taskId / 计数器),
-     * 本 Bean 服务 DO 缓存(TaskOrderDO / RssArticleDO / LlmResponseDO).
+     * 本 Bean 服务 DO 缓存(TaskOrderDO / RssArticleDO / LlmResponseDO / Tweet).
      *
      * <p><b>序列化器配置:</b>
      * <ul>
@@ -124,6 +127,12 @@ public class RedisClusterLettuceConfiguration {
      *       在 JSON 中包含 {@code @class} 元信息标识类型,反序列化时按此加载类;
      *       一个 Bean 服务所有 DO 类型,避免为每种 DO 配置独立 Template(违反 DRY)</li>
      * </ul>
+     *
+     * <p><b>Java 8 时间类型支持:</b>
+     * 显式配置 {@link ObjectMapper} 注册 {@link JavaTimeModule},
+     * 支持 {@link java.time.LocalDateTime} / {@link java.time.LocalDate} 等类型序列化
+     * (修复 {@code Tweet.publishedAt} 序列化失败问题).
+     * 禁用 {@code WRITE_DATES_AS_TIMESTAMPS} 以 ISO-8601 格式输出日期.
      *
      * <p><b>反序列化风险:</b>
      * {@code @class} 默认允许反序列化任意类;但 Redis 数据源是内部写入(不来自外部用户),
@@ -146,7 +155,13 @@ public class RedisClusterLettuceConfiguration {
         template.setKeySerializer(stringSerializer);
         template.setHashKeySerializer(stringSerializer);
 
-        GenericJackson2JsonRedisSerializer jsonSerializer = new GenericJackson2JsonRedisSerializer();
+        // 配置 ObjectMapper 支持 Java 8 时间类型
+        ObjectMapper objectMapper = new ObjectMapper();
+        objectMapper.registerModule(new JavaTimeModule());
+        objectMapper.disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
+
+        GenericJackson2JsonRedisSerializer jsonSerializer =
+                new GenericJackson2JsonRedisSerializer(objectMapper);
         template.setValueSerializer(jsonSerializer);
         template.setHashValueSerializer(jsonSerializer);
 

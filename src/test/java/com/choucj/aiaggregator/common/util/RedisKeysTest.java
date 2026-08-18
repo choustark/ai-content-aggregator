@@ -120,4 +120,23 @@ class RedisKeysTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("model");
     }
+
+    /** Story 7.4 T5.1 (AC6): tweetMedia 键格式 + 与 tweet({id}) 命名空间分离. */
+    @Test
+    void shouldFormatTweetMediaKey() {
+        assertThat(RedisKeys.tweetMedia("1234567890")).isEqualTo("tweet:1234567890:media");
+        // 命名空间分离: tweet({id}) 是 String 缓存, tweetMedia({id}) 是 JSON 状态快照, 互不冲突
+        assertThat(RedisKeys.tweetMedia("1234567890")).isNotEqualTo(RedisKeys.tweet("1234567890"));
+    }
+
+    /** Story 7.4 T5.1 (AC6): tweetId blank 校验. */
+    @Test
+    void shouldRejectBlankTweetIdForTweetMediaKey() {
+        assertThatThrownBy(() -> RedisKeys.tweetMedia(" "))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("tweetId");
+        assertThatThrownBy(() -> RedisKeys.tweetMedia(null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("tweetId");
+    }
 }

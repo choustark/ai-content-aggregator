@@ -178,4 +178,18 @@ class RedisRepositoryImplTest {
 
         assertThat(total).isEqualTo(102L);
     }
+
+    @Test
+    void shouldThrowNonRetryableExceptionWhenIncrementByReturnsNonNumericType() {
+        Duration ttl = Duration.ofDays(7);
+        // 模拟 Redis 返回非数字类型（如旧数据存储为字符串）
+        when(redisTemplate.execute(any(DefaultRedisScript.class), eq(java.util.List.of("cost:daily:2026-06-28")),
+                eq(2L), eq(ttl.toMillis()))).thenReturn("invalid-string");
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
+                repository.incrementBy("cost:daily:2026-06-28", 2L, ttl))
+                .isInstanceOf(com.choucj.aiaggregator.common.exception.NonRetryableException.class)
+                .hasMessageContaining("incrementBy 返回类型异常")
+                .hasMessageContaining("actualType=java.lang.String");
+    }
 }

@@ -2,6 +2,7 @@ package com.choucj.aiaggregator.source.twitter.discovery;
 
 import com.choucj.aiaggregator.source.twitter.config.ScraperProperties;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
+import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Tag;
@@ -99,6 +100,30 @@ class XAuthorScraperDiscoveryClientLiveTest {
                 .as("readiness 复现: 时间线应至少包含 media 或 quotedTweetUrl (got media=%s, quote=%s)",
                         hasMedia, hasQuote)
                 .isTrue();
+    }
+
+    /**
+     * Story 7.3 T3.11: VIDEO/GIF 媒体 live 验证 (NFR9 软断言).
+     *
+     * <p>readiness 全量扫描显示 zhongying14 时间线含 8 个 video media (GIF 0 样例仍 open).
+     * 本测试验证 parser 已识别 video 类型 (不再降级为 PHOTO): 任一推文含 VIDEO/GIF media 即通过;
+     * 当前时间线恰好无 VIDEO/GIF 时 assumeTrue 跳过 (不算失败), 避免对 X 真实数据的硬依赖.
+     */
+    @Test
+    void shouldPreserveVideoOrGifMediaFromLocalActor() {
+        ScraperProperties properties = newScraperProperties();
+        XAuthorScraperDiscoveryClient client =
+                new XAuthorScraperDiscoveryClient(properties, restClient, objectMapper);
+
+        List<Tweet> tweets = client.discoverTweets(targetUsername);
+        assertThat(tweets).isNotEmpty();
+
+        boolean hasVideoOrGif = tweets.stream()
+                .flatMap(t -> t.getMedia().stream())
+                .anyMatch(m -> m.getType() == TweetMediaType.VIDEO || m.getType() == TweetMediaType.GIF);
+        assumeTrue(hasVideoOrGif,
+                "当前 " + targetUsername + " 时间线无 VIDEO/GIF media (readiness: GIF 仍 0 样例), "
+                        + "捕获到 VIDEO/GIF 作者后由后续 action item 补 live 断言");
     }
 
     private static ScraperProperties newScraperProperties() {

@@ -10,6 +10,7 @@ import com.choucj.aiaggregator.source.twitter.config.TwitterMediaProperties;
 import com.choucj.aiaggregator.source.twitter.model.MediaDownloadStatus;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
+import com.choucj.aiaggregator.source.twitter.model.TweetMediaVariant;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -43,6 +44,9 @@ class TweetMediaArchiverTest {
     @Mock
     private MediaDownloadClient downloadClient;
 
+    @Mock
+    private MediaRuntimeStateRepository stateRepository;
+
     @TempDir
     Path tempDir;
 
@@ -61,7 +65,7 @@ class TweetMediaArchiverTest {
         archiverProperties.setBaseDirectory(tempDir.resolve("fallback").toString());
 
         writer = new TweetMediaArchiveWriter(mediaProperties, archiverProperties, new ObjectMapper().findAndRegisterModules());
-        archiver = new TweetMediaArchiver(downloadClient, writer);
+        archiver = new TweetMediaArchiver(downloadClient, writer, stateRepository);
     }
 
     @Test
@@ -103,6 +107,15 @@ class TweetMediaArchiverTest {
         assertThat(updated.getId()).isEqualTo("tweet-2:0:photo");
         assertThat(updated.getDownloadStatus()).isEqualTo(MediaDownloadStatus.DOWNLOADED);
         assertThat(updated.getLocalPath()).contains("tweet-2_0_photo-");
+        @SuppressWarnings("unchecked")
+        org.mockito.ArgumentCaptor<List<com.choucj.aiaggregator.source.twitter.media.model.MediaRuntimeItem>> captor =
+                org.mockito.ArgumentCaptor.forClass(List.class);
+        verify(stateRepository).saveSnapshot(eq("tweet-2"), captor.capture());
+        assertThat(captor.getValue()).singleElement()
+                .satisfies(item -> {
+                    assertThat(item.getMediaId()).isEqualTo("tweet-2:0:photo");
+                    assertThat(item.getType()).isEqualTo(TweetMediaType.PHOTO);
+                });
     }
 
     @Test
@@ -145,21 +158,45 @@ class TweetMediaArchiverTest {
     }
 
     @Test
-    void shouldSkipNonPhotoWithSpecifiedReason() {
+    void shouldSkipVideoWithMetadataArchiveAndSpecifiedReason() {
         TweetMedia video = TweetMedia.builder()
                 .id("video-1")
                 .type(TweetMediaType.VIDEO)
                 .sourceUrl("https://example.com/video.mp4")
+                .previewImageUrl("https://example.com/thumb.jpg")
+                .width(1440)
+                .height(2560)
+                .order(0)
+                .variants(List.of(
+                        TweetMediaVariant.builder()
+                                .url("https://example.com/video.mp4")
+                                .contentType("video/mp4")
+                                .bitrate(832000L)
+                                .width(1440)
+                                .height(2560)
+                                .build()))
                 .build();
         writer.writeSidecar("tweet-5", PUBLISHED_AT, List.of(video));
 
         TweetMediaArchiver.ArchiveResult result = archiver.archiveMedia("tweet-5", PUBLISHED_AT, List.of(video));
 
         assertThat(result.skipCount()).isEqualTo(1);
+        assertThat(result.mediaStatuses()).singleElement()
+                .satisfies(status -> assertThat(status.failureReason())
+                        .isEqualTo("video 元数据已归档，variantCount=1，下载待 Story 8.2 spike"));
         verify(downloadClient, never()).downloadBinary(eq(video.getSourceUrl()), eq("tweet-5"), eq("video-1"));
         MediaArchiveRecord record = writer.readSidecar("tweet-5", PUBLISHED_AT).orElseThrow();
-        assertThat(record.getMedia().get(0).getDownloadStatus()).isEqualTo(MediaDownloadStatus.SKIPPED);
-        assertThat(record.getMedia().get(0).getFailureReason()).isEqualTo("非 PHOTO 类型，跳过下载（Story 7.3 处理）");
+        TweetMedia archived = record.getMedia().get(0);
+        assertThat(archived.getDownloadStatus()).isEqualTo(MediaDownloadStatus.SKIPPED);
+        assertThat(archived.getFailureReason()).isEqualTo("视频/GIF 复现路径待 Story 8.2 spike 决定，暂不下载");
+        // AC1: 元数据保留
+        assertThat(archived.getPreviewImageUrl()).isEqualTo("https://example.com/thumb.jpg");
+        assertThat(archived.getWidth()).isEqualTo(1440);
+        assertThat(archived.getHeight()).isEqualTo(2560);
+        assertThat(archived.getVariants()).hasSize(1);
+        // AC4: 码率/格式摘要写入 providerRawSummary, 不含 URL
+        assertThat(archived.getProviderRawSummary()).isEqualTo(
+                "video:variants=1,maxBitrate=832000,formats=video/mp4");
     }
 
     @Test
@@ -169,7 +206,12 @@ class TweetMediaArchiverTest {
                 .withUserConfiguration(TweetMediaArchiverTestConfig.class)
                 .withBean(TweetMediaArchiveWriter.class, () -> writer)
                 .withPropertyValues("twitter.media.enabled=false")
-                .run(context -> assertThat(context).doesNotHaveBean(TweetMediaArchiver.class));
+                .run(context -> {
+                    assertThat(context).doesNotHaveBean(TweetMediaArchiver.class);
+                    // Story 7.4 T5.8 (AC7): 运行时状态/恢复服务同生同灭
+                    assertThat(context).doesNotHaveBean(MediaRuntimeStateRepository.class);
+                    assertThat(context).doesNotHaveBean(MediaRuntimeRecoveryService.class);
+                });
     }
 
     @Test
@@ -178,11 +220,117 @@ class TweetMediaArchiverTest {
                 .withConfiguration(AutoConfigurations.of(TwitterMediaConfig.class))
                 .withUserConfiguration(TweetMediaArchiverTestConfig.class)
                 .withBean(TweetMediaArchiveWriter.class, () -> writer)
+                .withBean(MediaRuntimeStateRepository.class,
+                        () -> new MediaRuntimeStateRepository(org.mockito.Mockito.mock(
+                                com.choucj.aiaggregator.common.repository.RedisRepository.class)))
                 .withPropertyValues(
                         "twitter.media.enabled=true",
                         "twitter.media.download-timeout-seconds=30",
                         "twitter.media.max-file-size-mb=10")
-                .run(context -> assertThat(context).hasSingleBean(TweetMediaArchiver.class));
+                .run(context -> {
+                    assertThat(context).hasSingleBean(TweetMediaArchiver.class);
+                    // Story 7.4 T5.8 (AC7): 开关开启时运行时状态仓库同注册
+                    assertThat(context).hasSingleBean(MediaRuntimeStateRepository.class);
+                });
+    }
+
+    /** Story 7.4 T5.4 (AC1/AC2): archiveMedia 完成后 saveSnapshot 被调用, 快照含正确状态计数. */
+    @Test
+    void shouldSaveRuntimeSnapshotAfterArchiveMedia() {
+        TweetMedia photo = photo("photo-r1", "https://example.com/r1.jpg");
+        TweetMedia video = TweetMedia.builder()
+                .id("video-r1").type(TweetMediaType.VIDEO)
+                .sourceUrl("https://example.com/v.mp4")
+                .previewImageUrl("https://example.com/t.jpg")
+                .variants(List.of())
+                .build();
+        writer.writeSidecar("tweet-r1", PUBLISHED_AT, List.of(photo, video));
+        when(downloadClient.downloadBinary(eq(photo.getSourceUrl()), eq("tweet-r1"), eq("photo-r1")))
+                .thenReturn(new MediaDownloadClient.DownloadResult(new byte[]{1}, "image/jpeg"));
+
+        TweetMediaArchiver.ArchiveResult result = archiver.archiveMedia("tweet-r1", PUBLISHED_AT, List.of(photo, video));
+
+        assertThat(result.successCount()).isEqualTo(1);
+        assertThat(result.skipCount()).isEqualTo(1);
+        @SuppressWarnings("unchecked")
+        org.mockito.ArgumentCaptor<List<com.choucj.aiaggregator.source.twitter.media.model.MediaRuntimeItem>> captor =
+                org.mockito.ArgumentCaptor.forClass(List.class);
+        verify(stateRepository, org.mockito.Mockito.times(2)).saveSnapshot(eq("tweet-r1"), captor.capture());
+        List<com.choucj.aiaggregator.source.twitter.media.model.MediaRuntimeItem> snapshot =
+                captor.getAllValues().get(captor.getAllValues().size() - 1);
+        assertThat(snapshot).hasSize(2);
+        // PHOTO: DOWNLOADED + localPath + type 对齐
+        assertThat(snapshot).anySatisfy(item -> {
+            assertThat(item.getMediaId()).isEqualTo("photo-r1");
+            assertThat(item.getType()).isEqualTo(TweetMediaType.PHOTO);
+            assertThat(item.getDownloadStatus()).isEqualTo(MediaDownloadStatus.DOWNLOADED);
+            assertThat(item.getLocalPath()).startsWith("media/twitter/2026-08-02/tweet-r1/");
+        });
+        // VIDEO: SKIPPED + failureReason + type 对齐
+        assertThat(snapshot).anySatisfy(item -> {
+            assertThat(item.getMediaId()).isEqualTo("video-r1");
+            assertThat(item.getType()).isEqualTo(TweetMediaType.VIDEO);
+            assertThat(item.getDownloadStatus()).isEqualTo(MediaDownloadStatus.SKIPPED);
+            assertThat(item.getFailureReason()).contains("Story 8.2");
+        });
+    }
+
+    /** Story 7.4 review patch: 每个媒体处理完成后增量写快照, 不只在循环结束写一次. */
+    @Test
+    void shouldSaveRuntimeSnapshotAfterEachMediaProcessed() {
+        TweetMedia first = photo("p-inc-1", "https://example.com/inc1.jpg");
+        TweetMedia second = photo("p-inc-2", "https://example.com/inc2.jpg");
+        writer.writeSidecar("tweet-inc", PUBLISHED_AT, List.of(first, second));
+        when(downloadClient.downloadBinary(eq(first.getSourceUrl()), eq("tweet-inc"), eq("p-inc-1")))
+                .thenReturn(new MediaDownloadClient.DownloadResult(new byte[]{1}, "image/jpeg"));
+        when(downloadClient.downloadBinary(eq(second.getSourceUrl()), eq("tweet-inc"), eq("p-inc-2")))
+                .thenReturn(new MediaDownloadClient.DownloadResult(new byte[]{2}, "image/jpeg"));
+
+        archiver.archiveMedia("tweet-inc", PUBLISHED_AT, List.of(first, second));
+
+        @SuppressWarnings("unchecked")
+        org.mockito.ArgumentCaptor<List<com.choucj.aiaggregator.source.twitter.media.model.MediaRuntimeItem>> captor =
+                org.mockito.ArgumentCaptor.forClass(List.class);
+        verify(stateRepository, org.mockito.Mockito.times(2)).saveSnapshot(eq("tweet-inc"), captor.capture());
+        assertThat(captor.getAllValues().get(0)).hasSize(1);
+        assertThat(captor.getAllValues().get(1)).hasSize(2);
+    }
+
+    /** Story 7.4 review patch: 空媒体列表也写入空快照, 避免旧 Redis 快照残留. */
+    @Test
+    void shouldSaveEmptyRuntimeSnapshot_whenMediaListIsEmpty() {
+        TweetMediaArchiver.ArchiveResult result = archiver.archiveMedia("tweet-empty", PUBLISHED_AT, List.of());
+
+        assertThat(result).isEqualTo(TweetMediaArchiver.ArchiveResult.empty());
+        verify(stateRepository).saveSnapshot(eq("tweet-empty"), eq(List.of()));
+    }
+
+    /**
+     * Story 7.4 T5.4 (AC5/AC9): Redis 宕机 (saveSnapshot 抛异常) 不阻塞归档 —
+     * archiveMedia 仍返回正确结果且 sidecar 仍写成功.
+     *
+     * <p>注: saveSnapshot 内部软失败; 本测试通过让 mock stateRepository.saveSnapshot 直接抛,
+     * 验证 TweetMediaArchiver 不因快照回写失败而中断 (双保险: 即使 Repository 软失败逻辑被改坏,
+     * archiveMedia 也不崩).
+     */
+    @Test
+    void shouldNotBlockArchiveWhenSnapshotSaveFails() {
+        TweetMedia photo = photo("photo-r2", "https://example.com/r2.jpg");
+        writer.writeSidecar("tweet-r2", PUBLISHED_AT, List.of(photo));
+        when(downloadClient.downloadBinary(eq(photo.getSourceUrl()), eq("tweet-r2"), eq("photo-r2")))
+                .thenReturn(new MediaDownloadClient.DownloadResult(new byte[]{1, 2}, "image/jpeg"));
+        org.mockito.Mockito.doThrow(new RetryableException("Redis 连接失败"))
+                .when(stateRepository).saveSnapshot(org.mockito.ArgumentMatchers.anyString(),
+                        org.mockito.ArgumentMatchers.anyList());
+
+        TweetMediaArchiver.ArchiveResult result = archiver.archiveMedia("tweet-r2", PUBLISHED_AT, List.of(photo));
+
+        // 归档结果不受 Redis 影响
+        assertThat(result.successCount()).isEqualTo(1);
+        // sidecar 仍写成功 (AC2: 本地归档信息不丢)
+        MediaArchiveRecord record = writer.readSidecar("tweet-r2", PUBLISHED_AT).orElseThrow();
+        assertThat(record.getMedia().get(0).getDownloadStatus()).isEqualTo(MediaDownloadStatus.DOWNLOADED);
+        assertThat(java.nio.file.Files.exists(tempDir.resolve(record.getMedia().get(0).getLocalPath()))).isTrue();
     }
 
     @Import(TweetMediaArchiver.class)

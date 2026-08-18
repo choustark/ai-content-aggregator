@@ -1,8 +1,10 @@
 package com.choucj.aiaggregator.source.twitter.discovery;
 
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
+import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.source.twitter.config.ScraperProperties;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
+import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -133,6 +135,53 @@ class XAuthorScraperDiscoveryClientTest {
     }
 
     @Test
+    void shouldIncludeJobSummaryWhenActorFailed() {
+        server.expect(requestTo(BASE_URL + "/v1/jobs"))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withSuccess("""
+                        {"job":{"id":"job-actor-failed","status":"queued","resultCount":0}}
+                        """, MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE_URL + "/v1/jobs/job-actor-failed"))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess("""
+                        {
+                          "job": {
+                            "id": "job-actor-failed",
+                            "status": "failed",
+                            "resultCount": 0,
+                            "error": {"code": "ACTOR_FAILED", "message": "Actor exited with code 91."},
+                            "summary": {
+                              "articleDiscoveries": [
+                                {"username": "dotey", "articleCount": 0}
+                              ],
+                              "failedArticleDiscoveries": [
+                                {
+                                  "username": "dotey",
+                                  "code": "ARTICLE_DISCOVERY_FAILED",
+                                  "message": "page.goto: net::ERR_CONNECTION_CLOSED at https://x.com/dotey/articles\\nCall log: very long details"
+                                }
+                              ],
+                              "succeededArticles": [],
+                              "failedArticles": [],
+                              "itemCount": 0
+                            }
+                          }
+                        }
+                        """, MediaType.APPLICATION_JSON));
+
+        assertThatThrownBy(() -> client.discoverTweets("dotey"))
+                .isInstanceOf(RetryableException.class)
+                .hasMessageContaining("ACTOR_FAILED")
+                .hasMessageContaining("resultCount=0")
+                .hasMessageContaining("itemCount=0")
+                .hasMessageContaining("articleDiscoveries=[dotey:articleCount=0]")
+                .hasMessageContaining("failedArticleDiscoveries=[dotey:ARTICLE_DISCOVERY_FAILED:page.goto: net::ERR_CONNECTION_CLOSED")
+                .hasMessageContaining("succeededArticles=[]")
+                .hasMessageContaining("failedArticles=[]");
+        server.verify();
+    }
+
+    @Test
     void shouldSkipItemWhenBodyMissing() throws Exception {
         Tweet tweet = client.parseItem(new ObjectMapper().readTree("""
                 {
@@ -144,5 +193,184 @@ class XAuthorScraperDiscoveryClientTest {
                 """), "openai");
 
         assertThat(tweet).isNull();
+    }
+
+    /**
+     * Story 7.3 T3.4 (AC3): parser 识别 dataset media 的 type=video, 保留 videoUrl/width/height + variants.
+     *
+     * <p>fixture 参照 local-apify-actor-readiness-20260802.md zhongying14 video media shape:
+     * {@code type=video + videoUrl + width=1440 + height=2560}, media 字段契约 (无 alt).
+     */
+    @Test
+    void shouldParseVideoMediaFromDataset() throws Exception {
+        Tweet tweet = client.parseItem(new ObjectMapper().readTree("""
+                {
+                  "id": "100",
+                  "url": "https://x.com/u/status/100",
+                  "requestedUsername": "u",
+                  "body": "video body text",
+                  "media": [
+                    {
+                      "type": "video",
+                      "url": "https://pbs.twimg.com/thumb_v.jpg",
+                      "videoUrl": "https://video.twimg.com/ext_tw_video/100/pu/vid/1440x2560/abc.mp4",
+                      "width": 1440,
+                      "height": 2560,
+                      "variants": [
+                        {
+                          "url": "https://video.twimg.com/ext_tw_video/100/pu/vid/1440x2560/high.mp4",
+                          "contentType": "video/mp4",
+                          "bitrate": 832000,
+                          "width": 1440,
+                          "height": 2560
+                        },
+                        {
+                          "url": "https://video.twimg.com/ext_tw_video/100/pu/vid/720x1280/low.mp4",
+                          "content_type": "video/mp4",
+                          "bit_rate": 432000
+                        }
+                      ]
+                    }
+                  ]
+                }
+                """), "u");
+
+        assertThat(tweet).isNotNull();
+        assertThat(tweet.getMedia()).hasSize(1);
+        var video = tweet.getMedia().get(0);
+        assertThat(video.getType()).isEqualTo(TweetMediaType.VIDEO);
+        assertThat(video.getSourceUrl()).isEqualTo(
+                "https://video.twimg.com/ext_tw_video/100/pu/vid/1440x2560/abc.mp4");
+        assertThat(video.getPreviewImageUrl()).isEqualTo("https://pbs.twimg.com/thumb_v.jpg");
+        assertThat(video.getWidth()).isEqualTo(1440);
+        assertThat(video.getHeight()).isEqualTo(2560);
+        assertThat(video.getOrder()).isZero();
+        assertThat(video.isAllowDownload()).isFalse();
+        assertThat(video.getProvider()).isEqualTo("x-author-scraper");
+        assertThat(video.getVariants()).hasSize(2);
+        assertThat(video.getVariants().get(0).getUrl()).isEqualTo(
+                "https://video.twimg.com/ext_tw_video/100/pu/vid/1440x2560/high.mp4");
+        assertThat(video.getVariants().get(0).getContentType()).isEqualTo("video/mp4");
+        assertThat(video.getVariants().get(0).getBitrate()).isEqualTo(832000L);
+        assertThat(video.getVariants().get(1).getUrl()).isEqualTo(
+                "https://video.twimg.com/ext_tw_video/100/pu/vid/720x1280/low.mp4");
+        assertThat(video.getVariants().get(1).getBitrate()).isEqualTo(432000L);
+        assertThat(video.getVariants().get(1).getWidth()).isEqualTo(1440);
+        assertThat(video.getVariants().get(1).getHeight()).isEqualTo(2560);
+        // imageUrls 只含 PHOTO, VIDEO 不混入 (AC6)
+        assertThat(tweet.getImageUrls()).isEmpty();
+        // 摘要已写入, 不含 URL
+        assertThat(video.getProviderRawSummary()).isEqualTo("video:variants=2");
+    }
+
+    /**
+     * Story 7.3 parser: GIF (animated_gif) 识别 + 字段保真.
+     */
+    @Test
+    void shouldParseAnimatedGifMediaFromDataset() throws Exception {
+        Tweet tweet = client.parseItem(new ObjectMapper().readTree("""
+                {
+                  "id": "101",
+                  "url": "https://x.com/u/status/101",
+                  "requestedUsername": "u",
+                  "body": "gif body",
+                  "media": [
+                    {
+                      "type": "animated_gif",
+                      "url": "https://pbs.twimg.com/thumb_g.jpg",
+                      "videoUrl": "https://video.twimg.com/tweet_video/xyz.mp4",
+                      "width": 480,
+                      "height": 270
+                    }
+                  ]
+                }
+                """), "u");
+
+        assertThat(tweet.getMedia()).hasSize(1);
+        var gif = tweet.getMedia().get(0);
+        assertThat(gif.getType()).isEqualTo(TweetMediaType.GIF);
+        assertThat(gif.getSourceUrl()).isEqualTo("https://video.twimg.com/tweet_video/xyz.mp4");
+        assertThat(gif.getPreviewImageUrl()).isEqualTo("https://pbs.twimg.com/thumb_g.jpg");
+        assertThat(gif.getWidth()).isEqualTo(480);
+        assertThat(gif.getHeight()).isEqualTo(270);
+        assertThat(gif.getVariants()).hasSize(1);
+    }
+
+    @Test
+    void shouldNotUsePreviewUrlAsVideoVariant_whenVideoUrlMissing() throws Exception {
+        Tweet tweet = client.parseItem(new ObjectMapper().readTree("""
+                {
+                  "id": "104",
+                  "url": "https://x.com/u/status/104",
+                  "requestedUsername": "u",
+                  "body": "video without playable url",
+                  "media": [
+                    {
+                      "type": "video",
+                      "url": "https://pbs.twimg.com/thumb_only.jpg",
+                      "width": 640,
+                      "height": 360
+                    }
+                  ]
+                }
+                """), "u");
+
+        assertThat(tweet).isNotNull();
+        var video = tweet.getMedia().get(0);
+        assertThat(video.getType()).isEqualTo(TweetMediaType.VIDEO);
+        assertThat(video.getPreviewImageUrl()).isEqualTo("https://pbs.twimg.com/thumb_only.jpg");
+        assertThat(video.getSourceUrl()).isNull();
+        assertThat(video.getVariants()).isEmpty();
+        assertThat(tweet.getImageUrls()).isEmpty();
+    }
+
+    /**
+     * Story 7.3 T3.5 (AC3): photo 媒体 + type 缺失均走 buildPhoto (回归保护, 保守降级不丢媒体).
+     */
+    @Test
+    void shouldParsePhotoAndFallbackWhenTypeMissing() throws Exception {
+        Tweet tweet = client.parseItem(new ObjectMapper().readTree("""
+                {
+                  "id": "102",
+                  "url": "https://x.com/u/status/102",
+                  "requestedUsername": "u",
+                  "body": "photo body",
+                  "media": [
+                    {"type": "photo", "url": "https://pbs.twimg.com/p1.jpg"},
+                    {"url": "https://pbs.twimg.com/p2.jpg"}
+                  ]
+                }
+                """), "u");
+
+        assertThat(tweet.getMedia()).hasSize(2);
+        assertThat(tweet.getMedia()).allSatisfy(m ->
+                assertThat(m.getType()).isEqualTo(TweetMediaType.PHOTO));
+        assertThat(tweet.getImageUrls()).containsExactly(
+                "https://pbs.twimg.com/p1.jpg", "https://pbs.twimg.com/p2.jpg");
+    }
+
+    /**
+     * Story 7.3: VIDEO + PHOTO 混合, imageUrls 只含 PHOTO, media 含 VIDEO+PHOTO.
+     */
+    @Test
+    void shouldSeparateVideoAndPhotoInMixedMedia() throws Exception {
+        Tweet tweet = client.parseItem(new ObjectMapper().readTree("""
+                {
+                  "id": "103",
+                  "url": "https://x.com/u/status/103",
+                  "requestedUsername": "u",
+                  "body": "mixed",
+                  "media": [
+                    {"type": "video", "url": "https://pbs.twimg.com/tv.jpg",
+                     "videoUrl": "https://video.twimg.com/v.mp4", "width": 640, "height": 360},
+                    {"type": "photo", "url": "https://pbs.twimg.com/photo.jpg"}
+                  ]
+                }
+                """), "u");
+
+        assertThat(tweet.getMedia()).hasSize(2);
+        assertThat(tweet.getMedia().get(0).getType()).isEqualTo(TweetMediaType.VIDEO);
+        assertThat(tweet.getMedia().get(1).getType()).isEqualTo(TweetMediaType.PHOTO);
+        assertThat(tweet.getImageUrls()).containsExactly("https://pbs.twimg.com/photo.jpg");
     }
 }

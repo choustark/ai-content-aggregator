@@ -129,9 +129,18 @@ public class RedisRepositoryImpl implements RedisRepository {
 
     @Override
     public long incrementBy(String key, long delta, Duration ttl) {
-        Number total = supplyWithMapping(() -> stringRedisTemplate.execute(
-                INCREMENT_WITH_TTL_SCRIPT, List.of(key), delta, ttl.toMillis()), key, "incrementBy");
-        return total == null ? delta : total.longValue();
+        Object result = stringRedisTemplate.execute(
+                INCREMENT_WITH_TTL_SCRIPT, List.of(key), delta, ttl.toMillis());
+        if (result == null) {
+            return delta;
+        }
+        if (!(result instanceof Number)) {
+            throw new NonRetryableException(ErrorCode.REDIS_DATA_ERROR,
+                    String.format("incrementBy 返回类型异常: key=%s, actualType=%s, 无法转换为 long",
+                            key, result.getClass().getName()));
+        }
+        Number total = (Number) result;
+        return total.longValue();
     }
 
     @Override

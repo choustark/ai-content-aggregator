@@ -295,4 +295,30 @@ public final class RedisKeys {
     public static String embeddingPrefix() {
         return "rag:embedding:";
     }
+
+    /**
+     * Story 7.4: 推文媒体运行时状态快照键 (Redis JSON, MediaRuntimeState).
+     *
+     * <p>键格式: {@code "tweet:{tweetId}:media"} (e.g., {@code "tweet:1234567890:media"}),
+     * 由 {@link com.choucj.aiaggregator.source.twitter.media.MediaRuntimeStateRepository} 写入,
+     * 值为媒体处理状态快照 (每媒体 mediaId/type/downloadStatus/localPath/failureReason/retryable,
+     * 不含 variant URL — N4), TTL 30 天.
+     *
+     * <p><b>键命名空间分离 (与 Story 2.2a 协同):</b> 本键是 JSON 对象
+     * ({@code tweet:{id}:media}, 媒体运行时状态快照), Story 2.2a tweet 是 String 缓存
+     * ({@code tweet:{id}}, FxTwitter 补全结果) — 不同 namespace 不冲突.
+     *
+     * <p><b>双源真相层级 (Story 7.4, ARCHITECTURE-SPINE 一致性约定表 + AD-6):</b>
+     * 本键是运行时快速恢复源 (重启后秒级判断哪些媒体已处理); media.json sidecar 是长期审计
+     * 权威源 (Redis 丢失/过期时以 sidecar 重建). 写入顺序「先 sidecar 后 Redis」.
+     *
+     * @param tweetId 推文 ID, 不为 null/blank
+     * @return {@code "tweet:{tweetId}:media"} 键字符串
+     */
+    public static String tweetMedia(String tweetId) {
+        if (tweetId == null || tweetId.isBlank()) {
+            throw new IllegalArgumentException("tweetId must not be blank");
+        }
+        return "tweet:" + tweetId + ":media";
+    }
 }

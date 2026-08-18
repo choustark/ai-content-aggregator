@@ -5,9 +5,11 @@ import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.util.TextTruncateUtil;
 import com.choucj.aiaggregator.publish.storage.TweetMediaArchiveWriter;
 import com.choucj.aiaggregator.source.twitter.config.TwitterMediaProperties;
+import com.choucj.aiaggregator.source.twitter.media.model.MediaRuntimeItem;
 import com.choucj.aiaggregator.source.twitter.model.MediaDownloadStatus;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
+import com.choucj.aiaggregator.source.twitter.model.TweetMediaVariant;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
@@ -19,25 +21,32 @@ import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
 
 /**
- * Story 7.2: X 推文媒体下载编排器 — PHOTO 类型图片下载 + 保存到本地 + sidecar 回写.
+ * Story 7.2/7.3: X 推文媒体下载与归档编排器.
  *
- * <p>仅处理 {@link TweetMediaType#PHOTO} 类型的媒体, 非 PHOTO 类型标记
- * {@link MediaDownloadStatus#SKIPPED} (Story 7.3 处理 VIDEO/GIF). 每个媒体独立 try-catch,
- * 单个失败不阻塞其他媒体处理 (AD-5 单媒体失败降级).
+ * <p>PHOTO 类型下载图片到本地 + sidecar 回写 (Story 7.2); VIDEO/GIF 类型只归档元数据到 sidecar
+ * (previewImageUrl + variants + width/height + 码率摘要), 标记 {@link MediaDownloadStatus#SKIPPED},
+ * <b>不下载二进制</b> (复现路径待 Story 8.2 spike 决定); UNKNOWN 类型直接 SKIPPED (Story 7.3).
+ * 每个媒体独立 try-catch, 单个失败不阻塞其他媒体处理 (AD-5 单媒体失败降级).
  *
  * <p><b>关键设计:</b>
  * <ul>
  *   <li><b>确定性文件名</b> — {@code {sanitizedMediaId}.{extFromUrl}}, ext 从 sourceUrl 路径段提取, fallback jpg</li>
- *   * <li><b>幂等跳过</b> — 文件已存在且非零字节时跳过 HTTP 下载, 仍回写 DOWNLOADED (AD-6)</li>
- *   * <li><b>sidecar 回写</b> — 通过 {@link TweetMediaArchiveWriter#updateMedia} 增量回写, 不覆盖其他字段</li>
- *   * <li><b>集成开关</b> — 复用 {@code twitter.media.enabled}, 与 TweetMediaArchiveWriter 同生同灭</li>
+ *   <li><b>幂等跳过</b> — 文件已存在且非零字节时跳过 HTTP 下载, 仍回写 DOWNLOADED (AD-6)</li>
+ *   <li><b>sidecar 回写</b> — 通过 {@link TweetMediaArchiveWriter#updateMedia} 增量回写, 不覆盖其他字段</li>
+ *   <li><b>VIDEO/GIF 元数据归档</b> — 写 previewImageUrl/variants/width/height/order/码率摘要,
+ *       downloadStatus=SKIPPED, 不调用 MediaDownloadClient (Story 7.3, AD-6)</li>
+ *   <li><b>集成开关</b> — 复用 {@code twitter.media.enabled}, 与 TweetMediaArchiveWriter 同生同灭</li>
+ *   <li><b>Redis 运行时快照</b> — 归档完成后聚合状态摘要写入 {@code tweet:{id}:media} (Story 7.4,
+ *       软失败不阻塞归档; sidecar 是权威源, Redis 是运行时恢复辅助源)</li>
  * </ul>
  *
  * <p><b>引用源:</b>
- * Story 7.2 / ARCHITECTURE-SPINE AD-2(三阶段独立状态) + AD-5(单媒体降级) + AD-6(本地归档+sidecar).
+ * Story 7.2 / Story 7.3 / Story 7.4 / ARCHITECTURE-SPINE AD-2(三阶段独立状态) + AD-5(单媒体降级) + AD-6(本地归档+sidecar).
  */
 @Slf4j
 @Component
@@ -49,8 +58,15 @@ public class TweetMediaArchiver {
     private static final int MEDIA_ID_MAX_LENGTH = 80;
     private static final int HASH_LENGTH = 8;
 
+    /** Story 7.3: VIDEO/GIF 复现路径待 Spike 决定的固定跳过原因. */
+    private static final String VIDEO_GIF_SKIP_REASON = "视频/GIF 复现路径待 Story 8.2 spike 决定，暂不下载";
+
+    /** Story 7.3: variant 摘要 code point 上限 (N2 + R3-1). */
+    private static final int VARIANT_SUMMARY_MAX_LENGTH = 200;
+
     private final MediaDownloadClient downloadClient;
     private final TweetMediaArchiveWriter archiveWriter;
+    private final MediaRuntimeStateRepository stateRepository;
     private final DateTimeFormatter dateFormatter;
 
     /**
@@ -58,11 +74,14 @@ public class TweetMediaArchiver {
      *
      * @param downloadClient 媒体下载客户端
      * @param archiveWriter  归档写入器(提供 dateFormatter)
+     * @param stateRepository 媒体运行时状态仓库 (Story 7.4, Redis 快照; 内部软失败, 不阻塞归档)
      */
     public TweetMediaArchiver(MediaDownloadClient downloadClient,
-                                TweetMediaArchiveWriter archiveWriter) {
+                                TweetMediaArchiveWriter archiveWriter,
+                                MediaRuntimeStateRepository stateRepository) {
         this.downloadClient = downloadClient;
         this.archiveWriter = archiveWriter;
+        this.stateRepository = stateRepository;
         // 复用 TweetMediaArchiveWriter 的 dateFormatter,确保日期格式一致性
         this.dateFormatter = extractDateFormatter(archiveWriter);
     }
@@ -101,6 +120,7 @@ public class TweetMediaArchiver {
     public ArchiveResult archiveMedia(String tweetId, LocalDateTime publishedAt,
                                        List<TweetMedia> media) {
         if (media == null || media.isEmpty()) {
+            saveRuntimeSnapshot(tweetId, List.of());
             return ArchiveResult.empty();
         }
 
@@ -118,12 +138,38 @@ public class TweetMediaArchiver {
                 continue;
             }
 
+            if (m.getType() == TweetMediaType.VIDEO || m.getType() == TweetMediaType.GIF) {
+                // Story 7.3: VIDEO/GIF 归档元数据到 sidecar, 不下载二进制
+                String mediaId = effectiveMediaId(tweetId, m, mediaIndex);
+                try {
+                    archiveVideoOrGifMetadata(tweetId, effectivePublishedAt, m, mediaId, mediaIndex);
+                    int variantCount = sanitizedVariants(m.getVariants()).size();
+                    String reason = m.getType().name().toLowerCase()
+                            + " 元数据已归档，variantCount=" + variantCount + "，下载待 Story 8.2 spike";
+                    statuses.add(MediaArchiveStatus.skipped(mediaId, reason));
+                    skipCount.incrementAndGet();
+                    saveRuntimeSnapshot(tweetId, buildRuntimeItems(tweetId, media, statuses));
+                } catch (RuntimeException e) {
+                    // AC5: 单个 VIDEO/GIF 元数据写入失败不阻塞同推文其他媒体 (AD-5)
+                    log.warn("VIDEO/GIF 元数据归档失败, 继续处理后续媒体: tweetId={}, mediaId={}, reason={}",
+                            tweetId, mediaId,
+                            TextTruncateUtil.truncateForLog(TextTruncateUtil.getRootMessage(e), 200));
+                    statuses.add(MediaArchiveStatus.failed(mediaId,
+                            TextTruncateUtil.truncateForLog(TextTruncateUtil.getRootMessage(e), 200),
+                            e instanceof RetryableException));
+                    failCount.incrementAndGet();
+                    saveRuntimeSnapshot(tweetId, buildRuntimeItems(tweetId, media, statuses));
+                }
+                continue;
+            }
+
             if (m.getType() != TweetMediaType.PHOTO) {
-                // 非 PHOTO 类型跳过, Story 7.3 处理
-                String mediaId = effectiveMediaId(tweetId, m, photoIndex);
-                skipMedia(tweetId, effectivePublishedAt, m, mediaId, mediaIndex, "非 PHOTO 类型，跳过下载（Story 7.3 处理）");
-                statuses.add(MediaArchiveStatus.skipped(mediaId, "非 PHOTO 类型，跳过下载（Story 7.3 处理）"));
+                // UNKNOWN 等类型: 直接跳过, 不归档元数据 (无 variants/preview 可写)
+                String mediaId = effectiveMediaId(tweetId, m, mediaIndex);
+                skipMedia(tweetId, effectivePublishedAt, m, mediaId, mediaIndex, "未知媒体类型，跳过归档");
+                statuses.add(MediaArchiveStatus.skipped(mediaId, "未知媒体类型，跳过归档"));
                 skipCount.incrementAndGet();
+                saveRuntimeSnapshot(tweetId, buildRuntimeItems(tweetId, media, statuses));
                 continue;
             }
 
@@ -134,6 +180,7 @@ public class TweetMediaArchiver {
                 skipMedia(tweetId, effectivePublishedAt, m, mediaId, mediaIndex, "allowDownload=false");
                 statuses.add(MediaArchiveStatus.skipped(mediaId, "allowDownload=false"));
                 skipCount.incrementAndGet();
+                saveRuntimeSnapshot(tweetId, buildRuntimeItems(tweetId, media, statuses));
                 continue;
             }
 
@@ -141,6 +188,7 @@ public class TweetMediaArchiver {
                 skipMedia(tweetId, effectivePublishedAt, m, mediaId, mediaIndex, "sourceUrl 为空");
                 statuses.add(MediaArchiveStatus.skipped(mediaId, "sourceUrl 为空"));
                 skipCount.incrementAndGet();
+                saveRuntimeSnapshot(tweetId, buildRuntimeItems(tweetId, media, statuses));
                 continue;
             }
 
@@ -149,6 +197,7 @@ public class TweetMediaArchiver {
                         currentPhotoIndex, mediaIndex);
                 statuses.add(MediaArchiveStatus.downloaded(mediaId, localPath));
                 successCount.incrementAndGet();
+                saveRuntimeSnapshot(tweetId, buildRuntimeItems(tweetId, media, statuses));
             } catch (Exception e) {
                 int beforeCount = failCount.get();
                 failCount.incrementAndGet(); // 先累加失败计数
@@ -157,12 +206,66 @@ public class TweetMediaArchiver {
                         tweetId, mediaId, beforeCount, afterCount);
                 String reason = logFailedDownload(tweetId, effectivePublishedAt, m, mediaId, mediaIndex, e); // 再记录日志
                 statuses.add(MediaArchiveStatus.failed(mediaId, reason, e instanceof RetryableException));
+                saveRuntimeSnapshot(tweetId, buildRuntimeItems(tweetId, media, statuses));
             }
         }
 
         log.info("媒体归档完成: tweetId={}, 成功={}, 跳过={}, 失败={}",
                 tweetId, successCount.get(), skipCount.get(), failCount.get());
+
         return new ArchiveResult(successCount.get(), skipCount.get(), failCount.get(), List.copyOf(statuses));
+    }
+
+    private void saveRuntimeSnapshot(String tweetId, List<MediaRuntimeItem> items) {
+        // saveSnapshot 内部软失败; 此处再包一层 try-catch 双保险 (AC9: 绝不让 Redis 失败
+        // 中断归档或回滚已写 sidecar), 防御 Repository 软失败契约被改坏的场景.
+        try {
+            stateRepository.saveSnapshot(tweetId, items);
+        } catch (RuntimeException e) {
+            log.warn("Redis 运行时快照回写异常 (双保险捕获), 归档结果不受影响: tweetId={}, cause={}",
+                    tweetId, TextTruncateUtil.truncateForLog(TextTruncateUtil.getRootMessage(e), 200));
+        }
+    }
+
+    /**
+     * Story 7.4: 把归档结果投影为 Redis 快照状态摘要 (N4: 不含 variant URL/sourceUrl/previewImageUrl).
+     *
+     * <p>从 {@code mediaStatuses} 取 mediaId/downloadStatus/localPath/failureReason/retryable
+     * (已含 effectiveMediaId 兜底 + 失败截断), 从原始 {@code media} 列表按 mediaId 对齐补 type;
+     * 对齐失败的 item type 为 null (防御, 不抛).
+     */
+    private List<MediaRuntimeItem> buildRuntimeItems(String tweetId, List<TweetMedia> media,
+                                                     List<MediaArchiveStatus> statuses) {
+        if (statuses == null || statuses.isEmpty()) {
+            return List.of();
+        }
+        java.util.Map<String, TweetMediaType> typeById = new java.util.HashMap<>();
+        if (media != null) {
+            int photoIndex = 0;
+            for (int mediaIndex = 0; mediaIndex < media.size(); mediaIndex++) {
+                TweetMedia m = media.get(mediaIndex);
+                if (m == null) {
+                    continue;
+                }
+                int effectiveIndex = m.getType() == TweetMediaType.PHOTO ? photoIndex++ : mediaIndex;
+                typeById.put(effectiveMediaId(tweetId, m, effectiveIndex), m.getType());
+            }
+        }
+        List<MediaRuntimeItem> items = new ArrayList<>(statuses.size());
+        for (MediaArchiveStatus status : statuses) {
+            if (status == null) {
+                continue;
+            }
+            items.add(MediaRuntimeItem.builder()
+                    .mediaId(status.mediaId())
+                    .type(typeById.get(status.mediaId()))
+                    .downloadStatus(status.status())
+                    .localPath(status.localPath())
+                    .failureReason(status.failureReason())
+                    .retryable(status.retryable())
+                    .build());
+        }
+        return items;
     }
 
     /**
@@ -231,6 +334,97 @@ public class TweetMediaArchiver {
                 .localPath(localPath)
                 .downloadStatus(MediaDownloadStatus.DOWNLOADED)
                 .build());
+    }
+
+    /**
+     * Story 7.3: 归档 VIDEO/GIF 元数据到 sidecar.
+     *
+     * <p>构造 mutation 写入 previewImageUrl/variants/width/height/order/providerRawSummary(码率摘要) +
+     * downloadStatus=SKIPPED + failureReason (Story 8.2 spike 决定复现路径). 不调用 MediaDownloadClient,
+     * 不下载二进制. 通过 {@link TweetMediaArchiveWriter#updateMedia}/{@code updateMediaAtIndex}
+     * read-modify-write 回写, 保留其他字段不变 (AC7 幂等性).
+     *
+     * @param publishedAt 推文发布时间,可为 null(null 时使用当前时刻)
+     */
+    private void archiveVideoOrGifMetadata(String tweetId, LocalDateTime publishedAt,
+                                            TweetMedia media, String mediaId, int mediaIndex) {
+        String variantSummary = buildVariantSummary(media.getType(), media.getVariants());
+        int variantCount = media.getVariants() == null ? 0 : media.getVariants().size();
+        Long maxBitrate = maxBitrate(media.getVariants());
+        boolean hasPreview = StringUtils_hasText(media.getPreviewImageUrl());
+
+        boolean updated = updateSidecar(tweetId, publishedAt, media, mediaId, mediaIndex,
+                original -> original.toBuilder()
+                        .id(mediaId)
+                        .type(media.getType())
+                        .previewImageUrl(media.getPreviewImageUrl())
+                        .variants(media.getVariants() != null ? media.getVariants() : List.of())
+                        .width(media.getWidth())
+                        .height(media.getHeight())
+                        .order(media.getOrder())
+                        .providerRawSummary(variantSummary)
+                        .downloadStatus(MediaDownloadStatus.SKIPPED)
+                        .failureReason(VIDEO_GIF_SKIP_REASON)
+                        .build());
+        if (!updated) {
+            throw new NonRetryableException("VIDEO/GIF sidecar 回写未命中: tweetId=" + tweetId
+                    + " mediaId=" + mediaId + " mediaIndex=" + mediaIndex, null);
+        }
+
+        // W11: 仅输出标识符 + 摘要, 不含完整 variant URL / previewImageUrl 全文 (AC8, N4)
+        log.info("VIDEO/GIF 元数据已归档: tweetId={}, mediaId={}, type={}, variantCount={}, maxBitrate={}, hasPreview={}",
+                tweetId, mediaId, media.getType(), variantCount,
+                maxBitrate != null ? maxBitrate : 0L, hasPreview);
+    }
+
+    /**
+     * Story 7.3: 构造 variants 的紧凑码率/格式摘要, 绝不含完整 variant URL (N4).
+     *
+     * <p>格式: {@code "video:variants=N,maxBitrate=X,formats=ct1/ct2"}, contentType 缺失用 {@code unknown};
+     * 截断到 {@value #VARIANT_SUMMARY_MAX_LENGTH} code points (N2 + R3-1).
+     */
+    private String buildVariantSummary(TweetMediaType type, List<TweetMediaVariant> variants) {
+        List<TweetMediaVariant> safeVariants = sanitizedVariants(variants);
+        int count = safeVariants.size();
+        String prefix = type.name().toLowerCase() + ":variants=" + count;
+        if (count == 0) {
+            return prefix;
+        }
+        long maxBitrate = safeVariants.stream()
+                .map(TweetMediaVariant::getBitrate)
+                .filter(java.util.Objects::nonNull)
+                .mapToLong(Long::longValue)
+                .max().orElse(0L);
+        String formats = safeVariants.stream()
+                .map(v -> v.getContentType() != null ? v.getContentType() : "unknown")
+                .collect(Collectors.joining("/"));
+        String summary = prefix + ",maxBitrate=" + maxBitrate + ",formats=" + formats;
+        return TextTruncateUtil.truncateByCodePoints(summary, VARIANT_SUMMARY_MAX_LENGTH);
+    }
+
+    private List<TweetMediaVariant> sanitizedVariants(List<TweetMediaVariant> variants) {
+        if (variants == null || variants.isEmpty()) {
+            return List.of();
+        }
+        return variants.stream()
+                .filter(Objects::nonNull)
+                .toList();
+    }
+
+    /** 提取 variants 中的最大码率, 全部 null 时返回 null (D3: 不拆箱). */
+    private Long maxBitrate(List<TweetMediaVariant> variants) {
+        if (variants == null || variants.isEmpty()) {
+            return null;
+        }
+        Long max = null;
+        for (TweetMediaVariant v : variants) {
+            if (v != null && v.getBitrate() != null) {
+                if (max == null || v.getBitrate() > max) {
+                    max = v.getBitrate();
+                }
+            }
+        }
+        return max;
     }
 
     /**
@@ -320,19 +514,23 @@ public class TweetMediaArchiver {
         return "0".repeat(HASH_LENGTH - hash.length()) + hash;
     }
 
-    private String effectiveMediaId(String tweetId, TweetMedia media, int photoIndex) {
+    private String effectiveMediaId(String tweetId, TweetMedia media, int index) {
         if (StringUtils_hasText(media.getId())) {
             return media.getId();
         }
-        return tweetId + ":" + photoIndex + ":photo";
+        // Story 7.3: 兜底 suffix 类型感知 (photo/video/gif), 仍满足 sidecar id 唯一性契约
+        TweetMediaType type = media.getType();
+        String suffix = type == TweetMediaType.VIDEO ? "video"
+                : type == TweetMediaType.GIF ? "gif" : "photo";
+        return tweetId + ":" + index + ":" + suffix;
     }
 
-    private void updateSidecar(String tweetId, LocalDateTime publishedAt, TweetMedia media, String mediaId,
-                               int mediaIndex, java.util.function.UnaryOperator<TweetMedia> mutation) {
+    private boolean updateSidecar(String tweetId, LocalDateTime publishedAt, TweetMedia media, String mediaId,
+                                  int mediaIndex, java.util.function.UnaryOperator<TweetMedia> mutation) {
         if (StringUtils_hasText(media.getId())) {
-            archiveWriter.updateMedia(tweetId, publishedAt, mediaId, mutation);
+            return archiveWriter.updateMedia(tweetId, publishedAt, mediaId, mutation);
         } else {
-            archiveWriter.updateMediaAtIndex(tweetId, publishedAt, mediaIndex, mutation);
+            return archiveWriter.updateMediaAtIndex(tweetId, publishedAt, mediaIndex, mutation);
         }
     }
 

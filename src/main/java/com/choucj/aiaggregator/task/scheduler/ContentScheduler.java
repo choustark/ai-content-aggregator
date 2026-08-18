@@ -279,7 +279,7 @@ public class ContentScheduler {
             log.info("批量任务已在队列中, 跳过重复入队: trigger={}, taskId={}", trigger, runTaskId);
             return;
         }
-        taskQueue.push(runTaskId);
+         taskQueue.push(runTaskId);
         log.info("已推送批量任务: trigger={}, taskId={}", trigger, runTaskId);
     }
 }

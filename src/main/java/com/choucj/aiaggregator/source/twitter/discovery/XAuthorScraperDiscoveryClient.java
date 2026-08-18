@@ -7,6 +7,7 @@ import com.choucj.aiaggregator.source.twitter.config.ScraperProperties;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
+import com.choucj.aiaggregator.source.twitter.model.TweetMediaVariant;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -46,6 +47,8 @@ import java.util.regex.Pattern;
 public class XAuthorScraperDiscoveryClient implements NamedTwitterDiscoveryProvider {
 
     private static final Pattern TWEET_ID_PATTERN = Pattern.compile("/status/(\\d+)");
+    private static final int SUMMARY_ENTRY_LIMIT = 3;
+    private static final int SUMMARY_TEXT_LIMIT = 120;
     private static final Set<String> SESSION_FAILURE_CODES = Set.of(
             "RATE_LIMITED", "LOGIN_EXPIRED", "LOGIN_REQUIRED", "CHALLENGE");
 
@@ -94,6 +97,11 @@ public class XAuthorScraperDiscoveryClient implements NamedTwitterDiscoveryProvi
         input.put("maxScrolls", properties.getMaxScrolls());
         input.put("scrollDelayMs", properties.getScrollDelayMs());
         input.put("proxyConfiguration", Map.of("useApifyProxy", false));
+
+        // 记录实际发送的配置，便于调试
+        log.debug("x-author scraper 输入参数: username={}, includePosts={}, includeArticles={}, includeReplies={}",
+                username, input.get("includePosts"), input.get("includeArticles"), input.get("includeReplies"));
+
         return input;
     }
 
@@ -258,12 +266,94 @@ public class XAuthorScraperDiscoveryClient implements NamedTwitterDiscoveryProvi
 
     private RuntimeException mapJobFailure(JsonNode job, String jobId, String username) {
         String code = job.path("error").path("code").asText("ACTOR_FAILED");
+        String summary = jobSummaryForLog(job);
         String message = "x-author scraper job 失败: jobId=" + jobId + ", username=" + username
-                + ", code=" + code;
+                + ", code=" + code + summary;
+        log.warn("x-author scraper job 失败详情: jobId={}, username={}, code={}{}",
+                jobId, username, code, summary);
         if (SESSION_FAILURE_CODES.contains(code) || "ARTICLE_FAILED".equals(code)) {
             return new NonRetryableException(ErrorCode.EXTERNAL_API_ERROR, message);
         }
         return new RetryableException(ErrorCode.EXTERNAL_API_ERROR, message);
+    }
+
+    private String jobSummaryForLog(JsonNode job) {
+        JsonNode summary = job.path("summary");
+        if (summary.isMissingNode() || summary.isNull()) {
+            return "";
+        }
+        return ", resultCount=" + job.path("resultCount").asInt(0)
+                + ", itemCount=" + summary.path("itemCount").asInt(0)
+                + ", articleDiscoveries=" + summarizeArticleDiscoveries(summary.path("articleDiscoveries"))
+                + ", failedArticleDiscoveries=" + summarizeFailedArticleDiscoveries(
+                        summary.path("failedArticleDiscoveries"))
+                + ", succeededArticles=" + summarizeArticles(summary.path("succeededArticles"))
+                + ", failedArticles=" + summarizeFailedArticles(summary.path("failedArticles"));
+    }
+
+    private String summarizeArticleDiscoveries(JsonNode discoveries) {
+        if (!discoveries.isArray() || discoveries.isEmpty()) {
+            return "[]";
+        }
+        List<String> entries = new ArrayList<>();
+        for (JsonNode item : discoveries) {
+            entries.add(firstText(item, "username") + ":articleCount=" + item.path("articleCount").asInt(0));
+            if (entries.size() >= SUMMARY_ENTRY_LIMIT) {
+                break;
+            }
+        }
+        return summarizeEntries(entries, discoveries.size());
+    }
+
+    private String summarizeFailedArticleDiscoveries(JsonNode failures) {
+        if (!failures.isArray() || failures.isEmpty()) {
+            return "[]";
+        }
+        List<String> entries = new ArrayList<>();
+        for (JsonNode item : failures) {
+            entries.add(firstText(item, "username") + ":" + firstText(item, "code")
+                    + ":" + truncateForLog(firstText(item, "message"), SUMMARY_TEXT_LIMIT));
+            if (entries.size() >= SUMMARY_ENTRY_LIMIT) {
+                break;
+            }
+        }
+        return summarizeEntries(entries, failures.size());
+    }
+
+    private String summarizeArticles(JsonNode articles) {
+        if (!articles.isArray() || articles.isEmpty()) {
+            return "[]";
+        }
+        List<String> entries = new ArrayList<>();
+        for (JsonNode item : articles) {
+            entries.add(firstText(item, "id") + ":" + truncateForLog(firstText(item, "title"), SUMMARY_TEXT_LIMIT));
+            if (entries.size() >= SUMMARY_ENTRY_LIMIT) {
+                break;
+            }
+        }
+        return summarizeEntries(entries, articles.size());
+    }
+
+    private String summarizeFailedArticles(JsonNode failures) {
+        if (!failures.isArray() || failures.isEmpty()) {
+            return "[]";
+        }
+        List<String> entries = new ArrayList<>();
+        for (JsonNode item : failures) {
+            entries.add(firstText(item, "id") + ":" + firstText(item, "code")
+                    + ":" + truncateForLog(firstText(item, "message"), SUMMARY_TEXT_LIMIT));
+            if (entries.size() >= SUMMARY_ENTRY_LIMIT) {
+                break;
+            }
+        }
+        return summarizeEntries(entries, failures.size());
+    }
+
+    private String summarizeEntries(List<String> entries, int total) {
+        if (total > entries.size()) {
+            entries.add("...+" + (total - entries.size()));
+        }
+        return entries.toString();
     }
 
     private RuntimeException mapClientError(HttpClientErrorException e, String stage, String jobId, String username) {
@@ -308,29 +398,124 @@ public class XAuthorScraperDiscoveryClient implements NamedTwitterDiscoveryProvi
 
     private List<TweetMedia> extractMedia(JsonNode item) {
         List<TweetMedia> result = new ArrayList<>();
-        addMediaUrls(result, path(item, "media"), "media");
-        addMediaUrls(result, path(item, "images"), "images");
+        int photoCount = addMediaUrls(result, path(item, "media"));
+        photoCount += addMediaUrls(result, path(item, "images"));
         addArticleImages(result, path(item, "article.images"));
         String cover = firstTextValue(path(item, "article.coverImageUrl"), path(item, "coverImageUrl"),
                 path(item, "previewImageUrl"));
         if (StringUtils.hasText(cover)) {
             result.add(buildPhoto(cover, result.size()));
+            photoCount++;
+        }
+        // W11: 仅输出计数摘要, 不含完整 URL (N4)
+        int videoCount = (int) result.stream().filter(m -> m.getType() == TweetMediaType.VIDEO).count();
+        int gifCount = (int) result.stream().filter(m -> m.getType() == TweetMediaType.GIF).count();
+        if (!result.isEmpty()) {
+            log.debug("x-author scraper 媒体解析: mediaCount={}, photoCount={}, videoCount={}, gifCount={}",
+                    result.size(), photoCount, videoCount, gifCount);
         }
         return result;
     }
 
-    private void addMediaUrls(List<TweetMedia> result, JsonNode array, String field) {
+    /**
+     * 遍历 media array, 按 {@code type} 字段分发: photo → {@link #buildPhoto},
+     * video/animated_gif → {@link #buildVideoOrGif}, type 缺失或未知 → 保守降级为 PHOTO (不丢媒体).
+     *
+     * <p>Story 7.3: 兑现 readiness deferred 决策 (默认主路径 VIDEO/GIF 不再被降级为 PHOTO)。
+     *
+     * @return 本轮解析中按 PHOTO 路径生成的媒体数 (含保守降级), 用于 W11 debug 计数
+     */
+    private int addMediaUrls(List<TweetMedia> result, JsonNode array) {
         if (!array.isArray()) {
-            return;
+            return 0;
         }
+        int photoAdded = 0;
         for (JsonNode node : array) {
-            String url = node.isTextual() ? node.asText() : firstText(node, "url", "src", "sourceUrl");
-            if (StringUtils.hasText(url)) {
-                result.add(buildPhoto(url, result.size()));
+            if (node == null || node.isNull() || node.isMissingNode()) {
+                continue;
+            }
+            String type = firstText(node, "type");
+            TweetMediaType resolved = resolveType(type);
+            if (resolved == TweetMediaType.VIDEO || resolved == TweetMediaType.GIF) {
+                result.add(buildVideoOrGif(node, resolved, result.size()));
             } else {
-                log.debug("x-author scraper media item 缺少 URL, 跳过: field={}", field);
+                // PHOTO 或 type 缺失/未知 → 保守降级为 PHOTO (不丢媒体)
+                String url = node.isTextual() ? node.asText() : firstText(node, "url", "src", "sourceUrl");
+                if (StringUtils.hasText(url)) {
+                    result.add(buildPhoto(url, result.size()));
+                    photoAdded++;
+                }
             }
         }
+        return photoAdded;
+    }
+
+    /**
+     * 解析 dataset media 的 {@code type} 字段 (photo / video / animated_gif), 未知值返回 null 触发保守降级.
+     */
+    private TweetMediaType resolveType(String type) {
+        if (!StringUtils.hasText(type)) {
+            return null;
+        }
+        String normalized = type.trim().toLowerCase();
+        return switch (normalized) {
+            case "photo" -> TweetMediaType.PHOTO;
+            case "video" -> TweetMediaType.VIDEO;
+            case "animated_gif", "gif" -> TweetMediaType.GIF;
+            default -> null;
+        };
+    }
+
+    /**
+     * 构造 VIDEO/GIF 媒体: sourceUrl=videoUrl (可下载候选), previewImageUrl=dataset media 的 url (缩略图),
+     * 保留 width/height, 构造单 variant (url=videoUrl). providerRawSummary 记录类型 + variant 数摘要.
+     *
+     * <p>Story 7.3: allowDownload=false (VIDEO/GIF 本 Story 不下载, 复现路径待 Story 8.2 spike).
+     */
+    private TweetMedia buildVideoOrGif(JsonNode node, TweetMediaType type, int order) {
+        String videoUrl = firstText(node, "videoUrl");
+        Integer width = firstInt(node, "width");
+        Integer height = firstInt(node, "height");
+        String previewUrl = firstText(node, "url");
+        List<TweetMediaVariant> variants = extractVariants(node, videoUrl, width, height);
+        String summary = type.name().toLowerCase() + ":variants=" + variants.size();
+        return TweetMedia.builder()
+                .type(type)
+                .sourceUrl(videoUrl)
+                .previewImageUrl(previewUrl)
+                .width(width)
+                .height(height)
+                .order(order)
+                .variants(variants)
+                .provider("x-author-scraper")
+                .allowDownload(false)
+                .providerRawSummary(summary)
+                .build();
+    }
+
+    private List<TweetMediaVariant> extractVariants(JsonNode node, String videoUrl, Integer width, Integer height) {
+        List<TweetMediaVariant> variants = new ArrayList<>();
+        JsonNode variantNodes = path(node, "variants");
+        if (variantNodes.isArray()) {
+            for (JsonNode variantNode : variantNodes) {
+                String variantUrl = firstText(variantNode, "url", "videoUrl");
+                if (!StringUtils.hasText(variantUrl)) {
+                    continue;
+                }
+                variants.add(TweetMediaVariant.builder()
+                        .url(variantUrl)
+                        .contentType(firstText(variantNode, "contentType", "content_type", "mimeType", "mime_type"))
+                        .bitrate(firstLong(variantNode, "bitrate", "bit_rate"))
+                        .width(firstIntValue(variantNode, "width", width))
+                        .height(firstIntValue(variantNode, "height", height))
+                        .build());
+            }
+        }
+        if (variants.isEmpty() && StringUtils.hasText(videoUrl)) {
+            variants.add(TweetMediaVariant.builder()
+                    .url(videoUrl).width(width).height(height).build());
+        }
+        return List.copyOf(variants);
     }
 
     private void addArticleImages(List<TweetMedia> result, JsonNode images) {
@@ -392,6 +577,54 @@ public class XAuthorScraperDiscoveryClient implements NamedTwitterDiscoveryProvi
             String value = firstText(node);
             if (StringUtils.hasText(value)) {
                 return value;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 从 node 读取整数, 缺失/非数值时返回 null (D3: width/height 是 Integer nullable, 不拆箱).
+     *
+     * <p>Story 7.3: dataset media 的 width/height 为数值节点, 缺失时返回 null 而非 0, 避免 0 误导下游.
+     */
+    private Integer firstInt(JsonNode node, String field) {
+        JsonNode child = path(node, field);
+        if (child == null || child.isMissingNode() || child.isNull()) {
+            return null;
+        }
+        if (child.canConvertToInt()) {
+            return child.asInt();
+        }
+        if (child.isTextual()) {
+            try {
+                return Integer.parseInt(child.asText().trim().replaceAll("[^0-9-]", ""));
+            } catch (NumberFormatException ignored) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private Integer firstIntValue(JsonNode node, String field, Integer fallback) {
+        Integer value = firstInt(node, field);
+        return value != null ? value : fallback;
+    }
+
+    private Long firstLong(JsonNode node, String... fields) {
+        for (String field : fields) {
+            JsonNode child = path(node, field);
+            if (child == null || child.isMissingNode() || child.isNull()) {
+                continue;
+            }
+            if (child.canConvertToLong()) {
+                return child.asLong();
+            }
+            if (child.isTextual()) {
+                try {
+                    return Long.parseLong(child.asText().trim().replaceAll("[^0-9-]", ""));
+                } catch (NumberFormatException ignored) {
+                    // try next candidate
+                }
             }
         }
         return null;
@@ -489,6 +722,19 @@ public class XAuthorScraperDiscoveryClient implements NamedTwitterDiscoveryProvi
 
     private int length(String body) {
         return body == null ? 0 : body.length();
+    }
+
+    private String truncateForLog(String value, int maxCodePoints) {
+        if (!StringUtils.hasText(value)) {
+            return "n/a";
+        }
+        String normalized = value.replaceAll("\\s+", " ").trim();
+        int codePointCount = normalized.codePointCount(0, normalized.length());
+        if (codePointCount <= maxCodePoints) {
+            return normalized;
+        }
+        int end = normalized.offsetByCodePoints(0, Math.max(0, maxCodePoints - 3));
+        return normalized.substring(0, end) + "...";
     }
 
     private int resultLimit() {
