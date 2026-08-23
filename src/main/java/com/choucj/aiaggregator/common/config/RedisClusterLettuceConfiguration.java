@@ -3,7 +3,10 @@ package com.choucj.aiaggregator.common.config;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
-import dev.langchain4j.community.store.embedding.redis.spring.RedisEmbeddingStoreProperties;
+import io.lettuce.core.SocketOptions;
+import io.lettuce.core.TimeoutOptions;
+import io.lettuce.core.cluster.ClusterClientOptions;
+import io.lettuce.core.cluster.ClusterTopologyRefreshOptions;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
@@ -11,6 +14,8 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.data.redis.connection.RedisClusterConfiguration;
 import org.springframework.data.redis.connection.RedisConnectionFactory;
+import org.springframework.data.redis.connection.RedisPassword;
+import org.springframework.data.redis.connection.lettuce.LettuceClientConfiguration;
 import org.springframework.data.redis.connection.lettuce.LettuceConnectionFactory;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -27,25 +32,16 @@ import java.util.stream.Collectors;
  * <p><b>双客户端共存策略(架构 Delta,Story 1.5a 引入):</b>
  * <table border="1">
  *   <tr><th>客户端</th><th>配置类</th><th>用途</th><th>Bean 类型</th></tr>
- *   <tr><td>Jedis</td><td>{@link RedisClusterConfig}(Story 1.1)</td>
- *       <td>langchain4j RediSearch 向量检索</td><td>{@code UnifiedJedis}</td></tr>
+ *   <tr><td>Jedis</td><td>{@link RagEmbeddingInfrastructureConfig}</td>
+ *       <td>standalone Redis-Stack 向量检索</td><td>{@code embeddingUnifiedJedis}</td></tr>
  *   <tr><td>Lettuce</td><td>本类(Story 1.5a)</td>
  *       <td>业务键值(缓存/任务队列/计数/幂等)</td>
  *       <td>{@link RedisConnectionFactory} + {@link StringRedisTemplate}</td></tr>
  * </table>
  *
- * <p><b>不修改 Story 1.1 的 Jedis 路径</b> — 业务侧通过 {@link StringRedisTemplate}
- * 抽象访问 Redis,与 langchain4j 的 RediSearch 路径物理隔离,无 Bean 冲突.
- *
- * <p><b>密码复用策略:</b>
- * 从 {@link RedisEmbeddingStoreProperties#getPassword()} 读取,避免在 application.yml
- * 中重复维护一份密码(遵循 DRY,且 {@code api-keys.yml} 已统一注入).
- *
- * <p><b>显式注册 RedisEmbeddingStoreProperties:</b>
- * langchain4j starter 的自动配置受 {@code @ConditionalOnProperty(langchain4j.community.redis.enabled)}
- * 保护 — test profile 关闭时整个自动配置不生效,Properties Bean 也不会注册.
- * 本类通过 {@link EnableConfigurationProperties} 显式注册,使其在所有 profile 下可用;
- * 多次注册同一 Properties 类型是幂等的,Spring 会合并(与 starter 共存不冲突).
+ * <p><b>两套 Redis 物理隔离:</b> 业务侧通过 {@link StringRedisTemplate} 抽象访问 Redis Cluster,
+ * RAG embedding 通过 {@link RagEmbeddingInfrastructureConfig} 中的 {@code embeddingUnifiedJedis}
+ * 访问 standalone Redis-Stack. 两者 host/port/password 均独立配置.
  *
  * <p><b>条件装配:</b>
  * {@code @ConditionalOnProperty(prefix="spring.data.redis.cluster", name="enabled",
@@ -64,7 +60,7 @@ import java.util.stream.Collectors;
  */
 @Slf4j
 @Configuration
-@EnableConfigurationProperties({RedisClusterProperties.class, RedisEmbeddingStoreProperties.class})
+@EnableConfigurationProperties(RedisClusterProperties.class)
 @ConditionalOnProperty(prefix = "spring.data.redis.cluster", name = "enabled",
         havingValue = "true", matchIfMissing = true)
 public class RedisClusterLettuceConfiguration {
@@ -81,13 +77,11 @@ public class RedisClusterLettuceConfiguration {
      * 已存在,自动配置会让位给用户配置),无 Bean 竞争.
      *
      * @param clusterProperties         自定义集群节点列表(Story 1.1 Properties)
-     * @param embeddingStoreProperties  langchain4j starter Properties,复用密码字段
      * @return 已初始化的 {@link LettuceConnectionFactory}
      */
     @Bean
     public RedisConnectionFactory redisConnectionFactory(
-            RedisClusterProperties clusterProperties,
-            RedisEmbeddingStoreProperties embeddingStoreProperties) {
+            RedisClusterProperties clusterProperties) {
 
         List<RedisClusterProperties.Node> nodes = clusterProperties.getNodes();
         Assert.notEmpty(nodes,
@@ -98,11 +92,15 @@ public class RedisClusterLettuceConfiguration {
         for (RedisClusterProperties.Node node : nodes) {
             clusterConfig.clusterNode(node.getHost(), node.getPort());
         }
-        if (embeddingStoreProperties.getPassword() != null) {
-            clusterConfig.setPassword(embeddingStoreProperties.getPassword());
+        if (clusterProperties.getUsername() != null && !clusterProperties.getUsername().isBlank()) {
+            clusterConfig.setUsername(clusterProperties.getUsername());
+        }
+        if (clusterProperties.getPassword() != null && !clusterProperties.getPassword().isBlank()) {
+            clusterConfig.setPassword(RedisPassword.of(clusterProperties.getPassword()));
         }
 
-        LettuceConnectionFactory factory = new LettuceConnectionFactory(clusterConfig);
+        LettuceConnectionFactory factory = new LettuceConnectionFactory(clusterConfig, clientConfiguration(clusterProperties));
+        factory.setValidateConnection(true);
         factory.afterPropertiesSet();
 
         String nodeList = nodes.stream()
@@ -111,6 +109,36 @@ public class RedisClusterLettuceConfiguration {
         log.info("Lettuce RedisConnectionFactory 初始化完成, 节点: {}", nodeList);
 
         return factory;
+    }
+
+    private LettuceClientConfiguration clientConfiguration(RedisClusterProperties clusterProperties) {
+        RedisClusterProperties.Client client = clusterProperties.getClient();
+
+        SocketOptions socketOptions = SocketOptions.builder()
+                .connectTimeout(client.getConnectTimeout())
+                .keepAlive(client.isKeepAlive())
+                .tcpNoDelay(true)
+                .build();
+
+        ClusterTopologyRefreshOptions topologyRefreshOptions = ClusterTopologyRefreshOptions.builder()
+                .enableAllAdaptiveRefreshTriggers()
+                .enablePeriodicRefresh(client.getTopologyRefreshPeriod())
+                .dynamicRefreshSources(true)
+                .closeStaleConnections(true)
+                .build();
+
+        ClusterClientOptions clientOptions = ClusterClientOptions.builder()
+                .socketOptions(socketOptions)
+                .timeoutOptions(TimeoutOptions.enabled(client.getCommandTimeout()))
+                .topologyRefreshOptions(topologyRefreshOptions)
+                .autoReconnect(true)
+                .validateClusterNodeMembership(false)
+                .build();
+
+        return LettuceClientConfiguration.builder()
+                .commandTimeout(client.getCommandTimeout())
+                .clientOptions(clientOptions)
+                .build();
     }
 
     /**

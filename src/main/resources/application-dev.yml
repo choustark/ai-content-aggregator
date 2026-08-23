@@ -20,6 +20,8 @@ redis:
         port: 7002
       - host: localhost
         port: 7003
+    username:
+    password:
 
 langchain4j:
   community:
@@ -31,3 +33,5 @@ langchain4j:
 logging:
   level:
     com.choucj.aiaggregator: DEBUG
+    io.lettuce.core.protocol.ConnectionWatchdog: WARN
+    io.lettuce.core.protocol.ReconnectionHandler: WARN

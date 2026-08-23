@@ -12,6 +12,8 @@ spring:
 redis:
   cluster:
     nodes: ${REDIS_CLUSTER_NODES_LIST}
+    username: ${REDIS_CLUSTER_USERNAME:}
+    password: ${REDIS_CLUSTER_PASSWORD:}
 
 langchain4j:
   community:
@@ -31,3 +33,5 @@ logging:
   level:
     com.choucj.aiaggregator: INFO
     org.springframework.boot.context.config: WARN
+    io.lettuce.core.protocol.ConnectionWatchdog: WARN
+    io.lettuce.core.protocol.ReconnectionHandler: WARN

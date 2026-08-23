@@ -45,7 +45,10 @@ public class CommentFilter implements ContentFilter<Tweet> {
         int threshold = properties.getCommentThreshold();
         List<Tweet> kept = new ArrayList<>(items.size());
         for (Tweet tweet : items) {
-            if (tweet.getReplyCount() >= threshold) {
+            boolean passed = tweet.getReplyCount() >= threshold;
+            log.debug("评论数筛选明细: tweetId={}, replyCount={}, 阈值={}, 结果={}",
+                    tweet.getId(), tweet.getReplyCount(), threshold, passed ? "通过" : "过滤");
+            if (passed) {
                 kept.add(tweet);
             }
         }

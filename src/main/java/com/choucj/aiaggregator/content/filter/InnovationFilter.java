@@ -121,7 +121,8 @@ public class InnovationFilter implements ContentFilter<Tweet> {
                     llmFailCount++;
                     continue;
                 }
-                scored.add(tweet.toBuilder().innovationScore(score).build());
+                Tweet scoredTweet = tweet.toBuilder().innovationScore(score).build();
+                scored.add(scoredTweet);
             } catch (RuntimeException e) {
                 log.warn("LLM 评分单条失败, 跳过该 Tweet: tweetId={}, error={}",
                         tweet.getId(), truncate(e.getMessage()));
@@ -138,8 +139,11 @@ public class InnovationFilter implements ContentFilter<Tweet> {
 
         List<Tweet> kept = new ArrayList<>(scored.size());
         for (Tweet tweet : scored) {
-            if (tweet.getInnovationScore() != null
-                    && tweet.getInnovationScore() >= threshold) {
+            boolean passed = tweet.getInnovationScore() != null
+                    && tweet.getInnovationScore() >= threshold;
+            log.debug("创新度筛选明细: tweetId={}, score={}, 阈值={}, 结果={}",
+                    tweet.getId(), tweet.getInnovationScore(), threshold, passed ? "通过" : "过滤");
+            if (passed) {
                 kept.add(tweet);
             }
         }

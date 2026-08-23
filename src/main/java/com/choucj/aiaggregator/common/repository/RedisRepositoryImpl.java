@@ -156,6 +156,15 @@ public class RedisRepositoryImpl implements RedisRepository {
             return null;
         }
         if (!type.isInstance(raw)) {
+            try {
+                T converted = objectMapper.convertValue(raw, type);
+                log.debug("Redis 对象类型兼容转换成功: key={}, rawType={}, targetType={}",
+                        key, raw.getClass().getName(), type.getName());
+                return converted;
+            } catch (IllegalArgumentException e) {
+                log.warn("Redis 对象类型兼容转换失败: key={}, expected={}, actual={}",
+                        key, type.getName(), raw.getClass().getName());
+            }
             throw new NonRetryableException(ErrorCode.REDIS_DATA_ERROR,
                     String.format("Redis 类型不匹配: key=%s, expected=%s, actual=%s",
                             key, type.getName(), raw.getClass().getName()));

@@ -21,7 +21,9 @@ import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.data.redis.serializer.SerializationException;
 
 import java.time.Duration;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -235,6 +237,17 @@ class RedisExceptionMappingTest {
     }
 
     @Test
+    void shouldConvertMapBackToTargetTypeWhenSerializerReturnsLinkedHashMap() {
+        when(objectRedisTemplate.opsForValue()).thenReturn(objectValueOps);
+        Map<String, Object> cached = new LinkedHashMap<>();
+        cached.put("name", "Ada");
+        when(objectValueOps.get(anyString())).thenReturn(cached);
+
+        assertThat(repository.getObject("k", SampleDO.class).name())
+                .isEqualTo("Ada");
+    }
+
+    @Test
     void shouldReturnStringValuesFromLRange() {
         when(stringRedisTemplate.opsForList()).thenReturn(stringListOps);
         when(stringListOps.range("list", 0, -1)).thenReturn(List.of("a", "b"));
@@ -264,5 +277,8 @@ class RedisExceptionMappingTest {
         public void setName(String name) {
             this.name = name;
         }
+    }
+
+    record SampleDO(String name) {
     }
 }

@@ -31,7 +31,11 @@ class RedisClusterPropertiesTest {
                                 "redis.cluster.nodes[0].host", "host1",
                                 "redis.cluster.nodes[0].port", "7001",
                                 "redis.cluster.nodes[1].host", "host2",
-                                "redis.cluster.nodes[1].port", "7002"))))
+                                "redis.cluster.nodes[1].port", "7002",
+                                "redis.cluster.client.connect-timeout", "3s",
+                                "redis.cluster.client.command-timeout", "2s",
+                                "redis.cluster.client.keep-alive", "false",
+                                "redis.cluster.client.topology-refresh-period", "30s"))))
                 .run(ctx -> {
                     RedisClusterProperties props = ctx.getBean(RedisClusterProperties.class);
                     assertThat(props.getNodes()).hasSize(2);
@@ -39,6 +43,10 @@ class RedisClusterPropertiesTest {
                     assertThat(props.getNodes().get(0).getPort()).isEqualTo(7001);
                     assertThat(props.getNodes().get(1).getHost()).isEqualTo("host2");
                     assertThat(props.getNodes().get(1).getPort()).isEqualTo(7002);
+                    assertThat(props.getClient().getConnectTimeout()).hasSeconds(3);
+                    assertThat(props.getClient().getCommandTimeout()).hasSeconds(2);
+                    assertThat(props.getClient().isKeepAlive()).isFalse();
+                    assertThat(props.getClient().getTopologyRefreshPeriod()).hasSeconds(30);
                 });
     }
 
