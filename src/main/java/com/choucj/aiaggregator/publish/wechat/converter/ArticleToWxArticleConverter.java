@@ -2,6 +2,7 @@ package com.choucj.aiaggregator.publish.wechat.converter;
 
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.model.Article;
+import com.choucj.aiaggregator.common.model.ContentGenerationMode;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.content.rewriter.SingleModelRewriter;
 import com.choucj.aiaggregator.publish.wechat.config.WeChatProperties;
@@ -182,9 +183,25 @@ public class ArticleToWxArticleConverter {
         }
 
         String articleId = safeId(article);
-        // P4 review fix: 传 articleId 给 renderMarkdown, 让解析异常 message 含 articleId (AC-7).
-        String html = renderMarkdown(article.getContent(), articleId);
-        html = appendFooter(html, article);
+        String html;
+        if (article.getGenerationMode() == ContentGenerationMode.PRESERVE_ORIGINAL) {
+            // Story 8.6 D-B: PRESERVE_ORIGINAL 分支 — content 视为 OriginalPostRenderer 产出的
+            // 已转义安全 HTML, 跳过 commonmark parse + sanitizeRawHtml + footer 追加.
+            // 若走 REWRITE 管线, sanitizeRawHtml 会把 HtmlInline/HtmlBlock 替换为 Text 节点,
+            // renderer 实体转义后所有标签变成 &lt;p&gt; 字面文本 (P0 转义破坏), 破损草稿进入真实账号.
+            // 安全论证: renderer 全量 escapeHtml (5 字符) + isSafeHttpUrl (仅 http/https) 白名单,
+            // 安全水位与 sanitizeRawHtml 等价 (Story 8.5 AC1/AC2 + 45 用例验证);
+            // footer 由 renderer 已产出 (hr + 来源 + 原文链接), 再追加会双重来源行.
+            // title 64cp / digest 120cp 截断保留 (幂等无害).
+            html = article.getContent();
+            log.info("Article 转换成功(原帖复现直通): articleId={}, mode={}, html 长度={}",
+                    articleId, article.getGenerationMode(), html.length());
+        } else {
+            // P4 review fix: 传 articleId 给 renderMarkdown, 让解析异常 message 含 articleId (AC-7).
+            // REWRITE 分支行为与 Story 8.6 之前逐字节不变 (AC-8 零回退).
+            html = renderMarkdown(article.getContent(), articleId);
+            html = appendFooter(html, article);
+        }
 
         WxMpDraftArticles wx = new WxMpDraftArticles();
         // P3: title 已校验非 null/blank, 直接 truncate
@@ -343,8 +360,12 @@ public class ArticleToWxArticleConverter {
      *
      * <p>转义 5 个 HTML 特殊字符: {@code &} {@code <} {@code >} {@code "} {@code '}.
      * 与 commonmark HtmlRenderer 对 Text 节点的转义规则对齐.
+     *
+     * <p>Story 8.5: 从 {@code private} 提升为 package-private，供同包
+     * {@link OriginalPostRenderer} 复用 (同包可见性提升模式，行为零变化)，
+     * 避免在渲染器内复制一份 5 字符转义实现产生 stale 风险。
      */
-    private static String escapeHtml(String s) {
+    static String escapeHtml(String s) {
         if (s == null || s.isEmpty()) {
             return "";
         }

@@ -2,9 +2,14 @@ package com.choucj.aiaggregator.common.config;
 
 import com.choucj.aiaggregator.common.repository.RedisRepository;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
+import org.junit.jupiter.api.Assumptions;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestInstance;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.test.context.ActiveProfiles;
 
 import java.time.LocalDateTime;
@@ -25,13 +30,37 @@ import static org.assertj.core.api.Assertions.assertThat;
  *   <li>从 Redis 反序列化并验证字段完整性</li>
  *   <li>确保日期时间值不变</li>
  * </ul>
+ *
+ * <p><b>跳过策略:</b> 与 {@code RedisClusterConnectivityTest} / {@code RedisJsonIntegrationTest}
+ * 一致, 本地无 Redis Cluster 时通过 {@link Assumptions#assumeTrue(boolean, String)}
+ * 跳过整套外部依赖测试, 避免 CI 或本地轻量回归被环境阻塞.
  */
 @SpringBootTest
 @ActiveProfiles("test")
+@TestInstance(TestInstance.Lifecycle.PER_CLASS)
+@Tag("external")
 class RedisClusterLettuceConfigurationTest {
 
     @Autowired
     private RedisRepository redisRepository;
+
+    @Autowired
+    private StringRedisTemplate redisTemplate;
+
+    @BeforeAll
+    void requireRedisClusterOnline() {
+        boolean reachable;
+        try {
+            String pong = redisTemplate.getConnectionFactory()
+                    .getConnection()
+                    .ping();
+            reachable = "PONG".equalsIgnoreCase(pong);
+        } catch (Exception e) {
+            reachable = false;
+        }
+        Assumptions.assumeTrue(reachable,
+                "本地 Redis Cluster 不可用,跳过 Redis 序列化配置集成测试");
+    }
 
     @Test
     void shouldSerializeAndDeserializeLocalDateTimeField() {

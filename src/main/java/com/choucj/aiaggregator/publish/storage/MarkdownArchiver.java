@@ -2,6 +2,7 @@ package com.choucj.aiaggregator.publish.storage;
 
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.model.Article;
+import com.choucj.aiaggregator.common.model.ContentGenerationMode;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.common.util.TextTruncateUtil;
 import com.choucj.aiaggregator.publish.ContentPublisher;
@@ -192,9 +193,12 @@ public class MarkdownArchiver implements ContentPublisher {
      * - **日期**: {createdAt:yyyy-MM-dd HH:mm}
      * - **来源**: {source}
      * - **AI 生成**: {是|否}
+     * - **生成模式**: {AI 改写|原帖复现}   ← Story 8.6 新增
      * - **原文链接**: {originalUrl}     ← 仅 non-null 时输出
      *
      * {content}
+     *
+     * {mediaAuditMarkdown}              ← Story 8.6: 仅 non-null 时 verbatim 插入 (AC4)
      *
      * &gt; 本文由 AI 辅助生成            ← 仅 aiGenerated=true 时追加 (AR8)
      *
@@ -214,11 +218,24 @@ public class MarkdownArchiver implements ContentPublisher {
         sb.append("- **日期**: ").append(article.getCreatedAt().format(META_DATE_FORMAT)).append("\n");
         sb.append("- **来源**: ").append(article.getSource()).append("\n");
         sb.append("- **AI 生成**: ").append(article.isAiGenerated() ? "是" : "否").append("\n");
+        // Story 8.6 Task 6.1: 生成模式标注行 (AC4) — REWRITE=AI 改写 (既有块新增此行),
+        // PRESERVE_ORIGINAL=原帖复现
+        sb.append("- **生成模式**: ")
+                .append(article.getGenerationMode() == ContentGenerationMode.PRESERVE_ORIGINAL
+                        ? "原帖复现"
+                        : "AI 改写")
+                .append("\n");
         if (article.getOriginalUrl() != null) {
             sb.append("- **原文链接**: ").append(article.getOriginalUrl()).append("\n");
         }
 
         sb.append("\n").append(article.getContent()).append("\n");
+
+        // Story 8.6 Task 6.1: 媒体审计表 verbatim 插入 (content 之后、AI 声明之前, AC4/D-E);
+        // REWRITE 恒 null 不插入 (既有格式不变)
+        if (article.getMediaAuditMarkdown() != null && !article.getMediaAuditMarkdown().isBlank()) {
+            sb.append("\n").append(article.getMediaAuditMarkdown());
+        }
 
         if (article.isAiGenerated()) {
             sb.append(AI_DISCLAIMER);

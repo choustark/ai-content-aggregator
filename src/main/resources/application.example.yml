@@ -367,6 +367,20 @@ wechat:
     # 发布渠道总开关 — false 时 WeChatClient / WeChatPublisher / 项目层 WeChatConfig Bean 不注册.
     # WxMpService 由 WxJava starter 根据 wx.mp.* 标准配置自动创建; 本开关只控制项目层发布链路.
     enabled: false
+    # Story 8.3: 原帖复现模式入口. 默认关闭以保持现有 REWRITE 流程不变.
+    # Story 8.6: PRESERVE_ORIGINAL 链路前置条件矩阵 (AC9) — 三个开关必须同时满足:
+    #   1. wechat.mp.enabled=true            → gateway/renderer/preparer/converter/publisher 注册
+    #   2. twitter.media.enabled=true        → archiver/writer/gate 注册 (推文有媒体时必需;
+    #                                          有媒体但本开关 false → PreserveOriginalArticleGenerator
+    #                                          NonRetryable 显式 fail-fast, message 含缺失开关名)
+    #   3. wechat.mp.original-post.enabled=true → 模式路由 (per-tweet: 仅 tweet.url 命中
+    #      twitter.target.urls 的推文走 PRESERVE_ORIGINAL, 未命中走 REWRITE)
+    # 配置矛盾场景 (original-post 信号命中但 wechat.mp.enabled=false) → TwitterProcessor
+    # NonRetryable 显式 fail-fast, 不静默降级 REWRITE.
+    original-post:
+      enabled: false
+      # 默认模式保持 REWRITE; 仅在无 target urls 配置时全局生效 (有 target urls 时按 per-tweet 命中判定).
+      default-mode: REWRITE
     # 草稿默认作者名 (微信公众号后台展示)
     default-author: "AI 内容聚合器"
     # 人工审核提醒日志开关 (Story 3.5) — 微信草稿创建成功后是否输出

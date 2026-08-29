@@ -34,7 +34,15 @@ public class Article {
     /** 标题. */
     private String title;
 
-    /** 正文(Markdown 格式). */
+    /**
+     * 正文(双模式语义, Story 8.6 D-A):
+     * <ul>
+     *   <li>{@code generationMode=REWRITE} — Markdown 格式 (ContentRewriter 产出)</li>
+     *   <li>{@code generationMode=PRESERVE_ORIGINAL} — 已转义的安全 HTML
+     *       (OriginalPostRenderer 产出, 含 footer; 发布侧 ArticleToWxArticleConverter
+     *       按本字段分流, 跳过 commonmark 二次渲染)</li>
+     * </ul>
+     */
     private String content;
 
     /** 摘要(微信草稿摘要字段, 限制 120 字). */
@@ -62,4 +70,33 @@ public class Article {
 
     /** 原始推文 / 仓库链接. */
     private String originalUrl;
+
+    /**
+     * 内容生成模式 (Story 8.6 D-A).
+     *
+     * <p>{@code REWRITE} = AI 改写 (默认, content 为 Markdown);
+     * {@code PRESERVE_ORIGINAL} = 原帖复现 (content 为已转义安全 HTML, renderer 产出)。
+     *
+     * <p><b>批量队列模式感知根因:</b> PublishingModeDecider → Redis JSON 队列 →
+     * BatchPublishingScheduler → WeChatPublisher 反序列化后只剩 Article (无 Tweet/模式上下文),
+     * 不加字段则批量路径永远无法感知生成模式。
+     *
+     * <p><b>旧 JSON 兼容:</b> 历史 Redis Article JSON 无本字段 → Jackson 走 noargs 构造 +
+     * setter, field initializer 生效 → REWRITE, 向后兼容。
+     * {@code @Builder.Default} + field initializer 双路径保证: 无论 {@code new Article()}
+     * 还是 {@code Article.builder().build()}, 默认均为 REWRITE。
+     */
+    @Builder.Default
+    private ContentGenerationMode generationMode = ContentGenerationMode.REWRITE;
+
+    /**
+     * 媒体审计 Markdown 表 (Story 8.6 D-E, nullable).
+     *
+     * <p>REWRITE 模式恒为 {@code null}; PRESERVE_ORIGINAL 模式由
+     * {@code PreserveOriginalArticleGenerator} 从 media.json sidecar 权威状态生成
+     * (每媒体: 类型/uploadStatus/publishability/wechatUrl/相对路径/failureReason 截断),
+     * MarkdownArchiver 归档块 verbatim 插入。脱敏边界: 不含 access token/AppSecret/
+     * 完整响应体/本地绝对路径。
+     */
+    private String mediaAuditMarkdown;
 }

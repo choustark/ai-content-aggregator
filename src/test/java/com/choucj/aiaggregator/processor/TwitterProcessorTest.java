@@ -3,6 +3,7 @@ package com.choucj.aiaggregator.processor;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.Article;
+import com.choucj.aiaggregator.common.model.ContentGenerationMode;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.common.repository.RedisRepository;
 import com.choucj.aiaggregator.content.filter.ContentFilter;
@@ -23,6 +24,7 @@ import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 
 import java.util.List;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -30,6 +32,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -63,6 +66,10 @@ class TwitterProcessorTest {
     @Mock
     private ContentRewriter contentRewriter;
     @Mock
+    private ContentGenerationModeResolver contentGenerationModeResolver;
+    @Mock
+    private OriginalPostGenerationGateway originalPostGenerationGateway;
+    @Mock
     private ContentPublisher contentPublisher;
     @Mock
     private ContentPublisher secondContentPublisher;
@@ -86,7 +93,10 @@ class TwitterProcessorTest {
         List<ContentFilter<Tweet>> filters = List.of(
                 new CommentFilterStub(commentFilterDelegate),
                 new InnovationFilterStub(innovationFilterDelegate));
+        lenient().when(contentGenerationModeResolver.resolve(any(Tweet.class)))
+                .thenReturn(ContentGenerationMode.REWRITE);
         processor = new TwitterProcessor(twitterSource, filters, contentRewriter,
+                contentGenerationModeResolver, Optional.of(originalPostGenerationGateway),
                 List.of(contentPublisher), properties, articleStatusService);
     }
 
@@ -110,8 +120,8 @@ class TwitterProcessorTest {
         processor = new TwitterProcessor(twitterSource, List.of(
                 new CommentFilterStub(commentFilterDelegate),
                 new InnovationFilterStub(innovationFilterDelegate)),
-                contentRewriter, List.of(contentPublisher, secondContentPublisher), properties,
-                articleStatusService);
+                contentRewriter, contentGenerationModeResolver, Optional.of(originalPostGenerationGateway),
+                List.of(contentPublisher, secondContentPublisher), properties, articleStatusService);
         Tweet t1 = tweet("id-1", "content-1");
         Tweet t2 = tweet("id-2", "content-2");
         Article a1 = article("art-1");
@@ -323,14 +333,173 @@ class TwitterProcessorTest {
     }
 
     @Test
+    void shouldPropagatePublisherExceptionWhenFaultIsolationDisabled() {
+        Tweet t1 = tweet("id-1", "content-1");
+        when(twitterSource.fetch()).thenReturn(List.of(t1));
+        when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1));
+        when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1));
+        when(contentRewriter.rewrite(any(Tweet.class))).thenReturn(article("art-1"));
+        doThrow(new RetryableException(ErrorCode.EXTERNAL_API_ERROR, "发布失败"))
+                .when(contentPublisher).publish(any());
+
+        properties.setFaultIsolationEnabled(false);
+
+        assertThatThrownBy(() -> processor.process())
+                .isInstanceOf(RetryableException.class)
+                .hasMessageContaining("发布失败");
+    }
+
+    @Test
     void shouldHandleEmptyTweetsFromFetch(CapturedOutput output) {
         when(twitterSource.fetch()).thenReturn(List.of());
 
         processor.process();
 
         assertThat(output.getOut()).contains(
-                "Pipeline 完成: 发现=0, 评论筛选通过=0, 创新筛选通过=0, 改写成功=0, 归档成功=0, 失败=0");
+                "Pipeline 完成: 发现=0, 评论筛选通过=0, 创新筛选通过=0, 改写成功=0, 原帖复现成功=0, 归档成功=0, 失败=0");
         verify(contentRewriter, never()).rewrite(any(Tweet.class));
+    }
+
+    @Test
+    void should_route_to_original_post_gateway_when_preserve_original_selected() {
+        Tweet t1 = tweet("id-1", "content-1");
+        Article originalArticle = article("original-art-1");
+        when(twitterSource.fetch()).thenReturn(List.of(t1));
+        when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1));
+        when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1));
+        when(contentGenerationModeResolver.resolve(t1)).thenReturn(ContentGenerationMode.PRESERVE_ORIGINAL);
+        when(originalPostGenerationGateway.generate(t1)).thenReturn(originalArticle);
+
+        processor.process();
+
+        verify(contentRewriter, never()).rewrite(any(Tweet.class));
+        verify(originalPostGenerationGateway).generate(t1);
+        verify(contentPublisher).publish(originalArticle);
+    }
+
+    /**
+     * Story 8.6 D-F/AC5: 单 publisher 失败 → 该 article 计一次 failure,
+     * 但其余 publisher 继续执行 (Markdown 归档不受 WeChat 故障阻断)。
+     */
+    @Test
+    void should_continue_remaining_publishers_when_first_publisher_fails(CapturedOutput output) {
+        processor = new TwitterProcessor(twitterSource, List.of(
+                new CommentFilterStub(commentFilterDelegate),
+                new InnovationFilterStub(innovationFilterDelegate)),
+                contentRewriter, contentGenerationModeResolver, Optional.of(originalPostGenerationGateway),
+                List.of(contentPublisher, secondContentPublisher), properties, articleStatusService);
+        Tweet t1 = tweet("id-1", "content-1");
+        Article a1 = article("art-1");
+        when(twitterSource.fetch()).thenReturn(List.of(t1));
+        when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1));
+        when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1));
+        when(contentRewriter.rewrite(any(Tweet.class))).thenReturn(a1);
+        doThrow(new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR, "微信草稿创建失败"))
+                .when(contentPublisher).publish(any());
+
+        processor.process();
+
+        // D-F: 首 publisher 失败, 次 publisher 仍执行 (次序无关)
+        verify(secondContentPublisher).publish(a1);
+        // 该 article 计一次 failure (不重复计), 同时记录已有 publisher 成功，避免低报本地归档保留结果
+        assertThat(output.getOut()).contains(
+                "Pipeline 完成: 发现=1, 评论筛选通过=1, 创新筛选通过=1, 改写成功=1, 原帖复现成功=0, 归档成功=1, 失败=1");
+    }
+
+    /**
+     * Story 8.6 Task 5.2/AC7: 汇总日志按模式拆分计数 — REWRITE 与 PRESERVE 互不污染。
+     */
+    @Test
+    void should_count_rewrite_and_preserve_modes_separately(CapturedOutput output) {
+        Tweet t1 = tweet("id-1", "content-1");
+        Tweet t2 = tweet("id-2", "content-2");
+        when(twitterSource.fetch()).thenReturn(List.of(t1, t2));
+        when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1, t2));
+        when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1, t2));
+        when(contentRewriter.rewrite(t1)).thenReturn(article("art-1"));
+        when(contentGenerationModeResolver.resolve(t2)).thenReturn(ContentGenerationMode.PRESERVE_ORIGINAL);
+        when(originalPostGenerationGateway.generate(t2))
+                .thenReturn(preserveArticle("original-art-2"));
+
+        processor.process();
+
+        assertThat(output.getOut()).contains(
+                "Pipeline 完成: 发现=2, 评论筛选通过=2, 创新筛选通过=2, 改写成功=1, 原帖复现成功=1, 归档成功=2, 失败=0");
+        verify(contentPublisher).publish(article("art-1"));
+        verify(contentPublisher).publish(preserveArticle("original-art-2"));
+    }
+
+    /**
+     * Story 8.6 D-F/AC5: PRESERVE article 发布链中首 publisher (模拟 WeChat) 失败,
+     * Markdown 归档 publisher 仍落地。
+     */
+    @Test
+    void should_keep_archive_when_publisher_fails_for_preserve_article() {
+        processor = new TwitterProcessor(twitterSource, List.of(
+                new CommentFilterStub(commentFilterDelegate),
+                new InnovationFilterStub(innovationFilterDelegate)),
+                contentRewriter, contentGenerationModeResolver, Optional.of(originalPostGenerationGateway),
+                List.of(contentPublisher, secondContentPublisher), properties, articleStatusService);
+        Tweet t1 = tweet("id-1", "content-1");
+        Article preserveArticle = preserveArticle("original-art-1");
+        when(twitterSource.fetch()).thenReturn(List.of(t1));
+        when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1));
+        when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1));
+        when(contentGenerationModeResolver.resolve(t1)).thenReturn(ContentGenerationMode.PRESERVE_ORIGINAL);
+        when(originalPostGenerationGateway.generate(t1)).thenReturn(preserveArticle);
+        doThrow(new RetryableException(ErrorCode.EXTERNAL_API_ERROR, "微信接口超时"))
+                .when(contentPublisher).publish(any());
+
+        processor.process();
+
+        // WeChat 失败, Markdown 归档仍落地 (AC5)
+        verify(secondContentPublisher).publish(preserveArticle);
+        verify(contentRewriter, never()).rewrite(any(Tweet.class));
+    }
+
+    @Test
+    void should_not_call_rewriter_when_preserve_original_fails_fast(CapturedOutput output) {
+        Tweet t1 = tweet("id-1", "敏感正文不应出现在 preserve 日志");
+        when(twitterSource.fetch()).thenReturn(List.of(t1));
+        when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1));
+        when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1));
+        when(contentGenerationModeResolver.resolve(t1)).thenReturn(ContentGenerationMode.PRESERVE_ORIGINAL);
+        // Story 8.6: 真 gateway 失败语义 (原帖复现链路致命失败, N4 message 只含 tweetId + 原因标识)
+        when(originalPostGenerationGateway.generate(t1))
+                .thenThrow(new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                        "原帖生成失败: tweetId=id-1, reason=publishedAt null"));
+
+        processor.process();
+
+        verify(contentRewriter, never()).rewrite(any(Tweet.class));
+        verify(contentPublisher, never()).publish(any());
+        assertThat(output.getOut()).doesNotContain("敏感正文不应出现在 preserve 日志");
+        assertThat(output.getOut()).contains("tweetId=id-1");
+    }
+
+    /**
+     * Story 8.6 D-D/AC1: PRESERVE 命中但 gateway 缺失 (Optional.empty, wechat.mp.enabled=false
+     * 与 original-post 信号矛盾) → NonRetryable 显式 fail-fast, 不静默 fallback REWRITE。
+     */
+    @Test
+    void should_fail_fast_when_preserve_original_hit_but_gateway_missing(CapturedOutput output) {
+        processor = new TwitterProcessor(twitterSource, List.of(
+                new CommentFilterStub(commentFilterDelegate),
+                new InnovationFilterStub(innovationFilterDelegate)),
+                contentRewriter, contentGenerationModeResolver, Optional.empty(),
+                List.of(contentPublisher), properties, articleStatusService);
+        Tweet t1 = tweet("id-1", "content-1");
+        when(twitterSource.fetch()).thenReturn(List.of(t1));
+        when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1));
+        when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1));
+        when(contentGenerationModeResolver.resolve(t1)).thenReturn(ContentGenerationMode.PRESERVE_ORIGINAL);
+
+        processor.process();
+
+        verify(contentRewriter, never()).rewrite(any(Tweet.class));
+        verify(contentPublisher, never()).publish(any());
+        assertThat(output.getOut()).contains("tweetId=id-1");
+        assertThat(output.getOut()).contains("wechat.mp.enabled");
     }
 
     @Test
@@ -360,9 +529,9 @@ class TwitterProcessorTest {
 
         processor.process();
 
-        // 6 字段全在: discovered=3, commentPassed=2, innovationPassed=1, rewrite=1, archive=1, failure=0
+        // 7 字段全在 (Story 8.6 Task 5.2 新增原帖复现成功计数)
         assertThat(output.getOut()).contains(
-                "Pipeline 完成: 发现=3, 评论筛选通过=2, 创新筛选通过=1, 改写成功=1, 归档成功=1, 失败=0");
+                "Pipeline 完成: 发现=3, 评论筛选通过=2, 创新筛选通过=1, 改写成功=1, 原帖复现成功=0, 归档成功=1, 失败=0");
     }
 
     @Test
@@ -454,7 +623,8 @@ class TwitterProcessorTest {
         processor = new TwitterProcessor(twitterSource, List.of(
                 new CommentFilterStub(commentFilterDelegate),
                 new InnovationFilterStub(innovationFilterDelegate)),
-                contentRewriter, List.of(contentPublisher), properties, realStatusService);
+                contentRewriter, contentGenerationModeResolver, Optional.of(originalPostGenerationGateway),
+                List.of(contentPublisher), properties, realStatusService);
 
         Tweet t1 = tweet("id-1", "content-1");
         when(twitterSource.fetch()).thenReturn(List.of(t1));
@@ -482,6 +652,17 @@ class TwitterProcessorTest {
 
     private static Article article(String title) {
         return Article.builder().id(title).title(title).content("body").build();
+    }
+
+    /** PRESERVE_ORIGINAL 模式 Article fixture (gateway 返回值, 模拟 renderer.toArticle 产出)。 */
+    private static Article preserveArticle(String title) {
+        return Article.builder()
+                .id(title)
+                .title(title)
+                .content("<p>body</p>")
+                .aiGenerated(false)
+                .generationMode(ContentGenerationMode.PRESERVE_ORIGINAL)
+                .build();
     }
 
     /**

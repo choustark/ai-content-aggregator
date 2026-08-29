@@ -2,6 +2,7 @@ package com.choucj.aiaggregator.publish.wechat.converter;
 
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.model.Article;
+import com.choucj.aiaggregator.common.model.ContentGenerationMode;
 import com.choucj.aiaggregator.publish.wechat.config.WeChatProperties;
 import me.chanjar.weixin.mp.bean.draft.WxMpDraftArticles;
 import org.commonmark.parser.Parser;
@@ -782,6 +783,67 @@ class ArticleToWxArticleConverterTest {
 
         assertThat(result.getContent()).contains("<pre><code>");
         assertThat(result.getContent()).doesNotContain("class=");
+    }
+
+    // ============ Story 8.6 AC-2: PRESERVE_ORIGINAL 模式分支 ============
+
+    @Test
+    void should_keep_html_tags_verbatim_when_generation_mode_is_preserve_original() {
+        // renderer 产出的安全 HTML (含 mmbiz img) 不得被 commonmark sanitize 实体转义成 &lt;p&gt;
+        Article article = sampleArticleBuilder("标题", null)
+                .content("<p>第一段</p>\n<p>第二段</p>\n<img src=\"https://mmbiz.qpic.cn/mmbiz/abc123\"/>")
+                .generationMode(ContentGenerationMode.PRESERVE_ORIGINAL)
+                .build();
+
+        WxMpDraftArticles result = converter.convert(article);
+
+        assertThat(result.getContent())
+                .contains("<p>第一段</p>")
+                .contains("<img src=\"https://mmbiz.qpic.cn/mmbiz/abc123\"/>")
+                .doesNotContain("&lt;p&gt;")
+                .doesNotContain("&lt;img");
+    }
+
+    @Test
+    void should_not_append_footer_when_generation_mode_is_preserve_original() {
+        // renderer 已含 footer (hr + 来源行), converter 再追加会双重来源行
+        Article article = sampleArticleBuilder("标题", "<p>正文</p>\n<hr/>\n<p><strong>来源:</strong> X 原帖 by @a</p>")
+                .generationMode(ContentGenerationMode.PRESERVE_ORIGINAL)
+                .build();
+
+        WxMpDraftArticles result = converter.convert(article);
+
+        // 输出逐字节等于输入 HTML — 无 converter FOOTER 追加、无 <p> 包裹
+        assertThat(result.getContent()).isEqualTo("<p>正文</p>\n<hr/>\n<p><strong>来源:</strong> X 原帖 by @a</p>");
+    }
+
+    @Test
+    void should_still_truncate_title_and_digest_when_generation_mode_is_preserve_original() {
+        String longTitle = "标".repeat(80);
+        String longDigest = "摘".repeat(200);
+        Article article = sampleArticleBuilder(longTitle, "<p>正文</p>")
+                .digest(longDigest)
+                .generationMode(ContentGenerationMode.PRESERVE_ORIGINAL)
+                .build();
+
+        WxMpDraftArticles result = converter.convert(article);
+
+        assertThat(result.getTitle()).isEqualTo("标".repeat(64));
+        assertThat(result.getDigest()).isEqualTo("摘".repeat(120));
+    }
+
+    @Test
+    void should_render_markdown_as_rewrite_when_generation_mode_is_rewrite() {
+        // REWRITE 显式声明与默认 (旧 JSON 无字段) 行为一致: markdown 渲染 + sanitize + footer
+        Article explicitRewrite = sampleArticleBuilder("标题", "**加粗**")
+                .generationMode(ContentGenerationMode.REWRITE)
+                .build();
+
+        WxMpDraftArticles result = converter.convert(explicitRewrite);
+
+        assertThat(result.getContent())
+                .contains("<strong>加粗</strong>")
+                .contains("<p><strong>来源:</strong> @sample</p>");
     }
 
     // ============ 辅助方法 ============

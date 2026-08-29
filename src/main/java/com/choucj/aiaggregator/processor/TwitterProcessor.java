@@ -2,12 +2,14 @@ package com.choucj.aiaggregator.processor;
 
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.model.Article;
+import com.choucj.aiaggregator.common.model.ContentGenerationMode;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.content.filter.ContentFilter;
 import com.choucj.aiaggregator.content.rewriter.ContentRewriter;
 import com.choucj.aiaggregator.content.rewriter.SingleModelRewriter;
 import com.choucj.aiaggregator.processor.config.ProcessorProperties;
 import com.choucj.aiaggregator.publish.ContentPublisher;
+import com.choucj.aiaggregator.publish.storage.MarkdownArchiver;
 import com.choucj.aiaggregator.publish.status.ArticleStatusService;
 import com.choucj.aiaggregator.source.twitter.TwitterSource;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
@@ -17,6 +19,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.regex.Pattern;
 
 /**
@@ -105,6 +108,13 @@ public class TwitterProcessor {
     private final TwitterSource twitterSource;
     private final List<ContentFilter<Tweet>> contentFilters;
     private final ContentRewriter contentRewriter;
+    private final ContentGenerationModeResolver contentGenerationModeResolver;
+    /**
+     * Story 8.6 D-D: gateway 改 Optional 注入 (D6 规则) — 真 gateway 实现挂
+     * {@code wechat.mp.enabled=true} 条件注册, 配置关闭时缺失属合法状态。
+     * PRESERVE 命中但缺失 (配置矛盾) 由 {@link #generateArticle} 显式 fail-fast。
+     */
+    private final Optional<OriginalPostGenerationGateway> originalPostGenerationGateway;
     private final List<ContentPublisher> contentPublishers;
     private final ProcessorProperties properties;
     private final ArticleStatusService articleStatusService;
@@ -118,8 +128,8 @@ public class TwitterProcessor {
      * 单次执行 fetch → filter chain → per-article rewrite + publish 全链路,
      * 不抛异常到调用方 (所有故障由三层防御内部消化).
      *
-     * <p>Summary 日志含 6 字段: 发现数 / 评论筛选通过数 / 创新筛选通过数 /
-     * 改写成功数 / 归档成功数 / 失败数.
+     * <p>Summary 日志含 7 字段 (Story 8.6 Task 5.2): 发现数 / 评论筛选通过数 / 创新筛选通过数 /
+     * 改写成功数 / 原帖复现成功数 / 归档成功数 / 失败数.
      */
     public void process() {
         log.info("Twitter Pipeline 启动");
@@ -127,6 +137,7 @@ public class TwitterProcessor {
         int commentPassed = 0;
         int innovationPassed = 0;
         int rewriteSuccess = 0;
+        int preserveSuccess = 0;
         int archiveSuccess = 0;
         int failure = 0;
 
@@ -187,20 +198,58 @@ public class TwitterProcessor {
         // 触发后续 poll 重新路由到 process() 整批重跑.
         // Patch-2 修复: faultIsolationEnabled=false 时 per-article 异常透传到 ContentScheduler
         // 顶层 (调试用, 由调度器按 Retryable/NonRetryable 分类处理).
+        boolean archivePublisherPresent = contentPublishers.stream().anyMatch(TwitterProcessor::isArchivePublisher);
         for (Tweet tweet : filtered) {
             try {
                 // Story 3.5 AC-1/P5: rewrite 前写 PENDING, 但必须先校验 tweetId,
                 // 避免生成 tw-null / malformed orphan status.
                 articleStatusService.markPending(buildDeterministicArticleId(tweet));
-                Article article = contentRewriter.rewrite(tweet);
-                rewriteSuccess++;
-                // Story 3.4: 多 ContentPublisher 遍历 (MarkdownArchiver + PublishingModeDecider + ...)
-                // 单 publisher 抛异常 → L2 per-article 隔离 catch 捕获, 后续 publisher 本条不再调
-                // (与单条失败语义一致, 不调"半成功" — 任何 publisher 失败视本条失败)
-                for (ContentPublisher publisher : contentPublishers) {
-                    publisher.publish(article);
+                Article article = generateArticle(tweet);
+                // Story 8.6 Task 5.2: 生成成功即按模式拆分计数 (与 8.6 之前语义一致:
+                // rewriteSuccess 在 publisher 链之前累加)
+                if (article.getGenerationMode() == ContentGenerationMode.PRESERVE_ORIGINAL) {
+                    preserveSuccess++;
+                } else {
+                    rewriteSuccess++;
                 }
-                archiveSuccess++;
+                // Story 3.4: 多 ContentPublisher 遍历 (MarkdownArchiver + PublishingModeDecider + ...)
+                // Story 8.6 D-F: per-publisher try-catch 隔离 (L2.5 层) — 单 publisher 失败
+                // log.error + 该 article 计一次 failure, 但其余 publisher 继续执行,
+                // 保证 WeChat 失败时 Markdown 归档仍落地 (AC5 失败保留本地归档)。
+                // 幂等性: 下轮重试 MarkdownArchiver isAlreadyArchived 跳过,
+                // WeChatPublisher 正常重试, 无重复草稿风险。
+                boolean publisherFailed = false;
+                boolean publisherSucceeded = false;
+                boolean archivePublisherSucceeded = false;
+                for (ContentPublisher publisher : contentPublishers) {
+                    try {
+                        publisher.publish(article);
+                        publisherSucceeded = true;
+                        if (isArchivePublisher(publisher)) {
+                            archivePublisherSucceeded = true;
+                        }
+                    } catch (Exception e) {
+                        if (!properties.isFaultIsolationEnabled()) {
+                            throw e;
+                        }
+                        publisherFailed = true;
+                        // N4: cause 截断不含正文; Patch-5: e 末参数自动展开堆栈
+                        log.error("Publisher 发布失败, 继续其余 publisher (D-F per-publisher 隔离): "
+                                        + "articleId={}, publisher={}, cause={}",
+                                article.getId(),
+                                publisher.getClass().getSimpleName(),
+                                SingleModelRewriter.truncateForLog(
+                                        SingleModelRewriter.getRootMessage(e), 200),
+                                e);
+                    }
+                }
+                if (publisherFailed) {
+                    // 任一 publisher 失败 → 该 article 计一次 failure (不重复计)
+                    failure++;
+                }
+                if (archivePublisherSucceeded || (!archivePublisherPresent && publisherSucceeded)) {
+                    archiveSuccess++;
+                }
             } catch (Exception e) {
                 failure++;
                 // L2 per-article 隔离: 该条失败 → log.error + continue, 不影响其他文章
@@ -217,9 +266,30 @@ public class TwitterProcessor {
             }
         }
 
-        // AC-5 summary (6 字段)
-        log.info("Pipeline 完成: 发现={}, 评论筛选通过={}, 创新筛选通过={}, 改写成功={}, 归档成功={}, 失败={}",
-                discovered, commentPassed, innovationPassed, rewriteSuccess, archiveSuccess, failure);
+        // AC-5 summary (Story 8.6 Task 5.2: 既有 6 字段保持 + 新增原帖复现成功计数)
+        log.info("Pipeline 完成: 发现={}, 评论筛选通过={}, 创新筛选通过={}, 改写成功={}, "
+                        + "原帖复现成功={}, 归档成功={}, 失败={}",
+                discovered, commentPassed, innovationPassed, rewriteSuccess, preserveSuccess,
+                archiveSuccess, failure);
+    }
+
+    private Article generateArticle(Tweet tweet) {
+        ContentGenerationMode mode = contentGenerationModeResolver.resolve(tweet);
+        if (mode == ContentGenerationMode.PRESERVE_ORIGINAL) {
+            log.info("内容生成模式命中原帖复现边界: tweetId={}, mode={}", tweet.getId(), mode);
+            // Story 8.6 D-D: PRESERVE 命中但 gateway 缺失 = 配置矛盾 (original-post 信号命中
+            // 但 wechat.mp.enabled=false) → 显式 fail-fast, 不静默 fallback REWRITE (8.3 CR 语义)
+            OriginalPostGenerationGateway gateway = originalPostGenerationGateway
+                    .orElseThrow(() -> new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                            "原帖复现 gateway 未注册 (请检查 wechat.mp.enabled=true), tweetId="
+                                    + tweet.getId()));
+            return gateway.generate(tweet);
+        }
+        return contentRewriter.rewrite(tweet);
+    }
+
+    private static boolean isArchivePublisher(ContentPublisher publisher) {
+        return publisher instanceof MarkdownArchiver;
     }
 
     private void logFilterStage(String filterName, boolean degraded, int before, int after) {

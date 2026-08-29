@@ -2,6 +2,7 @@ package com.choucj.aiaggregator.publish.storage;
 
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.model.Article;
+import com.choucj.aiaggregator.common.model.ContentGenerationMode;
 import com.choucj.aiaggregator.publish.storage.config.ArchiverProperties;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -432,5 +433,70 @@ class MarkdownArchiverTest {
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
+    }
+
+    // ===== Story 8.6 Task 6.2: 生成模式行 + 媒体审计段 (AC4/AC5/D-E) =====
+
+    @Test
+    void should_contain_generation_mode_line_and_media_audit_table_when_preserve_original() {
+        String auditTable = "#### 媒体审计 (media.json sidecar 权威状态)\n\n"
+                + "| # | 类型 | 下载状态 | 上传状态 | 可发布性 | 微信 URL | 本地路径 | 失败原因 |\n"
+                + "|---|---|---|---|---|---|---|---|\n"
+                + "| 1 | PHOTO | DOWNLOADED | UPLOADED | PUBLISHABLE | https://mmbiz.qpic.cn/mmbiz/x "
+                + "| media/twitter/2026-08-29/123/photo-1.jpg | - |\n";
+        Article article = preserveArticle("tw-123", "原帖复现标题", auditTable);
+
+        archiver.publish(article);
+
+        Path expected = tempDir.resolve("archive")
+                .resolve(article.getCreatedAt().toLocalDate() + ".md");
+        String content = readAll(expected);
+        // 模式行 (AC4)
+        assertThat(content).contains("- **生成模式**: 原帖复现");
+        // 媒体审计表 verbatim 插入 (D-E), 位于 content 之后、AI 声明之前 — aiGenerated=false 无 AI 声明
+        assertThat(content).contains(auditTable);
+        assertThat(content.indexOf("<p>原帖正文</p>")).isLessThan(content.indexOf("媒体审计"));
+        assertThat(content).doesNotContain("本文由 AI 辅助生成");
+    }
+
+    @Test
+    void should_contain_generation_mode_line_only_when_rewrite() {
+        LocalDateTime createdAt = LocalDateTime.of(2026, 6, 28, 15, 30);
+        Article article = sampleArticle("rewrite-mode-id", "改写文章", createdAt);
+
+        archiver.publish(article);
+
+        String content = readAll(tempDir.resolve("archive").resolve("2026-06-28.md"));
+        // REWRITE 仅新增模式行 (AC4: 其余格式不变), 不插媒体审计段
+        assertThat(content).contains("- **生成模式**: AI 改写");
+        assertThat(content).doesNotContain("媒体审计");
+    }
+
+    @Test
+    void should_not_insert_media_audit_section_when_media_audit_markdown_is_null() {
+        Article article = preserveArticle("tw-null-audit", "无审计表", null);
+
+        archiver.publish(article);
+
+        Path expected = tempDir.resolve("archive")
+                .resolve(article.getCreatedAt().toLocalDate() + ".md");
+        String content = readAll(expected);
+        assertThat(content).contains("- **生成模式**: 原帖复现");
+        assertThat(content).doesNotContain("媒体审计");
+    }
+
+    /** PRESERVE_ORIGINAL 模式 Article fixture (模拟 PreserveOriginalArticleGenerator 产出)。 */
+    private Article preserveArticle(String id, String title, String mediaAuditMarkdown) {
+        return Article.builder()
+                .id(id)
+                .title(title)
+                .content("<p>原帖正文</p>")
+                .source("来源:@karpathy")
+                .aiGenerated(false)
+                .createdAt(LocalDateTime.of(2026, 8, 29, 10, 0))
+                .originalUrl("https://x.com/karpathy/status/123")
+                .generationMode(ContentGenerationMode.PRESERVE_ORIGINAL)
+                .mediaAuditMarkdown(mediaAuditMarkdown)
+                .build();
     }
 }

@@ -1,5 +1,7 @@
 package com.choucj.aiaggregator.publish.wechat;
 
+import com.binarywang.spring.starter.wxjava.mp.properties.WxMpProperties;
+import com.choucj.aiaggregator.common.exception.AggregatorException;
 import com.choucj.aiaggregator.publish.ContentPublisher;
 import com.choucj.aiaggregator.publish.wechat.client.WeChatClient;
 import com.choucj.aiaggregator.publish.wechat.config.WeChatProperties;
@@ -7,15 +9,16 @@ import lombok.extern.slf4j.Slf4j;
 import me.chanjar.weixin.mp.api.WxMpService;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.util.StringUtils;
 
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assumptions.assumeThat;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
  * Story 3.1 spike — WxJava 4.6.0 连通性冒烟测试.
@@ -56,6 +59,9 @@ class WxJavaConnectivitySmokeTest {
 
     @Autowired
     private WeChatProperties weChatProperties;
+
+    @Autowired
+    private WxMpProperties wxMpProperties;
 
     @Autowired(required = false)
     private WeChatPublisher weChatPublisher;
@@ -105,17 +111,23 @@ class WxJavaConnectivitySmokeTest {
 
     @Test
     @Timeout(30)
-    @EnabledIfEnvironmentVariable(named = "WX_MP_APP_ID", matches = "^(?!dev-placeholder$).+")
     void getAccessTokenWithRealCredentials() {
-        // 仅在 WX_MP_APP_ID 环境变量设置为真实测试号 (非 dev-placeholder) 时执行
-        // 否则 JUnit 5 通过 EnabledIfEnvironmentVariable 自动 skip
+        assumeThat(hasRealCredentials())
+                .as("需要真实的微信公众号 app-id / secret")
+                .isTrue();
 
         // 双重保险: 假设 WeChatClient Bean 已注册
         assumeThat(weChatClient)
                 .as("WeChatClient Bean 应已注册 (wechat.mp.enabled=true)")
                 .isNotNull();
 
-        String token = weChatClient.getAccessToken();
+        String token;
+        try {
+            token = weChatClient.getAccessToken();
+        } catch (AggregatorException e) {
+            skipIfEnvironmentBlocked(e);
+            throw e;
+        }
 
         assertThat(token)
                 .as("真实凭据下 getAccessToken 应返回非空 token (约 120 字符)")
@@ -128,5 +140,24 @@ class WxJavaConnectivitySmokeTest {
         log.info("WxJava getAccessToken OK (length={}, stable={})",
                 token.length(),
                 weChatProperties.getClient().isStableAccessToken());
+    }
+
+    private boolean hasRealCredentials() {
+        return StringUtils.hasText(wxMpProperties.getAppId())
+                && StringUtils.hasText(wxMpProperties.getSecret())
+                && !"dev-placeholder".equals(wxMpProperties.getAppId());
+    }
+
+    private static void skipIfEnvironmentBlocked(AggregatorException e) {
+        String message = e.getMessage();
+        if (message == null) {
+            return;
+        }
+        boolean whitelistBlocked = message.contains("errcode=40164");
+        boolean dnsBlocked = message.contains("UnknownHostException")
+                || message.contains("nodename nor servname provided")
+                || message.contains("api.weixin.qq.com");
+        boolean quotaBlocked = message.contains("errcode=45009");
+        assumeTrue(!(whitelistBlocked || dnsBlocked || quotaBlocked), "跳过: 外部微信环境阻塞 - " + message);
     }
 }
