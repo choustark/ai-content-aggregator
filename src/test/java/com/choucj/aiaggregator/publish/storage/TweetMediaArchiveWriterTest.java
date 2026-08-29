@@ -432,4 +432,82 @@ class TweetMediaArchiveWriterTest {
                     .isEqualTo("downloaded/" + m.getId() + ".jpg");
         }
     }
+
+    // ===== Epic 8 retro 修复 (2026-08-29): sidecar 可靠性 hardening #1/#2/#3 =====
+
+    // 修复 #2: updateMedia null 元素保位 — 持久化列表不因 null 元素收缩,
+    // 防止后续按 index 回写错位 (上传 B 的 URL 写到 A 名下 / miss 后 URL 丢失)
+    @Test
+    void should_preserve_null_element_positions_when_update_media_writes_back() throws IOException {
+        LocalDateTime when = LocalDateTime.of(2026, 8, 2, 10, 0);
+        Path file = writer.resolveSidecarFile("2083", when);
+        Files.createDirectories(file.getParent());
+        // 手写含 null 元素的退化 sidecar (与既有 shouldSkipNullMediaElementsInUpdateMedia 同构造)
+        Files.writeString(file, "{\"tweetId\":\"2083\",\"generatedAt\":\"2026-08-02T10:00:00\","
+                + "\"media\":[null,{\"id\":\"m1\",\"type\":\"PHOTO\",\"sourceUrl\":\"u1\"},null]}");
+
+        boolean updated = writer.updateMedia("2083", when, "m1", m ->
+                m.toBuilder().localPath("downloaded/m1.jpg").build());
+
+        assertThat(updated).isTrue();
+        List<TweetMedia> back = writer.readSidecar("2083", when).orElseThrow().getMedia();
+        assertThat(back).hasSize(3);        // 列表不收缩
+        assertThat(back.get(0)).isNull();   // null 元素位置保留
+        assertThat(back.get(1).getId()).isEqualTo("m1");
+        assertThat(back.get(1).getLocalPath()).isEqualTo("downloaded/m1.jpg");
+        assertThat(back.get(2)).isNull();
+    }
+
+    // 修复 #3: updateMedia 重复 id 只突变首个命中 — 同 id 多项不再被同一 mutation 全量覆盖
+    @Test
+    void should_mutate_only_first_match_when_duplicate_media_ids_exist() {
+        LocalDateTime when = LocalDateTime.of(2026, 8, 2, 10, 0);
+        TweetMedia dup1 = samplePhotoMedia("dup", "https://x.com/first.jpg");
+        TweetMedia dup2 = samplePhotoMedia("dup", "https://x.com/second.jpg");
+        TweetMedia other = samplePhotoMedia("other", "u-other");
+        writer.writeSidecar("2083", when, List.of(dup1, dup2, other));
+
+        boolean updated = writer.updateMedia("2083", when, "dup", m ->
+                m.toBuilder().wechatUrl("https://mmbiz.qpic.cn/wx1").build());
+
+        assertThat(updated).isTrue();
+        List<TweetMedia> back = writer.readSidecar("2083", when).orElseThrow().getMedia();
+        assertThat(back).hasSize(3);
+        assertThat(back.get(0).getWechatUrl()).isEqualTo("https://mmbiz.qpic.cn/wx1"); // 首个命中被更新
+        assertThat(back.get(1).getWechatUrl()).isNull(); // 同 id 第二项不被覆盖
+        assertThat(back.get(1).getSourceUrl()).isEqualTo("https://x.com/second.jpg");  // 原字段保留
+        assertThat(back.get(2).getWechatUrl()).isNull();  // 无关项不受影响
+    }
+
+    // 修复 #1: 原子写 — 成功写入后目录内只有 media.json, 不残留 .tmp 临时文件
+    @Test
+    void should_not_leave_temp_file_when_write_succeeds() throws IOException {
+        LocalDateTime when = LocalDateTime.of(2026, 8, 2, 10, 0);
+        writer.writeSidecar("2083", when, List.of(samplePhotoMedia("m1", "u1")));
+
+        Path dir = writer.resolveArchiveDir("2083", when);
+        try (var files = Files.list(dir)) {
+            assertThat(files.map(p -> p.getFileName().toString()))
+                    .containsExactly("media.json");
+        }
+    }
+
+    // 修复 #1: 原子写 — 临时文件写入失败时旧 sidecar 保持完整 (不被半写坏, 崩溃/失败留旧文件)
+    @Test
+    void should_keep_existing_sidecar_intact_when_temp_write_fails() throws IOException {
+        LocalDateTime when = LocalDateTime.of(2026, 8, 2, 10, 0);
+        // 先写一个完整的旧 sidecar
+        writer.writeSidecar("2083", when, List.of(samplePhotoMedia("m1", "u1")));
+        Path file = writer.resolveSidecarFile("2083", when);
+        String oldContent = Files.readString(file);
+        // 预置 .tmp 为目录 → 临时文件写入必然失败 (对目录 Files.write 抛 IOException)
+        Files.createDirectories(file.resolveSibling("media.json.tmp"));
+
+        assertThatThrownBy(() -> writer.writeSidecar("2083", when, List.of(samplePhotoMedia("m2", "u2"))))
+                .isInstanceOf(NonRetryableException.class)
+                .hasMessageContaining("sidecar 写入失败");
+
+        // 旧 sidecar 逐字节完整保留
+        assertThat(Files.readString(file)).isEqualTo(oldContent);
+    }
 }

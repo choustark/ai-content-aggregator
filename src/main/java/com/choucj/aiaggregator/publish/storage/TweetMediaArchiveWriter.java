@@ -16,8 +16,10 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
 import java.io.IOException;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.time.DateTimeException;
 import java.time.LocalDate;
@@ -50,6 +52,11 @@ import java.util.regex.Pattern;
  *       {@code archive.base-directory} (Story 2.5), 共享 Docker 卷挂载点.</li>
  *   <li><b>read-modify-write 单媒体回写</b> — {@link #updateMedia} 只改目标 mediaId, 不覆盖其他项,
  *       支持 Story 7.2-7.5/8.4 增量回写.</li>
+ *   <li><b>原子写入 (Epic 8 retro 修复 #1)</b> — sidecar 经同目录临时文件 {@code *.tmp} +
+ *       {@code ATOMIC_MOVE} 落盘, 写入失败/崩溃时旧文件保持完整; sidecar 为 PRESERVE 发布链路
+ *       唯一权威状态源, 不容忍半写坏 JSON.</li>
+ *   <li><b>列表结构保真 (Epic 8 retro 修复 #2/#3)</b> — {@link #updateMedia} 对 null 元素保位回填
+ *       (列表不收缩, 防按 index 回写错位), 对重复 id 仅突变首个命中项.</li>
  * </ul>
  *
  * <p><b>Story 2.4/2.5 review lessons 复用:</b>
@@ -188,6 +195,14 @@ public class TweetMediaArchiveWriter {
      * read-modify-write 单个媒体项. AC4. 只更新目标 mediaId, 不覆盖其他项字段.
      * 用于 Story 7.2-7.5/8.4 增量回写 localPath/downloadStatus/uploadStatus/publishability 等.
      *
+     * <p><b>结构保真语义 (Epic 8 retro 修复 #2/#3, 2026-08-29):</b>
+     * <ul>
+     *   <li>null 元素<b>保位回填</b> — 持久化列表长度与位置不变, 防止后续按 index 的
+     *       {@link #updateMediaAtIndex} 回写错位 (跨媒体误写 / URL 丢失)。</li>
+     *   <li>重复 id <b>仅突变首个命中项</b> — 同 id 多项不再被同一 mutation 全量覆盖
+     *       (与 WeChatMediaPreparer 的 id 优先定位语义对齐)。</li>
+     * </ul>
+     *
      * @param tweetId    推文 ID
      * @param publishedAt 推文发布时间
      * @param mediaId    目标媒体 ID
@@ -217,9 +232,16 @@ public class TweetMediaArchiveWriter {
             boolean found = false;
             for (TweetMedia m : mediaList) {
                 if (m == null) {
-                    continue; // 退化 sidecar 含 null 元素, 跳过不中断
+                    // Epic 8 retro 修复 #2 (2026-08-29): null 元素保位回填而非跳过 —
+                    // 跳过会让持久化列表收缩, 后续按 index 的 updateMediaAtIndex 回写错位
+                    // (上传 B 的微信 URL 写到 A 名下 / miss 后 URL 直接丢失)
+                    updated.add(null);
+                    continue;
                 }
-                if (mediaId.equals(m.getId())) {
+                if (!found && mediaId.equals(m.getId())) {
+                    // Epic 8 retro 修复 #3 (2026-08-29): 仅突变首个命中项 —
+                    // sidecar 含重复 id (多源发现重复媒体) 时, 一次上传不再把 N 个同 id 项
+                    // 全部标记 UPLOADED 同一 wechatUrl; 与 preparer 的 id 优先定位语义对齐
                     TweetMedia mutated = mutation.apply(m);
                     updated.add(mutated != null ? mutated : m);
                     found = true;
@@ -329,11 +351,29 @@ public class TweetMediaArchiveWriter {
     }
 
     private void writeBytes(Path file, byte[] bytes, String tweetId) {
+        // Epic 8 retro 修复 #1 (2026-08-29): 临时文件 + 原子 move 替代 TRUNCATE_EXISTING 直接覆盖写。
+        // 直接覆盖写在进程崩溃/磁盘故障时会留下半写坏的 media.json — sidecar 现为 PRESERVE 发布链路
+        // 唯一权威状态源, 损坏意味着该推文全部媒体状态丢失 (重下载+重上传烧微信配额)。
+        // 临时文件与目标同目录 (同文件系统, 原子 move 可用), 写失败时旧 sidecar 保持完整。
+        Path tempFile = file.resolveSibling(file.getFileName() + ".tmp");
         try {
             // bytes 由 objectMapper.writeValueAsBytes 产生 (UTF-8); Files.write(byte[]) 不接受 Charset
-            Files.write(file, bytes,
+            Files.write(tempFile, bytes,
                     StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
+            try {
+                Files.move(tempFile, file,
+                        StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                // 防御性回退: 同目录 tmp 理论上不跨文件系统, 但异常文件系统/网络挂载可能不支持原子 move
+                Files.move(tempFile, file, StandardCopyOption.REPLACE_EXISTING);
+            }
         } catch (IOException | SecurityException e) {
+            // best-effort 清理残留 tmp (失败不影响异常语义, 下次写入会 CREATE+TRUNCATE 覆盖)
+            try {
+                Files.deleteIfExists(tempFile);
+            } catch (IOException ignored) {
+                // 清理失败不掩盖原始写入异常
+            }
             log.error("媒体 sidecar 写入失败 (永久错误): tweetId={}, 文件={}", tweetId, file, e);
             throw new NonRetryableException("媒体 sidecar 写入失败: tweetId=" + tweetId + " 文件=" + file
                     + " cause=" + TextTruncateUtil.truncateForLog(TextTruncateUtil.getRootMessage(e), LOG_MSG_MAX_LENGTH), e);
