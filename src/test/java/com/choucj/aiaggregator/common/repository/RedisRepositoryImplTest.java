@@ -157,39 +157,71 @@ class RedisRepositoryImplTest {
     void shouldIncrementByAndSetTtlInOneRedisScript() {
         Duration ttl = Duration.ofDays(7);
         when(redisTemplate.execute(any(DefaultRedisScript.class), eq(java.util.List.of("cost:daily:2026-06-28")),
-                eq(2L), eq(ttl.toMillis()))).thenReturn(102L);
+                eq("2"), eq(String.valueOf(ttl.toMillis())))).thenReturn(102L);
 
         long total = repository.incrementBy("cost:daily:2026-06-28", 2L, ttl);
 
         assertThat(total).isEqualTo(102L);
         verify(redisTemplate).execute(any(DefaultRedisScript.class), eq(java.util.List.of("cost:daily:2026-06-28")),
-                eq(2L), eq(ttl.toMillis()));
+                eq("2"), eq(String.valueOf(ttl.toMillis())));
         verify(valueOps, never()).get(any());
         verify(valueOps, never()).set(any(), any());
     }
 
+    /**
+     * ReturnType.INTEGER 下 EVAL 返回 null (pipeline 超时等罕见场景) 时的防御:
+     * 返回 delta 本身 — 与实现契约一致。
+     */
     @Test
-    void shouldAcceptAnyNumericRedisScriptReturnTypeOnIncrementBy() {
+    void shouldReturnDeltaWhenRedisScriptResultIsNull() {
         Duration ttl = Duration.ofDays(7);
         when(redisTemplate.execute(any(DefaultRedisScript.class), eq(java.util.List.of("cost:daily:2026-06-28")),
-                eq(2L), eq(ttl.toMillis()))).thenReturn(102);
+                eq("2"), eq(String.valueOf(ttl.toMillis())))).thenReturn(null);
+
+        long total = repository.incrementBy("cost:daily:2026-06-28", 2L, ttl);
+
+        assertThat(total).isEqualTo(2L);
+    }
+
+    /**
+     * 真实环境缺陷修复 (2026-08-30): StringRedisTemplate 的 valueSerializer 是
+     * StringRedisSerializer, 其 serialize(Object) 内部强转 (String) — 传 Long args
+     * 每次调用必抛 ClassCastException (生产日志 errorType=ClassCastException 的根因,
+     * 成本追踪从未累计成功)。args 必须传 String。
+     */
+    @Test
+    void shouldPassIncrementByArgsAsStrings_forStringRedisSerializerCompatibility() {
+        Duration ttl = Duration.ofDays(7);
+        when(redisTemplate.execute(any(DefaultRedisScript.class), eq(java.util.List.of("cost:daily:2026-06-28")),
+                eq("2"), eq(String.valueOf(ttl.toMillis())))).thenReturn(102L);
 
         long total = repository.incrementBy("cost:daily:2026-06-28", 2L, ttl);
 
         assertThat(total).isEqualTo(102L);
     }
 
+    /**
+     * 脚本 resultType 必须为 Long (ReturnType.INTEGER) — 让 Spring 直接回传 Long,
+     * 不走 valueSerializer 反序列化 (否则 EVAL 整数 bulk reply 被 StringRedisSerializer
+     * 反序列化为 String, 触发 "incrementBy 返回类型异常" NonRetryable)。
+     */
     @Test
-    void shouldThrowNonRetryableExceptionWhenIncrementByReturnsNonNumericType() {
-        Duration ttl = Duration.ofDays(7);
-        // 模拟 Redis 返回非数字类型（如旧数据存储为字符串）
-        when(redisTemplate.execute(any(DefaultRedisScript.class), eq(java.util.List.of("cost:daily:2026-06-28")),
-                eq(2L), eq(ttl.toMillis()))).thenReturn("invalid-string");
+    @SuppressWarnings("unchecked")
+    void shouldUseLongResultTypeRedisScript_forIntegerReplyWithoutValueDeserializer() {
+        when(redisTemplate.execute(any(DefaultRedisScript.class),
+                eq(java.util.List.of("cost:daily:2026-06-28")), eq("2"), eq("604800000"))).thenReturn(2L);
 
-        org.assertj.core.api.Assertions.assertThatThrownBy(() ->
-                repository.incrementBy("cost:daily:2026-06-28", 2L, ttl))
-                .isInstanceOf(com.choucj.aiaggregator.common.exception.NonRetryableException.class)
-                .hasMessageContaining("incrementBy 返回类型异常")
-                .hasMessageContaining("actualType=java.lang.String");
+        repository.incrementBy("cost:daily:2026-06-28", 2L, Duration.ofDays(7));
+
+        org.mockito.ArgumentCaptor<DefaultRedisScript<Long>> captor =
+                org.mockito.ArgumentCaptor.forClass(DefaultRedisScript.class);
+        verify(redisTemplate).execute(captor.capture(),
+                eq(java.util.List.of("cost:daily:2026-06-28")), eq("2"), eq("604800000"));
+        assertThat(captor.getValue().getResultType()).as("脚本 resultType 应为 Long").isEqualTo(Long.class);
     }
+
+    // 旧测试 shouldThrowNonRetryableExceptionWhenIncrementByReturnsNonNumericType 已移除:
+    // 脚本 resultType 收敛为 Long (ReturnType.INTEGER) 后, EVAL 整数回复由 Lettuce 直接
+    // 回传 Long、不经 valueSerializer 反序列化, "返回非数字类型" 场景在类型层面不可达
+    // (由 shouldUseLongResultTypeRedisScript_forIntegerReplyWithoutValueDeserializer 锚定该契约)。
 }

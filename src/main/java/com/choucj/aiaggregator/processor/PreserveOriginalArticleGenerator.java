@@ -236,8 +236,12 @@ public class PreserveOriginalArticleGenerator implements OriginalPostGenerationG
      * 本地相对路径 / failureReason (截断 ≤120, 上游已含 {@code <url>} 脱敏) / 原帖 URL。
      * 脱敏边界 (spike-8.1 §8): 不含 access token/AppSecret/完整响应体/本地绝对路径 —
      * sidecar 的 localPath 本身即相对路径, wechatUrl 为微信正文图片公开 URL。
+     *
+     * <p>Story 9.1: 从 {@code private} 提升为 package-private, 供同包
+     * {@link MediaAwareRewriteArticleGenerator} 复用 (同包可见性提升模式, 行为零变化),
+     * 避免审计表格式双实现 stale 风险。
      */
-    private static String buildMediaAuditMarkdown(List<TweetMedia> sidecarMedia, String originalUrl) {
+    static String buildMediaAuditMarkdown(List<TweetMedia> sidecarMedia, String originalUrl) {
         if (sidecarMedia == null || sidecarMedia.isEmpty()) {
             return null;
         }

@@ -846,6 +846,53 @@ class ArticleToWxArticleConverterTest {
                 .contains("<p><strong>来源:</strong> @sample</p>");
     }
 
+    // ============ Story 9.1 Task 5: REWRITE_WITH_MEDIA 自然落入 Markdown path (AC 1, 7, 8) ============
+
+    @Test
+    void should_render_markdown_images_and_footer_when_generation_mode_is_rewrite_with_media() {
+        // AD-3: REWRITE_WITH_MEDIA 正文恒为 Markdown — 走既有 parse/sanitize/footer path,
+        // MarkdownMediaInserter 嵌入的 image syntax 由 commonmark 渲染为 <img> (AC 7),
+        // converter footer 仍在图片之后追加 (AD-12: footer owner 归 converter)
+        Article article = sampleArticleBuilder("标题",
+                        "改写正文段落。\n\n![原帖图片-1](https://mmbiz.qpic.cn/w1)")
+                .generationMode(ContentGenerationMode.REWRITE_WITH_MEDIA)
+                .build();
+
+        WxMpDraftArticles result = converter.convert(article);
+
+        assertThat(result.getContent())
+                .contains("<img src=\"https://mmbiz.qpic.cn/w1\" alt=\"原帖图片-1\" />")
+                .contains("<hr/>\n<p><strong>来源:</strong> @sample</p>");
+    }
+
+    @Test
+    void should_sanitize_raw_html_when_generation_mode_is_rewrite_with_media() {
+        // 新模式不得进入 PRESERVE_ORIGINAL 的 HTML passthrough 分支 —
+        // raw HTML 与 REWRITE 同等强制实体转义 (AC 8 安全水位一致)
+        Article article = sampleArticleBuilder("标题", "<script>alert(1)</script>\n\n正文")
+                .generationMode(ContentGenerationMode.REWRITE_WITH_MEDIA)
+                .build();
+
+        WxMpDraftArticles result = converter.convert(article);
+
+        assertThat(result.getContent())
+                .doesNotContain("<script>")
+                .contains("&lt;script&gt;alert(1)&lt;/script&gt;");
+    }
+
+    @Test
+    void should_still_truncate_title_and_digest_when_generation_mode_is_rewrite_with_media() {
+        Article article = sampleArticleBuilder("标".repeat(80), "<p>正文</p>")
+                .digest("摘".repeat(200))
+                .generationMode(ContentGenerationMode.REWRITE_WITH_MEDIA)
+                .build();
+
+        WxMpDraftArticles result = converter.convert(article);
+
+        assertThat(result.getTitle()).isEqualTo("标".repeat(64));
+        assertThat(result.getDigest()).isEqualTo("摘".repeat(120));
+    }
+
     // ============ 辅助方法 ============
 
     private Article sampleArticle(String title, String content) {

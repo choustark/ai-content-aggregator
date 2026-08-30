@@ -8,6 +8,7 @@ import com.choucj.aiaggregator.publish.storage.MediaArchiveRecord;
 import com.choucj.aiaggregator.publish.storage.TweetMediaArchiveWriter;
 import com.choucj.aiaggregator.source.twitter.model.MediaDownloadStatus;
 import com.choucj.aiaggregator.source.twitter.model.MediaUploadStatus;
+import com.choucj.aiaggregator.source.twitter.model.PublishabilityStatus;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import lombok.extern.slf4j.Slf4j;
@@ -47,10 +48,19 @@ import java.util.regex.Pattern;
  *       (twitter.media.enabled 独立开关)，缺失时显式 fail-fast 而非静默上传不落账 (D6 规则)</li>
  * </ul>
  *
- * <p><b>调用契约:</b> 本准备器只允许在 {@code PRESERVE_ORIGINAL} 生成分支被调用
- * (Story 8.5 渲染 gateway / 8.6 发布集成是生产调用方)；{@code REWRITE} 路径禁止调用。
- * 模式判定由调用方经 {@code ContentGenerationModeResolver} 完成，本类不感知生成模式
- * (publish/wechat 不得反向依赖 processor 包)。
+ * <p><b>调用契约 (Story 9.1 Task 3 扩展):</b> 本准备器只允许在<b>媒体感知生成分支</b>
+ * 被调用 — {@code PRESERVE_ORIGINAL} (Story 8.5 渲染 gateway / 8.6 发布集成) 与
+ * {@code REWRITE_WITH_MEDIA} (Story 9.1 {@code MediaAwareRewriteArticleGenerator});
+ * plain {@code REWRITE} 路径禁止调用。模式判定由调用方经
+ * {@code ContentGenerationModeResolver} 完成，本类不感知生成模式
+ * (publish/wechat 不得反向依赖 processor 或 resolver 包)。
+ *
+ * <p><b>Story 9.1 上传前防线 (AC 5 / AD-13):</b> 上传前必须跳过
+ * {@code publishability=BLOCKED} 的媒体 (不调微信 uploadImg, SKIPPED + 原因落账);
+ * 幂等判据 (UPLOADED + wechatUrl 非空) 优先于 BLOCKED 拦截 — 已成功上传的媒体
+ * 不重传不改写, BLOCKED 的正文嵌入拒绝由 {@code MarkdownMediaInserter} 谓词承担;
+ * 失败回写只更新 {@code uploadStatus/failureReason}, 绝不清空既有成功
+ * {@code wechatUrl} (本类是三字段唯一写入方, toBuilder 保留未触碰字段)。
  *
  * <p><b>前置条件:</b> 媒体已经过 {@code TweetMediaArchiver} 归档 (sidecar 存在 + localPath 已回写)；
  * sidecar 缺失视为未归档，全部媒体标记 FAILED，不调微信。
@@ -174,6 +184,25 @@ public class WeChatMediaPreparer {
                     statuses.add(new MediaPreparationResult.MediaPreparationStatus(
                             mediaId, MediaUploadStatus.SKIPPED,
                             sidecarState.getWechatUrl(), "已上传，幂等跳过", false));
+                    skipCount++;
+                    continue;
+                }
+
+                // Story 9.1 Task 3 (AC 5): 上传前 publishability=BLOCKED 拦截 — gate 判 BLOCKED
+                // 的媒体绝不调微信 uploadImg, SKIPPED + 原因落账。幂等预检在其之前:
+                // 已 UPLOADED 的 BLOCKED 媒体不重传不改写, 嵌入侧由 MarkdownMediaInserter
+                // 谓词 (publishability != BLOCKED) 拒绝进正文。
+                if ((sidecarState != null && sidecarState.getPublishability() == PublishabilityStatus.BLOCKED)
+                        || m.getPublishability() == PublishabilityStatus.BLOCKED) {
+                    String blockedReason = "publishability=BLOCKED，gate 阻断，跳过微信上传 (Story 9.1)";
+                    tryWriteBack(writer, tweetId, effectivePublishedAt, ref, mediaId,
+                            original -> original.toBuilder()
+                                    .uploadStatus(MediaUploadStatus.SKIPPED)
+                                    .failureReason(blockedReason)
+                                    .build());
+                    log.info("媒体被 publishability gate 阻断，跳过微信图片上传: tweetId={}, mediaId={}",
+                            tweetId, mediaId);
+                    statuses.add(MediaPreparationResult.MediaPreparationStatus.skipped(mediaId, blockedReason));
                     skipCount++;
                     continue;
                 }

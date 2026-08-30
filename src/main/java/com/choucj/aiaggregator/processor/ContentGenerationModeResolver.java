@@ -19,17 +19,21 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <p><b>Story 8.6 D-G (per-tweet 判定):</b> target urls 信号路径从全局配置级收敛为
  * per-tweet 匹配 — 仅当 {@code tweet.url} 归一化 (trim + 去末尾斜杠) 后 equals 任一配置 url
- * 才路由 {@code PRESERVE_ORIGINAL}, 未命中 → {@code REWRITE};
- * {@code defaultMode=PRESERVE_ORIGINAL} (无 target urls) 路径保持全局语义不变。
+ * 才命中信号; 未命中 → {@code REWRITE}。
+ *
+ * <p><b>Story 9.1 AD-6 (命中返回配置 default-mode):</b> target 命中不再硬返回
+ * {@code PRESERVE_ORIGINAL}, 改为返回配置的 {@code default-mode}, 从而支持
+ * target 命中 {@code REWRITE_WITH_MEDIA} 等任意已实现模式; 未命中仍返回 {@code REWRITE},
+ * 防止全量账号内容误入媒体链路。显式配置 {@code REWRITE} / {@code PRESERVE_ORIGINAL} 零回归。
  *
  * <p><b>指定抓取入口现状:</b> {@code discoverSpecifiedTweets} (指定内容 fetch 入口) 当前无生产
  * 调用方, 接线 defer (Story 8.6 scope 决策)。因此在 target urls 信号配置命中场景用进程级
- * {@link AtomicBoolean} warn 一次, 提示 PRESERVE 仅对 fetch 结果中命中 target urls 的推文生效。
+ * {@link AtomicBoolean} warn 一次, 提示 default-mode 仅对 fetch 结果中命中 target urls 的推文生效。
  *
  * <p>{@code wechat.mp.original-post.enabled} 是唯一总开关: 关闭时任何配置组合都解析为
  * {@code REWRITE}, 防止 {@code default-mode} 旁路开关把全量流量送入未实现路径 (CR Round 1)。
  *
- * <p>引用源: Story 8.3 / Story 6.4 / Epic 8 AD-9 / Story 8.6 D-G.
+ * <p>引用源: Story 8.3 / Story 6.4 / Epic 8 AD-9 / Story 8.6 D-G / Story 9.1 AD-5 + AD-6.
  */
 @Slf4j
 @Component
@@ -67,7 +71,7 @@ public class ContentGenerationModeResolver {
      *   <li>调用方显式 override</li>
      *   <li>{@code enabled=false} → 强制 {@code REWRITE} (总开关, CR Round 1)</li>
      *   <li>{@code enabled=true} 且 target urls 信号有效 → per-tweet URL 匹配:
-     *       命中 → {@code PRESERVE_ORIGINAL}; 未命中 → {@code REWRITE}</li>
+     *       命中 → 配置的 {@code default-mode} (Story 9.1 AD-6); 未命中 → {@code REWRITE}</li>
      *   <li>{@code enabled=true} 且无 target urls 信号 → 配置的 {@code default-mode}
      *       (全局语义, 8.3 行为不变)</li>
      * </ol>
@@ -86,8 +90,10 @@ public class ContentGenerationModeResolver {
         if (hasSpecifiedTargetSignal()) {
             warnSpecifiedEntryNotWiredOnce();
             boolean matched = tweet != null && matchesAnyTargetUrl(tweet.getUrl());
+            // Story 9.1 AD-6: 命中返回配置的 default-mode (不再硬编码 PRESERVE_ORIGINAL),
+            // 未命中返回 REWRITE 收窄信号, 防全量账号内容误入媒体链路
             return matched
-                    ? ContentGenerationMode.PRESERVE_ORIGINAL
+                    ? originalPostProperties.getDefaultMode()
                     : ContentGenerationMode.REWRITE;
         }
         return originalPostProperties.getDefaultMode();
@@ -127,7 +133,7 @@ public class ContentGenerationModeResolver {
      */
     private void warnSpecifiedEntryNotWiredOnce() {
         if (specifiedTargetWarned.compareAndSet(false, true)) {
-            log.warn("指定抓取入口未接线, PRESERVE 仅对 fetch 结果中命中 target urls 的推文生效, "
+            log.warn("指定抓取入口未接线, default-mode 仅对 fetch 结果中命中 target urls 的推文生效, "
                     + "未命中推文走 REWRITE");
         }
     }

@@ -7,12 +7,18 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.validation.annotation.Validated;
 
 /**
- * 原帖复现模式配置属性.
+ * 原帖复现/媒体感知发布模式配置属性.
  *
- * <p>绑定 {@code wechat.mp.original-post.*}, 负责声明 Epic 8 的原帖复现总开关与默认模式.
- * 当前默认保持关闭 + {@link ContentGenerationMode#REWRITE}, 以保证既有改写链路零回归.
+ * <p>绑定 {@code wechat.mp.original-post.*}, 负责声明生成模式路由总开关与默认模式.
+ * 命名沿用 Epic 8 既有 namespace (Story 9.1 AD-5 假设: 暂不做 {@code content.generation.*}
+ * 迁移, 避免重命名 churn), 但语义已扩展为覆盖三种生成模式 — 包括 Story 9.1 新增的
+ * {@link ContentGenerationMode#REWRITE_WITH_MEDIA}.
  *
- * <p>引用源: Story 8.3 / project-context 配置拆分规则.
+ * <p>代码默认保持关闭 + {@link ContentGenerationMode#REWRITE}, 防御性兜底;
+ * 部署目标默认流程由 {@code application.yml} 的 {@code default-mode: REWRITE_WITH_MEDIA}
+ * 体现 (Story 9.1 AC11), 且仅在 {@code enabled=true} 时生效.
+ *
+ * <p>引用源: Story 8.3 / Story 9.1 AD-5 / project-context 配置拆分规则.
  */
 @ConfigurationProperties(prefix = "wechat.mp.original-post")
 @Validated
@@ -31,9 +37,11 @@ public class OriginalPostProperties {
     /**
      * 默认生成模式.
      *
-     * <p>仅在 {@code enabled=true} 时生效. 当前默认必须保持
-     * {@link ContentGenerationMode#REWRITE}, 避免对现有批量抓取 + 改写 + 发布链路
-     * 产生静默回归. 未来可在显式配置下切换到其他模式.
+     * <p>仅在 {@code enabled=true} 时生效; target urls 命中场景同样返回本值
+     * (Story 9.1 AD-6). 代码默认保持 {@link ContentGenerationMode#REWRITE} 防御性兜底;
+     * 批量抓取默认目标流程 (AI 改写 + 媒体草稿) 由 {@code application.yml} 显式配置
+     * {@code default-mode: REWRITE_WITH_MEDIA} 体现 (Story 9.1 AC11 / AD-5)。
+     * 显式配置 {@code REWRITE} / {@code PRESERVE_ORIGINAL} 继续可用且有零回归测试。
      */
     private ContentGenerationMode defaultMode = ContentGenerationMode.REWRITE;
 }

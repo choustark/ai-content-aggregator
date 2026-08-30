@@ -61,6 +61,11 @@ import java.util.Map;
  * <p><b>微信草稿展示策略:</b>
  * 草稿 HTML 只追加来源标注, 不追加 AI 辅助生成声明; Markdown 归档器保留独立声明逻辑.
  *
+ * <p><b>Story 9.1 模式路由:</b> 仅 {@code PRESERVE_ORIGINAL} 走 HTML passthrough;
+ * {@code REWRITE} 与 {@code REWRITE_WITH_MEDIA} 均走 Markdown parse/sanitize/footer path —
+ * 新模式无专属分支 (Architecture Spine AD-3: 三模式中两个为 Markdown 正文),
+ * 由 {@code MediaAwareRewriteArticleGenerator} 在正文尾部预嵌 Markdown image syntax 即可.
+ *
  * <p>引用源: Story 3.2 (本 story) / Story 3.3 (WeChatPublisher 消费转换结果).
  *
  * @see WxMpDraftArticles WxJava 草稿实体
@@ -199,6 +204,9 @@ public class ArticleToWxArticleConverter {
         } else {
             // P4 review fix: 传 articleId 给 renderMarkdown, 让解析异常 message 含 articleId (AC-7).
             // REWRITE 分支行为与 Story 8.6 之前逐字节不变 (AC-8 零回退).
+            // Story 9.1: REWRITE_WITH_MEDIA 自然落入本分支 (AD-3: 新模式正文恒为 Markdown) —
+            // MarkdownMediaInserter 嵌入的 image syntax 由 commonmark 渲染为 <img>,
+            // footer 仍在图片之后追加 (AD-12). 不新增 HTML passthrough 分支 (architecture guardrail).
             html = renderMarkdown(article.getContent(), articleId);
             html = appendFooter(html, article);
         }

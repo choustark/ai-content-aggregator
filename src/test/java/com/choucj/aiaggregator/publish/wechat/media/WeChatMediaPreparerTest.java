@@ -9,6 +9,7 @@ import com.choucj.aiaggregator.publish.storage.MediaArchiveRecord;
 import com.choucj.aiaggregator.source.twitter.config.TwitterMediaProperties;
 import com.choucj.aiaggregator.source.twitter.model.MediaDownloadStatus;
 import com.choucj.aiaggregator.source.twitter.model.MediaUploadStatus;
+import com.choucj.aiaggregator.source.twitter.model.PublishabilityStatus;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -444,6 +445,94 @@ class WeChatMediaPreparerTest {
         verifyNoInteractions(uploadProbe);
         assertThat(result.mediaStatuses()).allMatch(s -> s.failureReason() != null
                 && s.failureReason().contains("sidecar"));
+    }
+
+    // ===== Story 9.1 Task 3: 上传前 publishability=BLOCKED 拦截 (AC 5) =====
+
+    @Test
+    void should_skip_blocked_photo_before_upload_without_calling_probe() throws IOException {
+        writeFile("photo1.png");
+        // gate 已判 BLOCKED 的 PHOTO: 本地就绪也不得上传 (AC 5: 上传前必须跳过 BLOCKED 媒体)
+        TweetMedia photo = photo("media-1", "photo1.png")
+                .publishability(PublishabilityStatus.BLOCKED)
+                .build();
+        writer.writeSidecar(TWEET_ID, PUBLISHED_AT, List.of(photo));
+
+        MediaPreparationResult result = preparer.prepareMedia(TWEET_ID, PUBLISHED_AT, List.of(photo));
+
+        assertThat(result.skipCount()).isEqualTo(1);
+        assertThat(result.failCount()).isZero();
+        verifyNoInteractions(uploadProbe);
+        assertThat(result.mediaStatuses().get(0).status()).isEqualTo(MediaUploadStatus.SKIPPED);
+        assertThat(result.mediaStatuses().get(0).failureReason()).contains("BLOCKED");
+        // sidecar 回写 SKIPPED + 原因, publishability 字段本身不被 preparer 改写 (三字段所有权 AD-13)
+        TweetMedia sidecarMedia = readSidecarMedia("media-1");
+        assertThat(sidecarMedia.getUploadStatus()).isEqualTo(MediaUploadStatus.SKIPPED);
+        assertThat(sidecarMedia.getPublishability()).isEqualTo(PublishabilityStatus.BLOCKED);
+        assertThat(sidecarMedia.getFailureReason()).contains("BLOCKED");
+    }
+
+    @Test
+    void should_skip_blocked_photo_when_gate_result_not_written_back_to_sidecar() throws IOException {
+        writeFile("photo1.png");
+        TweetMedia inputPhoto = photo("media-1", "photo1.png")
+                .publishability(PublishabilityStatus.BLOCKED)
+                .build();
+        TweetMedia sidecarPhoto = photo("media-1", "photo1.png")
+                .publishability(PublishabilityStatus.PUBLISHABLE)
+                .build();
+        writer.writeSidecar(TWEET_ID, PUBLISHED_AT, List.of(sidecarPhoto));
+
+        MediaPreparationResult result = preparer.prepareMedia(TWEET_ID, PUBLISHED_AT, List.of(inputPhoto));
+
+        assertThat(result.skipCount()).isEqualTo(1);
+        assertThat(result.failCount()).isZero();
+        verifyNoInteractions(uploadProbe);
+        assertThat(readSidecarMedia("media-1").getUploadStatus()).isEqualTo(MediaUploadStatus.SKIPPED);
+    }
+
+    @Test
+    void should_still_skip_uploaded_media_even_if_blocked() throws IOException {
+        writeFile("photo1.png");
+        // 已成功上传的媒体幂等优先: 即使 gate 后判 BLOCKED 也不重传/不改写,
+        // 嵌入侧 (MarkdownMediaInserter) 谓词负责拒绝 BLOCKED 媒体进正文
+        TweetMedia photo = photo("media-1", "photo1.png")
+                .uploadStatus(MediaUploadStatus.UPLOADED)
+                .wechatUrl(WECHAT_URL)
+                .publishability(PublishabilityStatus.BLOCKED)
+                .build();
+        writer.writeSidecar(TWEET_ID, PUBLISHED_AT, List.of(photo));
+
+        MediaPreparationResult result = preparer.prepareMedia(TWEET_ID, PUBLISHED_AT, List.of(photo));
+
+        assertThat(result.skipCount()).isEqualTo(1);
+        verifyNoInteractions(uploadProbe);
+        assertThat(readSidecarMedia("media-1").getWechatUrl()).isEqualTo(WECHAT_URL);
+    }
+
+    // ===== Story 9.1 Task 3: 后续失败不得覆盖既有成功 wechatUrl (AC 5 / AD-13) =====
+
+    @Test
+    void should_preserve_existing_wechat_url_when_retry_upload_fails() throws IOException {
+        writeFile("photo1.png");
+        // 历史状态: 曾成功上传拿到 wechatUrl, 但后续某次状态被写为 FAILED (如回写竞态)
+        TweetMedia photo = photo("media-1", "photo1.png")
+                .uploadStatus(MediaUploadStatus.FAILED)
+                .wechatUrl(WECHAT_URL)
+                .failureReason("stale failure")
+                .build();
+        writer.writeSidecar(TWEET_ID, PUBLISHED_AT, List.of(photo));
+
+        when(uploadProbe.upload(any(Path.class))).thenThrow(new RetryableException(
+                ErrorCode.WECHAT_API_ERROR, "微信 mediaImgUpload 失败: errcode=-1 system busy"));
+
+        MediaPreparationResult result = preparer.prepareMedia(TWEET_ID, PUBLISHED_AT, List.of(photo));
+
+        assertThat(result.failCount()).isEqualTo(1);
+        // 失败回写只更新 uploadStatus/failureReason, 绝不清空既有成功 wechatUrl (AD-13)
+        TweetMedia sidecarMedia = readSidecarMedia("media-1");
+        assertThat(sidecarMedia.getUploadStatus()).isEqualTo(MediaUploadStatus.FAILED);
+        assertThat(sidecarMedia.getWechatUrl()).isEqualTo(WECHAT_URL);
     }
 
     // ===== helpers =====

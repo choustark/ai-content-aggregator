@@ -70,6 +70,8 @@ class TwitterProcessorTest {
     @Mock
     private OriginalPostGenerationGateway originalPostGenerationGateway;
     @Mock
+    private MediaAwareRewriteGenerationGateway mediaAwareRewriteGenerationGateway;
+    @Mock
     private ContentPublisher contentPublisher;
     @Mock
     private ContentPublisher secondContentPublisher;
@@ -96,7 +98,7 @@ class TwitterProcessorTest {
         lenient().when(contentGenerationModeResolver.resolve(any(Tweet.class)))
                 .thenReturn(ContentGenerationMode.REWRITE);
         processor = new TwitterProcessor(twitterSource, filters, contentRewriter,
-                contentGenerationModeResolver, Optional.of(originalPostGenerationGateway),
+                contentGenerationModeResolver, Optional.of(originalPostGenerationGateway), Optional.of(mediaAwareRewriteGenerationGateway),
                 List.of(contentPublisher), properties, articleStatusService);
     }
 
@@ -120,7 +122,7 @@ class TwitterProcessorTest {
         processor = new TwitterProcessor(twitterSource, List.of(
                 new CommentFilterStub(commentFilterDelegate),
                 new InnovationFilterStub(innovationFilterDelegate)),
-                contentRewriter, contentGenerationModeResolver, Optional.of(originalPostGenerationGateway),
+                contentRewriter, contentGenerationModeResolver, Optional.of(originalPostGenerationGateway), Optional.of(mediaAwareRewriteGenerationGateway),
                 List.of(contentPublisher, secondContentPublisher), properties, articleStatusService);
         Tweet t1 = tweet("id-1", "content-1");
         Tweet t2 = tweet("id-2", "content-2");
@@ -187,6 +189,25 @@ class TwitterProcessorTest {
         processor.process();
 
         // RuntimeException (非 Retryable/NonRetryable) 仍被 catch(Exception) 捕获, 不穿透
+        verify(contentPublisher, times(1)).publish(any());
+    }
+
+    @Test
+    void shouldIsolatePerArticleFailureWhenResolverThrows() {
+        Tweet t1 = tweet("id-1", "content-1");
+        Tweet t2 = tweet("id-2", "content-2");
+        when(twitterSource.fetch()).thenReturn(List.of(t1, t2));
+        when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1, t2));
+        when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1, t2));
+        when(contentGenerationModeResolver.resolve(t1))
+                .thenThrow(new IllegalStateException("bad mode config"));
+        when(contentGenerationModeResolver.resolve(t2))
+                .thenReturn(ContentGenerationMode.REWRITE);
+        when(contentRewriter.rewrite(t2)).thenReturn(article("art-2"));
+
+        processor.process();
+
+        verify(contentRewriter, times(1)).rewrite(t2);
         verify(contentPublisher, times(1)).publish(any());
     }
 
@@ -386,7 +407,7 @@ class TwitterProcessorTest {
         processor = new TwitterProcessor(twitterSource, List.of(
                 new CommentFilterStub(commentFilterDelegate),
                 new InnovationFilterStub(innovationFilterDelegate)),
-                contentRewriter, contentGenerationModeResolver, Optional.of(originalPostGenerationGateway),
+                contentRewriter, contentGenerationModeResolver, Optional.of(originalPostGenerationGateway), Optional.of(mediaAwareRewriteGenerationGateway),
                 List.of(contentPublisher, secondContentPublisher), properties, articleStatusService);
         Tweet t1 = tweet("id-1", "content-1");
         Article a1 = article("art-1");
@@ -438,7 +459,7 @@ class TwitterProcessorTest {
         processor = new TwitterProcessor(twitterSource, List.of(
                 new CommentFilterStub(commentFilterDelegate),
                 new InnovationFilterStub(innovationFilterDelegate)),
-                contentRewriter, contentGenerationModeResolver, Optional.of(originalPostGenerationGateway),
+                contentRewriter, contentGenerationModeResolver, Optional.of(originalPostGenerationGateway), Optional.of(mediaAwareRewriteGenerationGateway),
                 List.of(contentPublisher, secondContentPublisher), properties, articleStatusService);
         Tweet t1 = tweet("id-1", "content-1");
         Article preserveArticle = preserveArticle("original-art-1");
@@ -486,7 +507,7 @@ class TwitterProcessorTest {
         processor = new TwitterProcessor(twitterSource, List.of(
                 new CommentFilterStub(commentFilterDelegate),
                 new InnovationFilterStub(innovationFilterDelegate)),
-                contentRewriter, contentGenerationModeResolver, Optional.empty(),
+                contentRewriter, contentGenerationModeResolver, Optional.empty(), Optional.empty(),
                 List.of(contentPublisher), properties, articleStatusService);
         Tweet t1 = tweet("id-1", "content-1");
         when(twitterSource.fetch()).thenReturn(List.of(t1));
@@ -623,7 +644,7 @@ class TwitterProcessorTest {
         processor = new TwitterProcessor(twitterSource, List.of(
                 new CommentFilterStub(commentFilterDelegate),
                 new InnovationFilterStub(innovationFilterDelegate)),
-                contentRewriter, contentGenerationModeResolver, Optional.of(originalPostGenerationGateway),
+                contentRewriter, contentGenerationModeResolver, Optional.of(originalPostGenerationGateway), Optional.of(mediaAwareRewriteGenerationGateway),
                 List.of(contentPublisher), properties, realStatusService);
 
         Tweet t1 = tweet("id-1", "content-1");
@@ -644,6 +665,94 @@ class TwitterProcessorTest {
         assertThat(output.getOut()).contains("状态写入失败, 跳过");
     }
 
+    // ===== Story 9.1 Task 2: REWRITE_WITH_MEDIA 第三分支 + summary counters (AC 9, 10) =====
+
+    @Test
+    void should_route_rewrite_with_media_and_log_summary_counters(CapturedOutput output) {
+        when(twitterSource.fetch()).thenReturn(List.of(tweet("id-1", "content-1")));
+        when(commentFilterDelegate.filter(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(innovationFilterDelegate.filter(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(contentGenerationModeResolver.resolve(any(Tweet.class)))
+                .thenReturn(ContentGenerationMode.REWRITE_WITH_MEDIA);
+        when(mediaAwareRewriteGenerationGateway.generate(any(Tweet.class)))
+                .thenReturn(new MediaAwareRewriteGenerationGateway.MediaAwareRewriteGeneration(
+                        mediaAwareArticle("art-m-1"), 2, 1));
+
+        processor.process();
+
+        verify(mediaAwareRewriteGenerationGateway, times(1)).generate(any(Tweet.class));
+        // AC 10: REWRITE_WITH_MEDIA 不计入 plain rewriteSuccess
+        assertThat(output.getOut()).contains(
+                "Pipeline 完成: 发现=1, 评论筛选通过=1, 创新筛选通过=1, 改写成功=0, 原帖复现成功=0, "
+                        + "归档成功=1, 失败=0, "
+                        + "改写+媒体尝试=1, 改写+媒体草稿=1, 改写+媒体阻断=0, 嵌入媒体=2, 降级媒体=1");
+    }
+
+    @Test
+    void should_fail_fast_when_gateway_missing_for_rewrite_with_media(CapturedOutput output) {
+        when(twitterSource.fetch()).thenReturn(List.of(tweet("id-1", "content-1")));
+        when(commentFilterDelegate.filter(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(innovationFilterDelegate.filter(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(contentGenerationModeResolver.resolve(any(Tweet.class)))
+                .thenReturn(ContentGenerationMode.REWRITE_WITH_MEDIA);
+        processor = new TwitterProcessor(twitterSource, List.of(
+                new CommentFilterStub(commentFilterDelegate),
+                new InnovationFilterStub(innovationFilterDelegate)),
+                contentRewriter, contentGenerationModeResolver,
+                Optional.of(originalPostGenerationGateway), Optional.empty(),
+                List.of(contentPublisher), properties, articleStatusService);
+
+        processor.process();
+
+        // AC 9: gateway 缺失 fail-fast, 不得静默 fallback REWRITE
+        verify(contentRewriter, never()).rewrite(any(Tweet.class));
+        verify(contentPublisher, never()).publish(any());
+        assertThat(output.getOut()).contains(
+                "改写+媒体尝试=1, 改写+媒体草稿=0, 改写+媒体阻断=0, 嵌入媒体=0, 降级媒体=0");
+        assertThat(output.getOut()).contains("失败=1");
+    }
+
+    @Test
+    void should_count_blocked_when_gateway_throws_publishability_blocked(CapturedOutput output) {
+        when(twitterSource.fetch()).thenReturn(List.of(tweet("id-1", "content-1")));
+        when(commentFilterDelegate.filter(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(innovationFilterDelegate.filter(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(contentGenerationModeResolver.resolve(any(Tweet.class)))
+                .thenReturn(ContentGenerationMode.REWRITE_WITH_MEDIA);
+        when(mediaAwareRewriteGenerationGateway.generate(any(Tweet.class)))
+                .thenThrow(new TweetPublishabilityBlockedException(
+                        "媒体感知改写生成失败: tweetId=id-1, reason=tweet publishability BLOCKED"));
+
+        processor.process();
+
+        // AC 10: 推文级 BLOCKED 单独归类, 计入阻断计数
+        assertThat(output.getOut()).contains(
+                "改写+媒体尝试=1, 改写+媒体草稿=0, 改写+媒体阻断=1, 嵌入媒体=0, 降级媒体=0");
+        assertThat(output.getOut()).contains("失败=1");
+    }
+
+    @Test
+    void should_publish_rewrite_with_media_article_without_media(CapturedOutput output) {
+        // AC 9: 无媒体推文命中 REWRITE_WITH_MEDIA 仍成功 — gateway 生成纯文字草稿并正常发布,
+        // processor 层不因 media 为空而走 plain REWRITE 或失败
+        when(twitterSource.fetch()).thenReturn(List.of(tweet("id-1", "content-1")));
+        when(commentFilterDelegate.filter(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(innovationFilterDelegate.filter(any())).thenAnswer(inv -> inv.getArgument(0));
+        when(contentGenerationModeResolver.resolve(any(Tweet.class)))
+                .thenReturn(ContentGenerationMode.REWRITE_WITH_MEDIA);
+        Article noMediaArticle = mediaAwareArticle("art-m-nomedia");
+        when(mediaAwareRewriteGenerationGateway.generate(any(Tweet.class)))
+                .thenReturn(new MediaAwareRewriteGenerationGateway.MediaAwareRewriteGeneration(
+                        noMediaArticle, 0, 0));
+
+        processor.process();
+
+        verify(mediaAwareRewriteGenerationGateway, times(1)).generate(any(Tweet.class));
+        verify(contentPublisher).publish(noMediaArticle);
+        assertThat(output.getOut()).contains(
+                "改写+媒体尝试=1, 改写+媒体草稿=1, 改写+媒体阻断=0, 嵌入媒体=0, 降级媒体=0");
+    }
+
     // ============ helpers ============
 
     private static Tweet tweet(String id, String content) {
@@ -652,6 +761,17 @@ class TwitterProcessorTest {
 
     private static Article article(String title) {
         return Article.builder().id(title).title(title).content("body").build();
+    }
+
+    /** REWRITE_WITH_MEDIA 模式 Article fixture (media-aware gateway 返回值)。 */
+    private static Article mediaAwareArticle(String title) {
+        return Article.builder()
+                .id(title)
+                .title(title)
+                .content("body\n\n![原帖图片-1](https://mmbiz.qpic.cn/w1)")
+                .aiGenerated(true)
+                .generationMode(ContentGenerationMode.REWRITE_WITH_MEDIA)
+                .build();
     }
 
     /** PRESERVE_ORIGINAL 模式 Article fixture (gateway 返回值, 模拟 renderer.toArticle 产出)。 */

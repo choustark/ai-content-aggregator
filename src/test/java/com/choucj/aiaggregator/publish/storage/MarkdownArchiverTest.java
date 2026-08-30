@@ -485,6 +485,40 @@ class MarkdownArchiverTest {
         assertThat(content).doesNotContain("媒体审计");
     }
 
+    // ===== Story 9.1 Task 5: AI 改写+媒体 模式标签 + 审计位置 (AC 1, 7, 8) =====
+
+    @Test
+    void should_label_ai_rewrite_with_media_mode_and_insert_audit_before_disclaimer() {
+        String auditTable = "#### 媒体审计 (media.json sidecar 权威状态)\n\n"
+                + "| # | 类型 | 下载状态 | 上传状态 | 可发布性 | 微信 URL | 本地路径 | 失败原因 |\n"
+                + "|---|---|---|---|---|---|---|---|\n"
+                + "| 1 | PHOTO | DOWNLOADED | UPLOADED | PUBLISHABLE | https://mmbiz.qpic.cn/mmbiz/x "
+                + "| media/twitter/2026-08-30/123/photo-1.jpg | - |\n";
+        Article article = Article.builder()
+                .id("tw-media-1")
+                .title("改写+媒体标题")
+                .content("改写正文\n\n![原帖图片-1](https://mmbiz.qpic.cn/w1)")
+                .source("来源:@karpathy")
+                .aiGenerated(true)
+                .createdAt(LocalDateTime.of(2026, 8, 30, 10, 0))
+                .originalUrl("https://x.com/karpathy/status/123")
+                .generationMode(ContentGenerationMode.REWRITE_WITH_MEDIA)
+                .mediaAuditMarkdown(auditTable)
+                .build();
+
+        archiver.publish(article);
+
+        String content = readAll(tempDir.resolve("archive").resolve("2026-08-30.md"));
+        // Task 5: 三模式标签 — 新增 AI 改写+媒体, 不再落入 else 的 "AI 改写"
+        assertThat(content).contains("- **生成模式**: AI 改写+媒体");
+        // 审计位置不变: content 之后、AI 声明之前 (D-E/AC4)
+        assertThat(content).contains(auditTable);
+        assertThat(content.indexOf("改写正文")).isLessThan(content.indexOf("媒体审计"));
+        assertThat(content.indexOf("媒体审计")).isLessThan(content.indexOf("本文由 AI 辅助生成"));
+        // aiGenerated=true → AI 声明仍追加 (AR8)
+        assertThat(content).contains("本文由 AI 辅助生成");
+    }
+
     /** PRESERVE_ORIGINAL 模式 Article fixture (模拟 PreserveOriginalArticleGenerator 产出)。 */
     private Article preserveArticle(String id, String title, String mediaAuditMarkdown) {
         return Article.builder()

@@ -115,6 +115,12 @@ public class TwitterProcessor {
      * PRESERVE 命中但缺失 (配置矛盾) 由 {@link #generateArticle} 显式 fail-fast。
      */
     private final Optional<OriginalPostGenerationGateway> originalPostGenerationGateway;
+    /**
+     * Story 9.1 AC 3/9: REWRITE_WITH_MEDIA gateway Optional 注入 (D6 规则) — 真实现挂
+     * {@code wechat.mp.enabled=true} 条件注册, 配置关闭时缺失属合法状态。
+     * 模式命中但缺失 (配置矛盾) 由 {@link #generateArticle} 显式 fail-fast, 不静默 fallback。
+     */
+    private final Optional<MediaAwareRewriteGenerationGateway> mediaAwareRewriteGenerationGateway;
     private final List<ContentPublisher> contentPublishers;
     private final ProcessorProperties properties;
     private final ArticleStatusService articleStatusService;
@@ -140,6 +146,12 @@ public class TwitterProcessor {
         int preserveSuccess = 0;
         int archiveSuccess = 0;
         int failure = 0;
+        // Story 9.1 AC 10: 媒体感知模式最小可观测计数 (按路由结果归类, 与 plain rewriteSuccess 互斥)
+        int rewriteWithMediaAttempted = 0;
+        int rewriteWithMediaPublished = 0;
+        int rewriteWithMediaBlocked = 0;
+        int rewriteWithMediaEmbeddedMediaCount = 0;
+        int rewriteWithMediaDegradedMediaCount = 0;
 
         // Stage 1: fetch (AC-1 + AC-4 catch Exception 兜底, Story 2.2a N2 闭环)
         List<Tweet> tweets;
@@ -200,15 +212,30 @@ public class TwitterProcessor {
         // 顶层 (调试用, 由调度器按 Retryable/NonRetryable 分类处理).
         boolean archivePublisherPresent = contentPublishers.stream().anyMatch(TwitterProcessor::isArchivePublisher);
         for (Tweet tweet : filtered) {
+            boolean mediaAware = false;
             try {
+                // Story 9.1 AC 10: 先按路由结果归类 — attempted 在生成副作用前累加,
+                // gateway 缺失/推文级 BLOCKED 等生成失败也计入 attempted。
+                // resolve 必须留在 per-article try 内, 维持单条故障隔离 (CR 2026-08-30).
+                ContentGenerationMode mode = contentGenerationModeResolver.resolve(tweet);
+                mediaAware = mode == ContentGenerationMode.REWRITE_WITH_MEDIA;
                 // Story 3.5 AC-1/P5: rewrite 前写 PENDING, 但必须先校验 tweetId,
                 // 避免生成 tw-null / malformed orphan status.
                 articleStatusService.markPending(buildDeterministicArticleId(tweet));
-                Article article = generateArticle(tweet);
+                if (mediaAware) {
+                    rewriteWithMediaAttempted++;
+                }
+                GenerationOutcome outcome = generateArticle(tweet, mode);
+                Article article = outcome.article();
                 // Story 8.6 Task 5.2: 生成成功即按模式拆分计数 (与 8.6 之前语义一致:
-                // rewriteSuccess 在 publisher 链之前累加)
+                // rewriteSuccess 在 publisher 链之前累加)。
+                // Story 9.1 AC 10: REWRITE_WITH_MEDIA 即使全部媒体降级也不计入 plain rewriteSuccess
                 if (article.getGenerationMode() == ContentGenerationMode.PRESERVE_ORIGINAL) {
                     preserveSuccess++;
+                } else if (article.getGenerationMode() == ContentGenerationMode.REWRITE_WITH_MEDIA) {
+                    rewriteWithMediaPublished++;
+                    rewriteWithMediaEmbeddedMediaCount += outcome.embeddedMediaCount();
+                    rewriteWithMediaDegradedMediaCount += outcome.degradedMediaCount();
                 } else {
                     rewriteSuccess++;
                 }
@@ -251,6 +278,10 @@ public class TwitterProcessor {
                     archiveSuccess++;
                 }
             } catch (Exception e) {
+                // Story 9.1 AC 10: 推文级 BLOCKED 单独归类到 blocked 计数 (其余失败进 failure)
+                if (mediaAware && e instanceof TweetPublishabilityBlockedException) {
+                    rewriteWithMediaBlocked++;
+                }
                 failure++;
                 // L2 per-article 隔离: 该条失败 → log.error + continue, 不影响其他文章
                 // N4: cause 截断不含正文 (truncateForLog 复用 SingleModelRewriter R3-1 修复版)
@@ -266,15 +297,26 @@ public class TwitterProcessor {
             }
         }
 
-        // AC-5 summary (Story 8.6 Task 5.2: 既有 6 字段保持 + 新增原帖复现成功计数)
+        // AC-5 summary (Story 8.6 Task 5.2: 既有 7 字段保持;
+        // Story 9.1 AC 10: 追加媒体感知模式 5 计数, 既有断言子串兼容)
         log.info("Pipeline 完成: 发现={}, 评论筛选通过={}, 创新筛选通过={}, 改写成功={}, "
-                        + "原帖复现成功={}, 归档成功={}, 失败={}",
+                        + "原帖复现成功={}, 归档成功={}, 失败={}, "
+                        + "改写+媒体尝试={}, 改写+媒体草稿={}, 改写+媒体阻断={}, "
+                        + "嵌入媒体={}, 降级媒体={}",
                 discovered, commentPassed, innovationPassed, rewriteSuccess, preserveSuccess,
-                archiveSuccess, failure);
+                archiveSuccess, failure,
+                rewriteWithMediaAttempted, rewriteWithMediaPublished, rewriteWithMediaBlocked,
+                rewriteWithMediaEmbeddedMediaCount, rewriteWithMediaDegradedMediaCount);
     }
 
-    private Article generateArticle(Tweet tweet) {
-        ContentGenerationMode mode = contentGenerationModeResolver.resolve(tweet);
+    /**
+     * 按解析出的模式生成 Article (Story 9.1 三分支).
+     *
+     * <p>{@code REWRITE_WITH_MEDIA} 命中但 gateway 缺失 = 配置矛盾 (original-post 信号命中
+     * 但 wechat.mp.enabled=false) → 显式 fail-fast (message 含 tweetId + 开关名, AC 9),
+     * 不静默 fallback REWRITE。
+     */
+    private GenerationOutcome generateArticle(Tweet tweet, ContentGenerationMode mode) {
         if (mode == ContentGenerationMode.PRESERVE_ORIGINAL) {
             log.info("内容生成模式命中原帖复现边界: tweetId={}, mode={}", tweet.getId(), mode);
             // Story 8.6 D-D: PRESERVE 命中但 gateway 缺失 = 配置矛盾 (original-post 信号命中
@@ -283,9 +325,23 @@ public class TwitterProcessor {
                     .orElseThrow(() -> new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
                             "原帖复现 gateway 未注册 (请检查 wechat.mp.enabled=true), tweetId="
                                     + tweet.getId()));
-            return gateway.generate(tweet);
+            return new GenerationOutcome(gateway.generate(tweet), 0, 0);
         }
-        return contentRewriter.rewrite(tweet);
+        if (mode == ContentGenerationMode.REWRITE_WITH_MEDIA) {
+            log.info("内容生成模式命中媒体感知改写边界: tweetId={}, mode={}", tweet.getId(), mode);
+            MediaAwareRewriteGenerationGateway gateway = mediaAwareRewriteGenerationGateway
+                    .orElseThrow(() -> new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                            "REWRITE_WITH_MEDIA gateway 未注册 (请检查 wechat.mp.enabled=true), tweetId="
+                                    + tweet.getId()));
+            MediaAwareRewriteGenerationGateway.MediaAwareRewriteGeneration generation = gateway.generate(tweet);
+            return new GenerationOutcome(generation.article(),
+                    generation.embeddedMediaCount(), generation.degradedMediaCount());
+        }
+        return new GenerationOutcome(contentRewriter.rewrite(tweet), 0, 0);
+    }
+
+    /** 生成结果 + 观测计数载体 (仅 REWRITE_WITH_MEDIA 分支携带非零媒体计数)。 */
+    private record GenerationOutcome(Article article, int embeddedMediaCount, int degradedMediaCount) {
     }
 
     private static boolean isArchivePublisher(ContentPublisher publisher) {

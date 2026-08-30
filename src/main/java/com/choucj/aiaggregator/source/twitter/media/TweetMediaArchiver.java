@@ -125,6 +125,7 @@ public class TweetMediaArchiver {
         }
 
         LocalDateTime effectivePublishedAt = publishedAt != null ? publishedAt : LocalDateTime.now();
+        ensureSidecarSeeded(tweetId, effectivePublishedAt, media);
         Path archiveDir = archiveWriter.resolveArchiveDir(tweetId, effectivePublishedAt);
         AtomicInteger successCount = new AtomicInteger(0);
         AtomicInteger skipCount = new AtomicInteger(0);
@@ -214,6 +215,25 @@ public class TweetMediaArchiver {
                 tweetId, successCount.get(), skipCount.get(), failCount.get());
 
         return new ArchiveResult(successCount.get(), skipCount.get(), failCount.get(), List.copyOf(statuses));
+    }
+
+    /**
+     * sidecar 种子化: 推文首次处理时 media.json 从不存在, 而 updateMedia 只能 read-modify-write
+     * 已有 sidecar (未命中仅 WARN 跳过) — 若不在此处用推文媒体列表全量种子化, 下载/归档/Gate/
+     * 上传整条链的 sidecar 回写全部静默落空, 最终 WeChatMediaPreparer 读不到 sidecar 把媒体
+     * 全标 FAILED (Story 9.1 真实环境缺陷根因, 2026-08-30)。
+     *
+     * <p>幂等: sidecar 已存在 (重试场景) 时不覆盖 — 否则既有 uploadStatus/wechatUrl 等上传
+     * 进度会被重置 (烧微信配额重传)。种子内容为推文原始媒体列表 (id/type/sourceUrl 等),
+     * 生命周期字段缺失由 {@code TweetMediaArchiveWriter.readSidecar} 的 backfillDefaults
+     * 补 PENDING/UNKNOWN 默认值。
+     */
+    private void ensureSidecarSeeded(String tweetId, LocalDateTime publishedAt, List<TweetMedia> media) {
+        if (archiveWriter.readSidecar(tweetId, publishedAt).isPresent()) {
+            return;
+        }
+        archiveWriter.writeSidecar(tweetId, publishedAt, media);
+        log.info("sidecar 不存在, 已用推文媒体列表种子化: tweetId={}, mediaCount={}", tweetId, media.size());
     }
 
     private void saveRuntimeSnapshot(String tweetId, List<MediaRuntimeItem> items) {

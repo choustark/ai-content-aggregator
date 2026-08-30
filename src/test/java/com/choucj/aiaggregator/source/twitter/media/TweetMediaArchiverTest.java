@@ -92,6 +92,59 @@ class TweetMediaArchiverTest {
         assertThat(Files.exists(tempDir.resolve(updated.getLocalPath()))).isTrue();
     }
 
+    /**
+     * 真实生产管道路径修复 (Story 9.1 真实环境缺陷): 推文首次处理时 sidecar 从不存在,
+     * archiveMedia 必须先用推文媒体列表种子化 media.json, 否则后续 updateMedia 全部
+     * "未找到 sidecar, 跳过" → gate/preparer 链雪崩 (media sidecar missing after prepareMedia)。
+     * 既有测试均先 writeSidecar 预置 fixture, 掩盖了该缺陷 — 本测试不预置。
+     */
+    @Test
+    void shouldSeedSidecarWithTweetMediaList_whenSidecarAbsent() throws Exception {
+        TweetMedia photo = photo("photo-seed-1", "https://pbs.twimg.com/media/SEED.jpg");
+        assertThat(writer.readSidecar("tweet-seed", PUBLISHED_AT)).isEmpty();
+        when(downloadClient.downloadBinary(eq(photo.getSourceUrl()), eq("tweet-seed"), eq("photo-seed-1")))
+                .thenReturn(new MediaDownloadClient.DownloadResult(new byte[]{1, 2, 3}, "image/jpeg"));
+
+        TweetMediaArchiver.ArchiveResult result = archiver.archiveMedia("tweet-seed", PUBLISHED_AT, List.of(photo));
+
+        assertThat(result.successCount()).isEqualTo(1);
+        MediaArchiveRecord record = writer.readSidecar("tweet-seed", PUBLISHED_AT).orElseThrow();
+        assertThat(record.getTweetId()).isEqualTo("tweet-seed");
+        assertThat(record.getMedia()).singleElement().satisfies(updated -> {
+            assertThat(updated.getId()).isEqualTo("photo-seed-1");
+            assertThat(updated.getDownloadStatus()).isEqualTo(MediaDownloadStatus.DOWNLOADED);
+            assertThat(updated.getLocalPath()).startsWith("media/twitter/2026-08-02/tweet-seed/photo-seed-1-");
+        });
+        assertThat(Files.exists(tempDir.resolve(record.getMedia().get(0).getLocalPath()))).isTrue();
+    }
+
+    /**
+     * 幂等种子化: sidecar 已存在 (重试场景) 时不得覆盖 — 否则既有 uploadStatus/wechatUrl
+     * 等上传进度会被重置 (烧微信配额重传)。
+     */
+    @Test
+    void shouldNotOverwriteExistingSidecar_whenRetrying() throws Exception {
+        TweetMedia photo = photo("photo-retry-1", "https://pbs.twimg.com/media/RETRY.jpg")
+                .toBuilder()
+                .uploadStatus(com.choucj.aiaggregator.source.twitter.model.MediaUploadStatus.UPLOADED)
+                .wechatUrl("https://mmbiz.qpic.cn/existing")
+                .build();
+        writer.writeSidecar("tweet-retry", PUBLISHED_AT, List.of(photo));
+        when(downloadClient.downloadBinary(eq(photo.getSourceUrl()), eq("tweet-retry"), eq("photo-retry-1")))
+                .thenReturn(new MediaDownloadClient.DownloadResult(new byte[]{1}, "image/jpeg"));
+
+        archiver.archiveMedia("tweet-retry", PUBLISHED_AT, List.of(photo));
+
+        MediaArchiveRecord record = writer.readSidecar("tweet-retry", PUBLISHED_AT).orElseThrow();
+        assertThat(record.getMedia()).singleElement().satisfies(updated -> {
+            // 下载回写只覆盖 downloadStatus/localPath, 上传进度字段必须保留
+            assertThat(updated.getUploadStatus())
+                    .isEqualTo(com.choucj.aiaggregator.source.twitter.model.MediaUploadStatus.UPLOADED);
+            assertThat(updated.getWechatUrl()).isEqualTo("https://mmbiz.qpic.cn/existing");
+            assertThat(updated.getDownloadStatus()).isEqualTo(MediaDownloadStatus.DOWNLOADED);
+        });
+    }
+
     @Test
     void shouldPersistSyntheticId_whenMediaIdIsNull() {
         TweetMedia photo = photo(null, "https://pbs.twimg.com/media/XYZ.jpg");

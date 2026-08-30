@@ -193,7 +193,7 @@ public class MarkdownArchiver implements ContentPublisher {
      * - **日期**: {createdAt:yyyy-MM-dd HH:mm}
      * - **来源**: {source}
      * - **AI 生成**: {是|否}
-     * - **生成模式**: {AI 改写|原帖复现}   ← Story 8.6 新增
+     * - **生成模式**: {AI 改写|原帖复现|AI 改写+媒体}   ← Story 8.6 新增, Story 9.1 扩为三模式
      * - **原文链接**: {originalUrl}     ← 仅 non-null 时输出
      *
      * {content}
@@ -220,11 +220,9 @@ public class MarkdownArchiver implements ContentPublisher {
         sb.append("- **AI 生成**: ").append(article.isAiGenerated() ? "是" : "否").append("\n");
         // Story 8.6 Task 6.1: 生成模式标注行 (AC4) — REWRITE=AI 改写 (既有块新增此行),
         // PRESERVE_ORIGINAL=原帖复现
-        sb.append("- **生成模式**: ")
-                .append(article.getGenerationMode() == ContentGenerationMode.PRESERVE_ORIGINAL
-                        ? "原帖复现"
-                        : "AI 改写")
-                .append("\n");
+        // Story 9.1 Task 5: 三模式标签 — REWRITE_WITH_MEDIA=AI 改写+媒体 (显式分支,
+        // 不再落入 else 的 "AI 改写"); default REWRITE 标签不变 (AC 8 零回退)
+        sb.append("- **生成模式**: ").append(modeLabel(article.getGenerationMode())).append("\n");
         if (article.getOriginalUrl() != null) {
             sb.append("- **原文链接**: ").append(article.getOriginalUrl()).append("\n");
         }
@@ -243,6 +241,25 @@ public class MarkdownArchiver implements ContentPublisher {
 
         sb.append(properties.getSeparator());
         return sb.toString();
+    }
+
+    /**
+     * 生成模式 → 归档标签映射 (Story 9.1 Task 5 三分支).
+     *
+     * <ul>
+     *   <li>{@code PRESERVE_ORIGINAL} → 原帖复现</li>
+     *   <li>{@code REWRITE_WITH_MEDIA} → AI 改写+媒体 (Story 9.1 新增)</li>
+     *   <li>其余 (含 default {@code REWRITE} 与 legacy null) → AI 改写 (既有行为零回退)</li>
+     * </ul>
+     */
+    private static String modeLabel(ContentGenerationMode mode) {
+        if (mode == ContentGenerationMode.PRESERVE_ORIGINAL) {
+            return "原帖复现";
+        }
+        if (mode == ContentGenerationMode.REWRITE_WITH_MEDIA) {
+            return "AI 改写+媒体";
+        }
+        return "AI 改写";
     }
 
     /**

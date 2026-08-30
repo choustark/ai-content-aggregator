@@ -54,15 +54,69 @@ class ContentGenerationModeResolverTest {
     }
 
     @Test
-    void should_resolve_preserve_original_when_feature_enabled_and_tweet_url_hits_target() {
+    void should_resolve_configured_default_mode_when_feature_enabled_and_tweet_url_hits_target() {
+        // Story 9.1 AC2: target 命中不再硬返回 PRESERVE_ORIGINAL, 改为返回配置的 default-mode;
+        // 显式 default-mode=PRESERVE_ORIGINAL 配置必须零回归。
         contextRunner
                 .withPropertyValues(
                         "wechat.mp.original-post.enabled=true",
+                        "wechat.mp.original-post.default-mode=PRESERVE_ORIGINAL",
                         "twitter.target.enabled=true",
                         "twitter.target.urls[0]=https://x.com/OpenAI/status/123")
                 .run(ctx -> assertThat(
                         resolver(ctx).resolve(tweet("https://x.com/OpenAI/status/123")))
                         .isEqualTo(ContentGenerationMode.PRESERVE_ORIGINAL));
+    }
+
+    @Test
+    void should_resolve_rewrite_with_media_when_target_hit_and_default_mode_configured() {
+        // Story 9.1 AC2/AC11: default-mode 支持 REWRITE_WITH_MEDIA 且 target 命中生效。
+        contextRunner
+                .withPropertyValues(
+                        "wechat.mp.original-post.enabled=true",
+                        "wechat.mp.original-post.default-mode=REWRITE_WITH_MEDIA",
+                        "twitter.target.enabled=true",
+                        "twitter.target.urls[0]=https://x.com/OpenAI/status/123")
+                .run(ctx -> assertThat(
+                        resolver(ctx).resolve(tweet("https://x.com/OpenAI/status/123")))
+                        .isEqualTo(ContentGenerationMode.REWRITE_WITH_MEDIA));
+    }
+
+    @Test
+    void should_resolve_rewrite_with_media_by_default_mode_without_target_signal() {
+        // Story 9.1 AC2/AC11: 无 target urls 时 default-mode=REWRITE_WITH_MEDIA 全局生效。
+        contextRunner
+                .withPropertyValues(
+                        "wechat.mp.original-post.enabled=true",
+                        "wechat.mp.original-post.default-mode=REWRITE_WITH_MEDIA")
+                .run(ctx -> assertThat(
+                        resolver(ctx).resolve(tweet("https://x.com/OpenAI/status/123")))
+                        .isEqualTo(ContentGenerationMode.REWRITE_WITH_MEDIA));
+    }
+
+    @Test
+    void should_remain_rewrite_when_target_misses_and_default_mode_rewrite_with_media() {
+        // Story 9.1 AC2: target 未命中仍返回 REWRITE, 不允许全量账号内容误入媒体链路 (AD-6)。
+        contextRunner
+                .withPropertyValues(
+                        "wechat.mp.original-post.enabled=true",
+                        "wechat.mp.original-post.default-mode=REWRITE_WITH_MEDIA",
+                        "twitter.target.enabled=true",
+                        "twitter.target.urls[0]=https://x.com/OpenAI/status/123")
+                .run(ctx -> assertThat(
+                        resolver(ctx).resolve(tweet("https://x.com/OtherUser/status/456")))
+                        .isEqualTo(ContentGenerationMode.REWRITE));
+    }
+
+    @Test
+    void should_force_rewrite_when_disabled_even_if_default_mode_rewrite_with_media() {
+        // Story 9.1 AC2: enabled 是唯一总开关, 关闭时 default-mode=REWRITE_WITH_MEDIA 不得旁路。
+        contextRunner
+                .withPropertyValues(
+                        "wechat.mp.original-post.enabled=false",
+                        "wechat.mp.original-post.default-mode=REWRITE_WITH_MEDIA")
+                .run(ctx -> assertThat(resolver(ctx).resolve(tweet("https://x.com/OpenAI/status/123")))
+                        .isEqualTo(ContentGenerationMode.REWRITE));
     }
 
     @Test
@@ -81,9 +135,11 @@ class ContentGenerationModeResolverTest {
     @Test
     void should_match_target_url_after_trim_and_trailing_slash_normalization() {
         // D-G: 配置 url 带末尾斜杠 + tweet url 带首尾空白 → 归一化后命中
+        // (Story 9.1: 显式配置 default-mode 使命中结果可断言)
         contextRunner
                 .withPropertyValues(
                         "wechat.mp.original-post.enabled=true",
+                        "wechat.mp.original-post.default-mode=PRESERVE_ORIGINAL",
                         "twitter.target.enabled=true",
                         "twitter.target.urls[0]=https://x.com/OpenAI/status/123/")
                 .run(ctx -> assertThat(resolver(ctx).resolve(

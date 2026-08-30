@@ -35,12 +35,15 @@ public class Article {
     private String title;
 
     /**
-     * 正文(双模式语义, Story 8.6 D-A):
+     * 正文(三模式语义, Story 8.6 D-A + Story 9.1 扩展):
      * <ul>
      *   <li>{@code generationMode=REWRITE} — Markdown 格式 (ContentRewriter 产出)</li>
      *   <li>{@code generationMode=PRESERVE_ORIGINAL} — 已转义的安全 HTML
      *       (OriginalPostRenderer 产出, 含 footer; 发布侧 ArticleToWxArticleConverter
      *       按本字段分流, 跳过 commonmark 二次渲染)</li>
+     *   <li>{@code generationMode=REWRITE_WITH_MEDIA} — Markdown 格式:
+     *       LLM 改写正文 + MarkdownMediaInserter 追加的媒体 Markdown image syntax
+     *       (URL 仅来自 sidecar wechatUrl; Story 9.1 AD-3/AD-12)</li>
      * </ul>
      */
     private String content;
@@ -72,17 +75,19 @@ public class Article {
     private String originalUrl;
 
     /**
-     * 内容生成模式 (Story 8.6 D-A).
+     * 内容生成模式 (Story 8.6 D-A + Story 9.1 AD-1 扩展).
      *
-     * <p>{@code REWRITE} = AI 改写 (默认, content 为 Markdown);
-     * {@code PRESERVE_ORIGINAL} = 原帖复现 (content 为已转义安全 HTML, renderer 产出)。
+     * <p>{@code REWRITE} = AI 改写 (默认, content 为 Markdown, 无媒体副作用);
+     * {@code PRESERVE_ORIGINAL} = 原帖复现 (content 为已转义安全 HTML, renderer 产出);
+     * {@code REWRITE_WITH_MEDIA} = AI 改写 + 原帖 PHOTO 媒体嵌入 (content 为
+     * LLM Markdown 正文 + 媒体 Markdown, aiGenerated 恒为 {@code true})。
      *
      * <p><b>批量队列模式感知根因:</b> PublishingModeDecider → Redis JSON 队列 →
      * BatchPublishingScheduler → WeChatPublisher 反序列化后只剩 Article (无 Tweet/模式上下文),
      * 不加字段则批量路径永远无法感知生成模式。
      *
      * <p><b>旧 JSON 兼容:</b> 历史 Redis Article JSON 无本字段 → Jackson 走 noargs 构造 +
-     * setter, field initializer 生效 → REWRITE, 向后兼容。
+     * setter, field initializer 生效 → REWRITE, 向后兼容 (Story 9.1 AC1 保持)。
      * {@code @Builder.Default} + field initializer 双路径保证: 无论 {@code new Article()}
      * 还是 {@code Article.builder().build()}, 默认均为 REWRITE。
      */
@@ -90,13 +95,14 @@ public class Article {
     private ContentGenerationMode generationMode = ContentGenerationMode.REWRITE;
 
     /**
-     * 媒体审计 Markdown 表 (Story 8.6 D-E, nullable).
+     * 媒体审计 Markdown 表 (Story 8.6 D-E + Story 9.1 扩展, nullable).
      *
-     * <p>REWRITE 模式恒为 {@code null}; PRESERVE_ORIGINAL 模式由
-     * {@code PreserveOriginalArticleGenerator} 从 media.json sidecar 权威状态生成
+     * <p>REWRITE 模式恒为 {@code null}; PRESERVE_ORIGINAL 与 REWRITE_WITH_MEDIA 模式由
+     * 各自 generator ({@code PreserveOriginalArticleGenerator} /
+     * {@code MediaAwareRewriteArticleGenerator}) 从 media.json sidecar 权威状态生成
      * (每媒体: 类型/uploadStatus/publishability/wechatUrl/相对路径/failureReason 截断),
-     * MarkdownArchiver 归档块 verbatim 插入。脱敏边界: 不含 access token/AppSecret/
-     * 完整响应体/本地绝对路径。
+     * MarkdownArchiver 归档块 verbatim 插入, 不进入微信草稿正文 (Story 9.1 AD-12)。
+     * 脱敏边界: 不含 access token/AppSecret/完整响应体/本地绝对路径。
      */
     private String mediaAuditMarkdown;
 }

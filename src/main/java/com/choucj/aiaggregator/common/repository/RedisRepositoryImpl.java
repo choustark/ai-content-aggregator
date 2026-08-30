@@ -80,11 +80,17 @@ public class RedisRepositoryImpl implements RedisRepository {
     private final RedisTemplate<String, Object> objectRedisTemplate;
     private final ObjectMapper objectMapper;
 
-    private static final DefaultRedisScript<Number> INCREMENT_WITH_TTL_SCRIPT = new DefaultRedisScript<>("""
+    /**
+     * INCRBY+PEXPIRE 原子脚本. resultType 必须为 {@code Long} (ReturnType.INTEGER):
+     * EVAL 整数回复由 Lettuce 直接回传 Long, 不经 valueSerializer 反序列化 —
+     * 若用 Number/String 类型, stringRedisTemplate 会把 bulk reply 反序列化为 String,
+     * 触发 incrementBy 的 "返回类型异常" NonRetryable (2026-08-30 真实环境缺陷修复).
+     */
+    private static final DefaultRedisScript<Long> INCREMENT_WITH_TTL_SCRIPT = new DefaultRedisScript<>("""
             local total = redis.call('INCRBY', KEYS[1], ARGV[1])
             redis.call('PEXPIRE', KEYS[1], ARGV[2])
             return total
-            """, Number.class);
+            """, Long.class);
 
     @Override
     public void set(String key, String value) {
@@ -129,18 +135,15 @@ public class RedisRepositoryImpl implements RedisRepository {
 
     @Override
     public long incrementBy(String key, long delta, Duration ttl) {
-        Object result = stringRedisTemplate.execute(
-                INCREMENT_WITH_TTL_SCRIPT, List.of(key), delta, ttl.toMillis());
+        // args 必须传 String: StringRedisTemplate 的 valueSerializer 是 StringRedisSerializer,
+        // 其 serialize(Object) 内部强转 (String) — 传 Long 每次调用必抛 ClassCastException
+        // (2026-08-30 真实环境缺陷修复, TokenUsageTracker 成本累计因此从未成功).
+        Long result = stringRedisTemplate.execute(
+                INCREMENT_WITH_TTL_SCRIPT, List.of(key), String.valueOf(delta), String.valueOf(ttl.toMillis()));
         if (result == null) {
             return delta;
         }
-        if (!(result instanceof Number)) {
-            throw new NonRetryableException(ErrorCode.REDIS_DATA_ERROR,
-                    String.format("incrementBy 返回类型异常: key=%s, actualType=%s, 无法转换为 long",
-                            key, result.getClass().getName()));
-        }
-        Number total = (Number) result;
-        return total.longValue();
+        return result;
     }
 
     @Override
