@@ -174,8 +174,13 @@ class FxTwitterClientTest {
         assertThat(result.getMedia().get(0).getId()).isEqualTo("123");
     }
 
+    /**
+     * 终局清理 (2026-08-30): client 不再写派生 note "源文本为空或 provider 未返回文本" —
+     * 它只是调用时文本快照, 跨源合并后会与最终文本矛盾 (TweetPublishabilityGate 据此误判
+     * 推文级 BLOCKED 的生产故障根因)。文本缺失判定权归 gate T1 (三文本字段全 blank) 独占。
+     */
     @Test
-    void shouldSetSourceAccessNoteWhenFxTwitterTextIsEmpty() {
+    void shouldNotSetSourceAccessNoteWhenFxTwitterTextIsEmpty() {
         String body = """
                 {"tweet": {"text": ""}}
                 """;
@@ -184,7 +189,7 @@ class FxTwitterClientTest {
         Tweet result = client.fetchTweetDetail("12345");
 
         assertThat(result.getContent()).isNull();
-        assertThat(result.getSourceAccessNote()).contains("源文本为空");
+        assertThat(result.getSourceAccessNote()).isNull();
     }
 
     @Test

@@ -27,7 +27,7 @@ import java.util.regex.Pattern;
  *
  * <p>编排端到端 Pipeline, 将 Epic 2 各子模块串联为完整自动化流程:
  * <pre>
- *   ContentScheduler (cron 每小时)
+ *   ContentScheduler (cron 默认每天 22:00)
  *     ↓ poll("twitter:run") → processTask(taskId) → startsWith("twitter:")
  *     ↓ twitterProcessor.process()
  *

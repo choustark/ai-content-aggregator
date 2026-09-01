@@ -138,8 +138,12 @@ public class MediaAwareRewriteArticleGenerator implements MediaAwareRewriteGener
                     tweetPublishabilityGate, "TweetPublishabilityGate", "twitter.media.enabled", tweetId);
             var result = callExternal(tweetId, "publishabilityGate", () -> gate.evaluate(tweet));
             if (result != null && result.getTweetStatus() == PublishabilityStatus.BLOCKED) {
+                // tweetReason 必须进异常: 区分 T1 (源文本不可用) / T2 (结构化访问受限),
+                // 否则 "媒体全 PUBLISHABLE 但推文 BLOCKED" 的矛盾日志无法定位 (2026-08-30 排障教训)
+                String tweetReason = result.getTweetReason();
                 throw new TweetPublishabilityBlockedException("媒体感知改写生成失败: tweetId=" + tweetId
-                        + ", reason=tweet publishability BLOCKED (gate 评估阻止发布)");
+                        + ", reason=tweet publishability BLOCKED (gate 评估阻止发布)"
+                        + (tweetReason != null ? ", tweetReason=" + tweetReason : ""));
             }
         }
 

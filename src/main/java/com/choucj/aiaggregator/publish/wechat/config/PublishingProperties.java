@@ -20,7 +20,8 @@ import org.springframework.validation.annotation.Validated;
  *     enabled: true
  *     publishing:
  *       realtime-threshold: 8
- *       batch-cron: "0 0 20 * * ?"
+ *       batch-cron: "0 0 8 * * ?"
+ *       daily-publish-hour: 8
  *       batch-enabled: true
  *       queue-ttl-days: 7
  * }</pre>
@@ -35,10 +36,10 @@ import org.springframework.validation.annotation.Validated;
  * <ul>
  *   <li>{@link #realtimeThreshold} — Article.innovationScore {@code >=} 此阈值时实时发布 (Story 3.4 AC-2),
  *       严格 {@code >=} 与 epics.md "重要内容 (innovationScore {@code >=} 8)" 文案对齐 (D3 决策).</li>
- *   <li>{@link #batchCron} — 默认 {@code 0 0 20 * * ?} 每晚 20:00 触发批量发布 (Story 3.4 AC-5).</li>
+ *   <li>{@link #batchCron} — 默认 {@code 0 0 8 * * ?} 每天早上 8:00 触发批量发布.</li>
  *   <li>{@link #batchEnabled} — 默认 {@code true} ({@code matchIfMissing=true}), 关闭时低于阈值的
  *       Article 由 PublishingModeDecider 降级走实时路径, 避免写入无人消费的队列.</li>
- *   <li>{@link #queueTtlDays} — Redis 队列 TTL, 默认 7 天 (一个工作周 + 周末给运维充足补跑时间).</li>
+ *   <li>{@link #queueTtlDays} — 旧 Redis 批量队列兼容项, 新发布池不再依赖它.</li>
  * </ul>
  *
  * <p>引用源: Story 3.4 (本 story, 配置层) / Story 2.5 (ArchiverProperties 模式参考) /
@@ -60,14 +61,20 @@ public class PublishingProperties {
     private int realtimeThreshold = 8;
 
     /**
-     * 批量发布 cron 表达式 — BatchPublishingScheduler 触发时机 (Story 3.4 AC-5).
+     * 批量发布 cron 表达式 — BatchPublishingScheduler 触发时机.
      *
-     * <p>默认 {@code 0 0 20 * * ?} 每晚 20:00 (Spring CronExpression 格式: 秒 分 时 日 月 周).
-     * 示例: {@code 0 0 20 * * ?} 每天 20:00 / {@code 0 0 22 * * ?} 每天 22:00 / {@code 0 0 8,20 * * ?} 每天 8:00+20:00.
+     * <p>默认 {@code 0 0 8 * * ?} 每天早上 8:00 (Spring CronExpression 格式: 秒 分 时 日 月 周).
      * 非法格式由 Spring {@code CronExpression.parse} 在 @Scheduled 解析时抛 IllegalArgumentException.
      */
     @NotBlank(message = "wechat.mp.publishing.batch-cron 不能为空")
-    private String batchCron = "0 0 20 * * ?";
+    private String batchCron = "0 0 8 * * ?";
+
+    /**
+     * 每日计划发布小时 — 低于实时阈值的文章默认进入下一次该小时的发布窗口.
+     */
+    @Min(value = 0, message = "wechat.mp.publishing.daily-publish-hour 必须 >= 0")
+    @Max(value = 23, message = "wechat.mp.publishing.daily-publish-hour 必须 <= 23")
+    private int dailyPublishHour = 8;
 
     /**
      * 批量调度器总开关 — 关闭时 BatchPublishingScheduler Bean 不注册
@@ -79,10 +86,9 @@ public class PublishingProperties {
     private boolean batchEnabled = true;
 
     /**
-     * Redis 队列 TTL (天) — {@code publish:pending:{date}} 键过期时间 (Story 3.4 AC-7).
+     * 旧 Redis 队列 TTL 兼容项.
      *
-     * <p>默认 7 天: 太短 (1 天) 跨日残留立即丢失, 太长 (30 天) 积压无限增长, 7 天给运维充足补跑时间.
-     * 范围 [1, 365].
+     * <p>新发布池基于 {@code archive/articles/{articleId}.json} 扫描到期稿件, 不再依赖按日 Redis list.
      */
     @Min(value = 1, message = "wechat.mp.publishing.queue-ttl-days 必须 >= 1")
     @Max(value = 365, message = "wechat.mp.publishing.queue-ttl-days 必须 <= 365")

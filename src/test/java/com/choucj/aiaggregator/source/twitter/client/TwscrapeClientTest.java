@@ -121,8 +121,12 @@ class TwscrapeClientTest {
         assertThat(result.getMedia().get(1).getPreviewImageUrl()).isEqualTo("https://img.example/thumb.jpg");
     }
 
+    /**
+     * 终局清理 (2026-08-30): client 不再写派生 note (理由见 FxTwitterClientTest 同名注释) —
+     * 空文本推文由 gate T1 兜底, note 字段只留独立信号。
+     */
     @Test
-    void shouldParseNumericIdsAndSetSourceAccessNoteWhenTextIsEmpty() {
+    void shouldParseNumericIdsAndNotSetSourceAccessNoteWhenTextIsEmpty() {
         TwscrapeClient client = new TwscrapeClient(newProperties(true), objectMapper);
         String stdout = """
                 {
@@ -141,7 +145,7 @@ class TwscrapeClientTest {
         Tweet result = client.parseResponse(stdout, "123");
 
         assertThat(result.getContent()).isNull();
-        assertThat(result.getSourceAccessNote()).contains("源文本为空");
+        assertThat(result.getSourceAccessNote()).isNull();
         assertThat(result.getQuotedTweetUrl()).isEqualTo("https://x.com/i/status/987");
         assertThat(result.getImageUrls()).containsExactly("https://example.com/1.jpg");
         assertThat(result.getMedia()).hasSize(1);

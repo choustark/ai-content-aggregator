@@ -12,6 +12,9 @@ import com.choucj.aiaggregator.source.twitter.config.TwitterProperties;
 import com.choucj.aiaggregator.source.twitter.config.TwscrapeProperties;
 import com.choucj.aiaggregator.source.twitter.discovery.TwitterDiscoveryClient;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
+import com.choucj.aiaggregator.source.twitter.model.TweetAccessStatus;
+import com.choucj.aiaggregator.source.twitter.model.TweetContentType;
+import com.choucj.aiaggregator.source.twitter.model.TweetRestrictionReason;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import org.junit.jupiter.api.BeforeEach;
@@ -164,7 +167,10 @@ class TwitterSourceTest {
         assertThat(merged.getMentions()).containsExactly("@openai");
         assertThat(merged.getQuotedTweetUrl()).isEqualTo("https://x.com/i/status/987");
         assertThat(merged.getQuotedTweetText()).isEqualTo("quoted");
-        assertThat(merged.getSourceAccessNote()).isEqualTo("provider note");
+        assertThat(merged.getSourceAccessNote()).isNull();
+        assertThat(merged.getAccessStatus()).isEqualTo(TweetAccessStatus.RESTRICTED);
+        assertThat(merged.getRestrictionReason()).isEqualTo(TweetRestrictionReason.ACCESS_RESTRICTED);
+        assertThat(merged.getRestrictionDetail()).isEqualTo("provider note");
     }
 
     @Test
@@ -435,6 +441,90 @@ class TwitterSourceTest {
         assertThat(merged.getQuotedTweetUrl()).isEqualTo("https://x.com/i/status/444");
         assertThat(merged.getQuotedTweetText()).isEqualTo("partial quote");
         verify(redisRepository, never()).getObject(anyString(), eq(Tweet.class));
+    }
+
+    // ===================== 派生 sourceAccessNote 证伪修复 (2026-08-30 生产故障) =====================
+
+    /**
+     * 生产故障复现 (2026-08-30, tweetId=2058473664430129572): FxTwitter 返回空文本 (media 存在),
+     * 打上派生 note "源文本为空或 provider 未返回文本"; mergeTweet 中最终文本回退到 RSSHub partial,
+     * note 却被当作独立信号保留 — TweetPublishabilityGate 据此判推文级 BLOCKED (媒体全 PUBLISHABLE
+     * 的矛盾日志根因)。合并后文本非空时, 派生 note 已被证伪, 必须清除。
+     */
+    @Test
+    void shouldDropDerivedTextMissingNote_whenEnrichedTextBlankButMergedTextAvailable() {
+        Tweet partial = baseTweet("1", "summary-rsshub").toBuilder()
+                .content("rsshub content")
+                .build();
+        when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
+        when(redisRepository.getObject(eq(RedisKeys.tweet("1")), eq(Tweet.class))).thenReturn(null);
+        Tweet enriched = Tweet.builder()
+                .id("1")
+                .replyCount(5).retweetCount(10).likeCount(100)
+                .media(List.of(TweetMedia.builder()
+                        .type(TweetMediaType.PHOTO)
+                        .sourceUrl("https://img.example/1.jpg")
+                        .build()))
+                .sourceAccessNote(Tweet.SOURCE_TEXT_MISSING_NOTE)
+                .build();
+        when(fxTwitterClient.fetchTweetDetail("1")).thenReturn(enriched);
+
+        List<Tweet> result = source.fetch();
+
+        assertThat(result).hasSize(1);
+        Tweet merged = result.get(0);
+        assertThat(merged.getContent()).isEqualTo("rsshub content");
+        assertThat(merged.getSourceAccessNote())
+                .as("最终文本非空时, '源文本为空' 派生 note 已被证伪, 不得保留 (否则 gate 误判 BLOCKED)")
+                .isNull();
+    }
+
+    /**
+     * 反方向同类故障: discovery partial (如 Apify) 空文本打派生 note, FxTwitter 补全文本 —
+     * enriched note 为 null 时合并回退到 partial 的派生 note, 同样证伪, 必须清除。
+     */
+    @Test
+    void shouldDropDerivedTextMissingNote_whenPartialTextBlankButEnrichedTextAvailable() {
+        Tweet partial = baseTweet("1", "summary-rsshub").toBuilder()
+                .sourceAccessNote(Tweet.SOURCE_TEXT_MISSING_NOTE)
+                .build();
+        when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
+        when(redisRepository.getObject(eq(RedisKeys.tweet("1")), eq(Tweet.class))).thenReturn(null);
+        Tweet enriched = Tweet.builder()
+                .id("1").content("fx content").replyCount(5).retweetCount(10).likeCount(100)
+                .build();
+        when(fxTwitterClient.fetchTweetDetail("1")).thenReturn(enriched);
+
+        List<Tweet> result = source.fetch();
+
+        assertThat(result).hasSize(1);
+        Tweet merged = result.get(0);
+        assertThat(merged.getContent()).isEqualTo("fx content");
+        assertThat(merged.getSourceAccessNote()).isNull();
+    }
+
+    /**
+     * 历史 article note 只是类型标签，不是访问受限。合并时必须迁移为 contentType=ARTICLE，
+     * 同时清空旧 note，避免后续 gate/renderer 误判 BLOCKED。
+     */
+    @Test
+    void shouldMigrateLegacyArticleNoteToContentType_whenMergedTextAvailable() {
+        Tweet partial = baseTweet("1", "summary-rsshub").toBuilder()
+                .content("rsshub content")
+                .sourceAccessNote(Tweet.SOURCE_ARTICLE_TYPE_NOTE)
+                .build();
+        when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
+        when(redisRepository.getObject(eq(RedisKeys.tweet("1")), eq(Tweet.class))).thenReturn(null);
+        Tweet enriched = Tweet.builder()
+                .id("1").content("fx content").replyCount(5).retweetCount(10).likeCount(100)
+                .build();
+        when(fxTwitterClient.fetchTweetDetail("1")).thenReturn(enriched);
+
+        List<Tweet> result = source.fetch();
+
+        assertThat(result).hasSize(1);
+        assertThat(result.get(0).getContentType()).isEqualTo(TweetContentType.ARTICLE);
+        assertThat(result.get(0).getSourceAccessNote()).isNull();
     }
 
     private Tweet baseTweet(String id, String summary) {

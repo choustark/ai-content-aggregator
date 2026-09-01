@@ -166,7 +166,6 @@ public class FxTwitterClient {
                 .mentions(mentions)
                 .quotedTweetUrl(parseQuotedTweetUrl(quote))
                 .quotedTweetText(quote == null ? null : firstText(quote, "text", "full_text", "fullText"))
-                .sourceAccessNote(firstNonBlank(content, rawText) == null ? "源文本为空或 provider 未返回文本" : null)
                 .build();
         log.debug("FxTwitter 补全成功: tweetId={}, replies={}, retweets={}, likes={}, images={}",
                 tweetId, replyCount, retweetCount, likeCount, imageUrls.size());

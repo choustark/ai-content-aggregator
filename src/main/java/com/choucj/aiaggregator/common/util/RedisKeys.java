@@ -196,19 +196,17 @@ public final class RedisKeys {
     }
 
     /**
-     * Story 3.4: 批量发布待办队列键 (Redis List).
+     * Story 3.4 legacy: 旧批量发布待办队列键 (Redis List).
      *
      * <p>键格式: {@code "publish:pending:{yyyy-MM-dd}"} (e.g., {@code "publish:pending:2026-07-06"}).
-     * 由 {@link com.choucj.aiaggregator.publish.wechat.PublishingModeDecider} 入队 (rPush Article JSON),
-     * 由 {@link com.choucj.aiaggregator.publish.wechat.BatchPublishingScheduler} 在每晚 20:00 cron 触发消费
-     * (lPop + 反序列化 + WeChatPublisher.publish).
+     * 历史版本由 PublishingModeDecider 入队, BatchPublishingScheduler 消费; 新发布池已迁移到本地
+     * {@code archive/articles/{articleId}.json} 快照扫描.
      *
      * <p><b>键命名空间分离 (与 Story 3.5 协同 M1 风险):</b>
      * 本键是 List ({@code publish:pending:{date}}), Story 3.5 ArticleStatus 用 String
      * ({@code article:{id}:status}) — 不同 namespace 不冲突.
      *
-     * <p>跨日场景: Article.createdAt 决定写入哪天的队列, BatchPublishingScheduler 在 20:00 cron 时只读
-     * {@code LocalDate.now()} 当日队列; 跨日残留因 TTL 7 天仍在 Redis, 但不自动补跑 (YAGNI, Story 5.x 范围).
+     * <p>保留本方法用于历史兼容与调试, 新代码不应再依赖按日队列决定发布时间.
      *
      * @param date 日期 (LocalDate, 不为 null; 由 Article.createdAt.toLocalDate() 或 LocalDate.now() 提供)
      * @return {@code "publish:pending:{date}"} 键字符串

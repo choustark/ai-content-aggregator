@@ -178,7 +178,6 @@ public class TwscrapeClient {
                 .mentions(extractMentions(root))
                 .quotedTweetUrl(parseQuotedTweetUrl(quote))
                 .quotedTweetText(quote == null ? null : firstText(quote, "text", "fullText", "full_text"))
-                .sourceAccessNote(content == null ? "源文本为空或 provider 未返回文本" : null)
                 .build();
         log.debug("twscrape 补全成功: tweetId={}, replies={}, retweets={}, likes={}, images={}",
                 tweetId, replyCount, retweetCount, likeCount, imageUrls.size());

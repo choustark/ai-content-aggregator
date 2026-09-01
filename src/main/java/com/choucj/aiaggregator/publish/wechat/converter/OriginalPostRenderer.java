@@ -41,7 +41,7 @@ import java.util.regex.Pattern;
  *   <li>AC5 VIDEO/GIF/UNKNOWN 按 8.2 决策表降级文案 + 原文链接</li>
  *   <li>AC6 PHOTO 无 wechatUrl 时人可读文案 + failureReason 摘要 (单行化 +
  *       truncateForLog 120cp + 转义；8.4 已脱敏，本渲染器不重复脱敏)</li>
- *   <li>AC7 推文级致命失败 (tweet null / id blank / sourceAccessNote 非空 /
+ *   <li>AC7 推文级致命失败 (tweet null / id blank / accessStatus 受限 /
  *       三源全 blank) 前置校验抛 NonRetryableException，镜像 7.5 gate T1 语义；
  *       其余单媒体问题一律降级 (AD-5)</li>
  *   <li>AC8 确定性 footer + {@link #toArticle} 组装</li>
@@ -115,7 +115,7 @@ public class OriginalPostRenderer {
      * <p>渲染管线顺序固定 (T2.3): 归一换行 → 选取文本源 → 段落/br 映射 → links 补遗 →
      * 引用块 → 媒体段 (按列表顺序逐项决策表) → footer。同输入必产出逐字节相同的 HTML (AC9)。
      *
-     * @param tweet         原帖 (null / id blank 或含非法字符 / sourceAccessNote 非空 /
+     * @param tweet         原帖 (null / id blank 或含非法字符 / accessStatus 受限 /
      *                      三源全 blank 抛 NonRetryableException, AC7; 非法字符校验与
      *                      toArticle 统一，防伪造 id 注入日志, CR Round 1 patch#1)
      * @param preparedMedia 已准备的媒体状态 (由调用方从 sidecar 权威状态合并)；null/空
@@ -240,7 +240,7 @@ public class OriginalPostRenderer {
             throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
                     "原帖渲染失败: tweetIdLength=" + tweetId.length() + ", reason=illegal tweet id characters");
         }
-        if (tweet.getSourceAccessNote() != null && !tweet.getSourceAccessNote().isBlank()) {
+        if (tweet.hasStructuredAccessBlock()) {
             throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
                     "原帖渲染失败: tweetId=" + tweetId + ", reason=source access blocked");
         }

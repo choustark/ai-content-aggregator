@@ -30,7 +30,7 @@ import java.util.regex.Pattern;
  *
  * <p><b>核心职责 (AC1-AC10):</b>
  * <ul>
- *   <li>推文级判定: 基于 Tweet 文本字段 (content/rawText/formattedText) + sourceAccessNote 聚合状态</li>
+ *   <li>推文级判定: 基于 Tweet 文本字段 (content/rawText/formattedText) + accessStatus 聚合状态</li>
  *   <li>媒体级判定: 基于决策表（M1-M9 优先级）判断每个媒体项的可发布性</li>
  *   <li>sidecar 回写: 将媒体级判定结果回写 media.json publishability 字段（软失败，不阻塞返回）</li>
  *   <li>输出结构化决策: 返回 {@link PublishabilityResult} 供调用方（Epic 8 Pipeline）消费</li>
@@ -42,7 +42,7 @@ import java.util.regex.Pattern;
  *       不调用 MediaDownloadClient / 不绕过任务队列/异常体系/人工审核语义</li>
  *   <li><b>副作用受控 (AC5)</b> — 唯一副作用是 sidecar publishability 回写（经 TweetMediaArchiveWriter.updateMedia），
  *       回写失败软失败不阻塞 evaluate 返回</li>
- *   <li><b>推文级 BLOCKED 边界 (AC3)</b> — 只有源文本不可用（文本三字段全 blank）或 sourceAccessNote 非空触发整条 BLOCKED；
+ *   <li><b>推文级 BLOCKED 边界 (AC3)</b> — 只有源文本不可用（文本三字段全 blank）或访问状态受限触发整条 BLOCKED；
  *       媒体级合规受限（availability 非 Available）按单媒体降级（该媒体 BLOCKED + 推文 DEGRADED）</li>
  *   <li><b>聚合优先级 (AC3)</b> — BLOCKED > DEGRADED > UNKNOWN > PUBLISHABLE</li>
  *   <li><b>双源输入容错 (AC7)</b> — 媒体状态输入经 MediaRuntimeRecoveryService.getMediaStates（Redis 优先 + sidecar fallback）</li>
@@ -148,15 +148,15 @@ public class TweetPublishabilityGate {
     /**
      * 推文级 BLOCKED 判定（T2.3）.
      *
-     * <p>源文本不可用（content/rawText/formattedText 全 blank）或 sourceAccessNote 非空 → BLOCKED.
+     * <p>源文本不可用（content/rawText/formattedText 全 blank）或访问状态受限 → BLOCKED.
      */
     private boolean isTweetBlocked(Tweet tweet) {
         if (tweet == null) {
             return false;
         }
 
-        // T2: sourceAccessNote 非空 → BLOCKED
-        if (StringUtils.hasText(tweet.getSourceAccessNote())) {
+        // T2: 结构化访问受限 → BLOCKED
+        if (tweet.hasStructuredAccessBlock()) {
             return true;
         }
 
@@ -174,7 +174,7 @@ public class TweetPublishabilityGate {
      * <p>优先级: BLOCKED > DEGRADED > UNKNOWN > PUBLISHABLE（AC3）.
      */
     private PublishabilityStatus aggregateTweetStatus(Tweet tweet, List<MediaPublishabilityDecision> mediaDecisions) {
-        // 优先级 1: 推文级 BLOCKED（文本不可用或 sourceAccessNote 非空）
+        // 优先级 1: 推文级 BLOCKED（文本不可用或访问状态受限）
         if (isTweetBlocked(tweet)) {
             return PublishabilityStatus.BLOCKED;
         }
@@ -215,9 +215,9 @@ public class TweetPublishabilityGate {
         }
 
         if (isTweetBlocked(tweet)) {
-            // T1/T2: 源文本不可用或 sourceAccessNote 非空
-            if (StringUtils.hasText(tweet.getSourceAccessNote())) {
-                return sanitizeAndTruncateReason("源访问受限: " + tweet.getSourceAccessNote() + "，需人工确认");
+            // T1/T2: 源文本不可用或访问状态受限
+            if (tweet.hasStructuredAccessBlock()) {
+                return sanitizeAndTruncateReason("源访问受限: " + accessBlockReason(tweet) + "，需人工确认");
             }
             return "源文本不可用（provider 未返回文本），需人工确认";
         }
@@ -237,6 +237,17 @@ public class TweetPublishabilityGate {
         }
 
         return null;
+    }
+
+    private String accessBlockReason(Tweet tweet) {
+        if (tweet == null) {
+            return "未知原因";
+        }
+        if (tweet.getAccessStatus() == null) {
+            return "访问状态未知";
+        }
+        String structuredReason = tweet.structuredAccessBlockReason();
+        return structuredReason != null ? structuredReason : "访问状态未知";
     }
 
     /**

@@ -12,6 +12,9 @@ import com.choucj.aiaggregator.source.twitter.config.TwitterProperties;
 import com.choucj.aiaggregator.source.twitter.config.TwscrapeProperties;
 import com.choucj.aiaggregator.source.twitter.discovery.TwitterDiscoveryClient;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
+import com.choucj.aiaggregator.source.twitter.model.TweetAccessStatus;
+import com.choucj.aiaggregator.source.twitter.model.TweetContentType;
+import com.choucj.aiaggregator.source.twitter.model.TweetRestrictionReason;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
@@ -171,21 +174,67 @@ public class TwitterSource implements DataSource<Tweet> {
      * 避免缓存或降级 provider 返回局部字段时擦掉 discovery 已有信息.
      */
     private Tweet mergeTweet(Tweet partial, Tweet enrichedTweet) {
-        return partial.toBuilder()
-                .content(firstText(enrichedTweet.getContent(), partial.getContent()))
-                .rawText(firstText(enrichedTweet.getRawText(), partial.getRawText()))
-                .formattedText(firstText(enrichedTweet.getFormattedText(), partial.getFormattedText()))
-                .replyCount(enrichedTweet.getReplyCount())
-                .retweetCount(enrichedTweet.getRetweetCount())
-                .likeCount(enrichedTweet.getLikeCount())
-                .imageUrls(firstList(enrichedTweet.getImageUrls(), partial.getImageUrls()))
-                .media(firstList(enrichedTweet.getMedia(), partial.getMedia()))
-                .links(firstList(enrichedTweet.getLinks(), partial.getLinks()))
-                .mentions(firstList(enrichedTweet.getMentions(), partial.getMentions()))
-                .quotedTweetUrl(firstText(enrichedTweet.getQuotedTweetUrl(), partial.getQuotedTweetUrl()))
-                .quotedTweetText(firstText(enrichedTweet.getQuotedTweetText(), partial.getQuotedTweetText()))
-                .sourceAccessNote(firstText(enrichedTweet.getSourceAccessNote(), partial.getSourceAccessNote()))
+        Tweet normalizedPartial = sanitizeLegacySignals(partial);
+        Tweet normalizedEnriched = sanitizeLegacySignals(enrichedTweet);
+
+        Tweet merged = normalizedPartial.toBuilder()
+                .content(firstText(normalizedEnriched.getContent(), normalizedPartial.getContent()))
+                .rawText(firstText(normalizedEnriched.getRawText(), normalizedPartial.getRawText()))
+                .formattedText(firstText(normalizedEnriched.getFormattedText(), normalizedPartial.getFormattedText()))
+                .replyCount(normalizedEnriched.getReplyCount())
+                .retweetCount(normalizedEnriched.getRetweetCount())
+                .likeCount(normalizedEnriched.getLikeCount())
+                .imageUrls(firstList(normalizedEnriched.getImageUrls(), normalizedPartial.getImageUrls()))
+                .media(firstList(normalizedEnriched.getMedia(), normalizedPartial.getMedia()))
+                .links(firstList(normalizedEnriched.getLinks(), normalizedPartial.getLinks()))
+                .mentions(firstList(normalizedEnriched.getMentions(), normalizedPartial.getMentions()))
+                .quotedTweetUrl(firstText(normalizedEnriched.getQuotedTweetUrl(), normalizedPartial.getQuotedTweetUrl()))
+                .quotedTweetText(firstText(normalizedEnriched.getQuotedTweetText(), normalizedPartial.getQuotedTweetText()))
+                .contentType(firstNonUnknownContentType(normalizedEnriched.getContentType(), normalizedPartial.getContentType()))
+                .accessStatus(firstNonUnknownAccessStatus(normalizedEnriched.getAccessStatus(), normalizedPartial.getAccessStatus()))
+                .restrictionReason(firstNonNoneRestrictionReason(
+                        normalizedEnriched.getRestrictionReason(), normalizedPartial.getRestrictionReason()))
+                .restrictionDetail(firstText(normalizedEnriched.getRestrictionDetail(), normalizedPartial.getRestrictionDetail()))
+                .sourceAccessNote(firstText(normalizedEnriched.getSourceAccessNote(), normalizedPartial.getSourceAccessNote()))
                 .build();
+
+        // 统一从最终聚合态做一次兼容字段归一化，避免历史毒数据在“部分字段 + 补全字段”重组后回流。
+        return sanitizeLegacySignals(merged);
+    }
+
+    private TweetContentType firstNonUnknownContentType(TweetContentType preferred, TweetContentType fallback) {
+        if (preferred != null && preferred != TweetContentType.UNKNOWN) {
+            return preferred;
+        }
+        if (fallback != null) {
+            return fallback;
+        }
+        return TweetContentType.UNKNOWN;
+    }
+
+    private TweetAccessStatus firstNonUnknownAccessStatus(TweetAccessStatus preferred, TweetAccessStatus fallback) {
+        if (preferred != null && preferred != TweetAccessStatus.UNKNOWN) {
+            return preferred;
+        }
+        if (fallback != null) {
+            return fallback;
+        }
+        return TweetAccessStatus.ACCESSIBLE;
+    }
+
+    private TweetRestrictionReason firstNonNoneRestrictionReason(TweetRestrictionReason preferred,
+                                                                 TweetRestrictionReason fallback) {
+        if (preferred != null && preferred != TweetRestrictionReason.NONE) {
+            return preferred;
+        }
+        if (fallback != null) {
+            return fallback;
+        }
+        return TweetRestrictionReason.NONE;
+    }
+
+    private boolean hasText(String s) {
+        return s != null && !s.isBlank();
     }
 
     private String firstText(String preferred, String fallback) {
@@ -198,7 +247,7 @@ public class TwitterSource implements DataSource<Tweet> {
 
     private Tweet readCacheOrNull(String key) {
         try {
-            return redisRepository.getObject(key, Tweet.class);
+            return sanitizeLegacySignals(redisRepository.getObject(key, Tweet.class));
         } catch (RetryableException | NonRetryableException e) {
             log.warn("Redis 缓存读取失败, 视为未命中: key={}, reason={}", key, e.getMessage());
             return null;
@@ -211,5 +260,99 @@ public class TwitterSource implements DataSource<Tweet> {
         } catch (RetryableException | NonRetryableException e) {
             log.warn("Redis 缓存写入失败, 忽略(下次重新补全): key={}, reason={}", key, e.getMessage());
         }
+    }
+
+    private Tweet sanitizeLegacySignals(Tweet tweet) {
+        if (tweet == null) {
+            return null;
+        }
+        String sourceAccessNote = tweet.getSourceAccessNote();
+        TweetContentType contentType = tweet.getContentType() == null ? TweetContentType.UNKNOWN : tweet.getContentType();
+        TweetAccessStatus accessStatus = tweet.getAccessStatus() == null ? TweetAccessStatus.ACCESSIBLE : tweet.getAccessStatus();
+        TweetRestrictionReason restrictionReason = tweet.getRestrictionReason() == null
+                ? TweetRestrictionReason.NONE : tweet.getRestrictionReason();
+        String restrictionDetail = tweet.getRestrictionDetail();
+        boolean changed = false;
+
+        if (Tweet.SOURCE_ARTICLE_TYPE_NOTE.equals(sourceAccessNote)) {
+            sourceAccessNote = null;
+            changed = true;
+            if (contentType == TweetContentType.UNKNOWN) {
+                contentType = TweetContentType.ARTICLE;
+            }
+        }
+
+        if (Tweet.SOURCE_TEXT_MISSING_NOTE.equals(sourceAccessNote)
+                && (hasText(tweet.getContent()) || hasText(tweet.getRawText()) || hasText(tweet.getFormattedText()))) {
+            sourceAccessNote = null;
+            changed = true;
+        }
+
+        if (tweet.getAccessStatus() == null) {
+            changed = true;
+        }
+
+        if (sourceAccessNote != null && !sourceAccessNote.isBlank() && !Tweet.SOURCE_TEXT_MISSING_NOTE.equals(sourceAccessNote)) {
+            sourceAccessNote = null;
+            changed = true;
+            if (accessStatus == TweetAccessStatus.ACCESSIBLE || accessStatus == TweetAccessStatus.UNKNOWN) {
+                accessStatus = inferAccessStatusFromLegacyReason(tweet.getSourceAccessNote());
+            }
+            if (restrictionReason == TweetRestrictionReason.NONE) {
+                restrictionReason = inferRestrictionReason(accessStatus);
+            }
+            if (restrictionDetail == null || restrictionDetail.isBlank()) {
+                restrictionDetail = tweet.getSourceAccessNote();
+            }
+        }
+
+        if (!changed
+                && contentType == tweet.getContentType()
+                && accessStatus == tweet.getAccessStatus()
+                && restrictionReason == tweet.getRestrictionReason()
+                && equalsNullable(restrictionDetail, tweet.getRestrictionDetail())
+                && equalsNullable(sourceAccessNote, tweet.getSourceAccessNote())) {
+            return tweet;
+        }
+
+        return tweet.toBuilder()
+                .contentType(contentType)
+                .accessStatus(accessStatus)
+                .restrictionReason(restrictionReason)
+                .restrictionDetail(restrictionDetail)
+                .sourceAccessNote(sourceAccessNote)
+                .build();
+    }
+
+    private TweetAccessStatus inferAccessStatusFromLegacyReason(String reason) {
+        if (reason == null || reason.isBlank()) {
+            return TweetAccessStatus.UNKNOWN;
+        }
+        if (reason.contains("删除")) {
+            return TweetAccessStatus.DELETED;
+        }
+        if (reason.contains("限制")) {
+            return TweetAccessStatus.WITHHELD;
+        }
+        return TweetAccessStatus.RESTRICTED;
+    }
+
+    private TweetRestrictionReason inferRestrictionReason(TweetAccessStatus accessStatus) {
+        if (accessStatus == null) {
+            return TweetRestrictionReason.LEGACY_OTHER;
+        }
+        return switch (accessStatus) {
+            case RESTRICTED -> TweetRestrictionReason.ACCESS_RESTRICTED;
+            case DELETED -> TweetRestrictionReason.DELETED_BY_AUTHOR;
+            case WITHHELD -> TweetRestrictionReason.WITHHELD_BY_PLATFORM;
+            case UNKNOWN, ACCESSIBLE -> TweetRestrictionReason.LEGACY_OTHER;
+        };
+    }
+
+    private boolean equalsNullable(String left, String right) {
+        if (left == null) {
+            return right == null;
+        }
+        return left.equals(right);
     }
 }

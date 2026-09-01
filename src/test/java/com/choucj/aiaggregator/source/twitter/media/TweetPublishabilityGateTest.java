@@ -11,6 +11,8 @@ import com.choucj.aiaggregator.source.twitter.media.model.PublishabilityResult;
 import com.choucj.aiaggregator.source.twitter.model.MediaDownloadStatus;
 import com.choucj.aiaggregator.source.twitter.model.PublishabilityStatus;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
+import com.choucj.aiaggregator.source.twitter.model.TweetAccessStatus;
+import com.choucj.aiaggregator.source.twitter.model.TweetContentType;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -38,7 +40,7 @@ import static org.mockito.Mockito.*;
  *
  * <p><b>决策表覆盖（T5.1）:</b> AC2 每行 ≥1 用例（M1-M9 合规/下载/跳过/失败/待处理/不在快照）.
  *
- * <p><b>推文级 BLOCKED（T5.2）:</b> 文本三字段全空 / sourceAccessNote 非空 各一用例.
+ * <p><b>推文级 BLOCKED（T5.2）:</b> 文本三字段全空 / accessStatus 受限 各一用例.
  *
  * <p><b>聚合优先级（T5.3）:</b> BLOCKED > DEGRADED > UNKNOWN > PUBLISHABLE 组合用例.
  *
@@ -311,7 +313,6 @@ public class TweetPublishabilityGateTest {
                 .content(null)
                 .rawText("")
                 .formattedText("  ") // blank 字符串
-                .sourceAccessNote(null)
                 .publishedAt(LocalDateTime.now())
                 .media(List.of())
                 .build();
@@ -326,15 +327,15 @@ public class TweetPublishabilityGateTest {
     }
 
     @Test
-    void shouldBlockTweet_when_sourceAccessNoteNotEmpty() {
-        // T2: sourceAccessNote 非空 → BLOCKED
+    void shouldNotBlockTweet_when_articleContentTypePresent() {
+        // ARTICLE 是内容类型，不是访问受限信号
         String tweetId = "test-tweet-11";
         Tweet tweet = Tweet.builder()
                 .id(tweetId)
                 .content("测试文本")
                 .rawText("原始文本")
                 .formattedText("格式化文本")
-                .sourceAccessNote("源文本为空或 provider 未返回文本")
+                .contentType(TweetContentType.ARTICLE)
                 .publishedAt(LocalDateTime.now())
                 .media(List.of())
                 .build();
@@ -344,9 +345,8 @@ public class TweetPublishabilityGateTest {
 
         PublishabilityResult result = gate.evaluate(tweet);
 
-        assertThat(result.getTweetStatus()).isEqualTo(PublishabilityStatus.BLOCKED);
-        assertThat(result.getTweetReason()).startsWith("源访问受限:");
-        assertThat(result.getTweetReason()).contains("源文本为空或 provider 未返回文本");
+        assertThat(result.getTweetStatus()).isEqualTo(PublishabilityStatus.PUBLISHABLE);
+        assertThat(result.getTweetReason()).isNull();
     }
 
     @Test
@@ -358,7 +358,6 @@ public class TweetPublishabilityGateTest {
                 .content("有文本内容")
                 .rawText(null)
                 .formattedText(null)
-                .sourceAccessNote(null)
                 .publishedAt(LocalDateTime.now())
                 .media(List.of())
                 .build();
@@ -403,7 +402,7 @@ public class TweetPublishabilityGateTest {
         Tweet tweet = Tweet.builder()
                 .id(tweetId)
                 .content("文本可用")
-                .sourceAccessNote("访问受限")
+                .accessStatus(TweetAccessStatus.RESTRICTED)
                 .publishedAt(LocalDateTime.now())
                 .media(List.of())
                 .build();
@@ -415,6 +414,7 @@ public class TweetPublishabilityGateTest {
 
         // T2 推文级 BLOCKED 优先级最高
         assertThat(result.getTweetStatus()).isEqualTo(PublishabilityStatus.BLOCKED);
+        assertThat(result.getTweetReason()).contains("访问受限");
     }
 
     @Test
@@ -635,14 +635,15 @@ public class TweetPublishabilityGateTest {
     }
 
     @Test
-    void shouldKeepTweetReasonWithinLimit_when_sourceAccessNoteIsLong() {
+    void shouldKeepTweetReasonWithinLimit_when_restrictionDetailIsLong() {
         String tweetId = "test-tweet-long-note";
         Tweet tweet = Tweet.builder()
                 .id(tweetId)
                 .content("文本可用")
                 .rawText("文本可用")
                 .formattedText("文本可用")
-                .sourceAccessNote("访问受限 " + "原".repeat(240))
+                .accessStatus(TweetAccessStatus.RESTRICTED)
+                .restrictionDetail("访问受限 " + "原".repeat(240))
                 .publishedAt(PUBLISHED_AT)
                 .media(List.of())
                 .build();
@@ -664,7 +665,6 @@ public class TweetPublishabilityGateTest {
                 .content(text)
                 .rawText(text)
                 .formattedText(text)
-                .sourceAccessNote(null)
                 .publishedAt(PUBLISHED_AT)
                 .media(List.of())
                 .build();

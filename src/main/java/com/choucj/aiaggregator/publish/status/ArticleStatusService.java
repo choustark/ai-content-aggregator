@@ -69,6 +69,22 @@ public class ArticleStatusService {
     }
 
     /**
+     * 文章已生成并进入本地发布池.
+     */
+    public void markCreated(String articleId) {
+        validateArticleId(articleId);
+        writeSoftFail("markCreated", articleId, ArticleStatus.CREATED, true);
+    }
+
+    /**
+     * 文章等待定时或人工推进到微信草稿.
+     */
+    public void markPendingPublish(String articleId) {
+        validateArticleId(articleId);
+        writeSoftFail("markPendingPublish", articleId, ArticleStatus.PENDING_PUBLISH, true);
+    }
+
+    /**
      * Story 3.5 AC-2 — publish 调用前写 PROCESSING.
      *
      * <p>不重设 TTL — 用 {@link RedisRepository#setKeepingTtl(String, String)}

@@ -48,7 +48,8 @@ class PublishingPropertiesTest {
                 .run(ctx -> {
                     PublishingProperties props = ctx.getBean(PublishingProperties.class);
                     assertThat(props.getRealtimeThreshold()).isEqualTo(8);
-                    assertThat(props.getBatchCron()).isEqualTo("0 0 20 * * ?");
+                    assertThat(props.getBatchCron()).isEqualTo("0 0 8 * * ?");
+                    assertThat(props.getDailyPublishHour()).isEqualTo(8);
                     assertThat(props.isBatchEnabled()).isTrue();
                     assertThat(props.getQueueTtlDays()).isEqualTo(7);
                 });
@@ -62,12 +63,14 @@ class PublishingPropertiesTest {
                         .addFirst(new MapPropertySource("test", Map.of(
                                 "wechat.mp.publishing.realtime-threshold", 10,
                                 "wechat.mp.publishing.batch-cron", "0 30 21 * * ?",
+                                "wechat.mp.publishing.daily-publish-hour", 9,
                                 "wechat.mp.publishing.batch-enabled", false,
                                 "wechat.mp.publishing.queue-ttl-days", 30))))
                 .run(ctx -> {
                     PublishingProperties props = ctx.getBean(PublishingProperties.class);
                     assertThat(props.getRealtimeThreshold()).isEqualTo(10);
                     assertThat(props.getBatchCron()).isEqualTo("0 30 21 * * ?");
+                    assertThat(props.getDailyPublishHour()).isEqualTo(9);
                     assertThat(props.isBatchEnabled()).isFalse();
                     assertThat(props.getQueueTtlDays()).isEqualTo(30);
                 });
@@ -126,5 +129,16 @@ class PublishingPropertiesTest {
 
         assertThat(violations).anySatisfy(v ->
                 assertThat(v.getPropertyPath().toString()).isEqualTo("queueTtlDays"));
+    }
+
+    @Test
+    void shouldFailValidationWhenDailyPublishHourOutOfRange() {
+        PublishingProperties props = new PublishingProperties();
+        props.setDailyPublishHour(24);
+
+        Set<ConstraintViolation<PublishingProperties>> violations = validator.validate(props);
+
+        assertThat(violations).anySatisfy(v ->
+                assertThat(v.getPropertyPath().toString()).isEqualTo("dailyPublishHour"));
     }
 }

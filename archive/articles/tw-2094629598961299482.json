@@ -1,0 +1,22 @@
+{
+  "articleId" : "tw-2094629598961299482",
+  "status" : "DRAFT_CREATED",
+  "createdAt" : "2026-09-01T20:58:59.305505",
+  "scheduledPublishAt" : "2026-09-01T20:59:03.842345",
+  "draftCreatedAt" : "2026-09-01T20:59:07.786085",
+  "wechatDraftMediaId" : "wg4g8CqjFHslpI00w8TaQasaBAGpscl3B0xNK_5AVVz9tCe6P6LJBXwAUPFcW6Zm",
+  "archiveFile" : "archive/2026-09-01.md",
+  "article" : {
+    "id" : "tw-2094629598961299482",
+    "title" : "谷歌开源新模型：预测冰淇淋销量，它连天气预报都看",
+    "content" : "时间序列预测，说白了就是“用过去的数据猜未来的走势”。举个例子，你想知道明天冰淇淋能卖多少，最简单的方法就是看过去几天卖了多少，然后拍个脑袋推测一下。\n\n谷歌这次开源的 TimesFM-3，干的也是这活儿。但和以前相比，它最大的变化在于——不再盯着一条线看了。\n\n## 以前：一根筋，容易翻车\n\n旧版本的时间序列模型，说白了有点“死脑筋”。它一次只能观察一个数据流，比如你想预测冰淇淋销量，它就只盯着过去的销量数据，别的啥也不管。结果就是，一旦天气突然升温，或者商场搞了个大促销，它整个人就懵了——预测出来的数字，能差出十万八千里。\n\n这就好比一个人只靠看今天是几号来猜天气，完全不看风速、不看云量，结果必然是晴天猜下雨，阴天猜大太阳，翻车概率极高。\n\n## 现在：多线程工作，能看“全局”\n\n新版的 TimesFM-3 聪明多了。它学会了一次性把多个相关因素都纳入考虑。还是拿冰淇淋销量来说，这次它不再只看历史销量，而是同时参考未来几天的天气预报、周边有没有促销活动、商场客流量的趋势，甚至还能把其他相关商品的销售数据拉进来一起分析。\n\n这就好比一个有经验的店老板，不光看昨儿卖了多少，还看明天是不是周末、有没有下雨、门口是不是在修路——综合所有信息之后，再判断要不要多进点货。结果自然比拍脑袋靠谱得多。\n\n这种“多输入”的能力，对普通用户来说意味着什么？很简单：如果你手头有几组相互关联的数据——不管是零售库存、电力消耗还是网站访问量——现在你都能用这个开源模型，做一个更贴合实际的预测。而且重点在于，它是开源的，普通场景下直接拿去用就行，不用额外费劲去微调模型。\n\n## 需要注意的边界\n\n当然，它也不是万能的。虽然模型能综合考虑多种因素，但如果你输入的数据本身质量不高——比如天气预报不准、促销信息不完整——那预测结果照样会受影响。另外，这个模型擅长处理的是“有规律可循”的时间序列数据，对于那些突发性黑天鹅事件（比如突然爆火的新品），它依然没什么招。\n\n说到底，工具变聪明了，但数据背后的真实世界，永远比模型复杂一点。\n\n如果你感兴趣，模型已经在 Hugging Face 上开源，直接下载就能上手玩。\n\n> 摘要：谷歌开源时间序列模型 TimesFM-3，能同时参考销量、天气、促销等多重因素进行预测，比旧版更贴近实际。开源可用，适合零售、电力等场景，但依赖数据质量，应对突发变化能力有限。\n\n![原帖图片-1](http://mmbiz.qpic.cn/sz_mmbiz_jpg/iaXamngtyiaXr2RICcSkhicwnbwBFMbvXXHHNhstFP3LJauVX1wYr2lMPKj1mYibSKZYRBFxxDSDbLg75KvxYaXnAnPIA2vpTo36mMXwVzXxicvQ/0?from=appmsg)",
+    "digest" : "时间序列预测，说白了就是“用过去的数据猜未来的走势”。举个例子，你想知道明天冰淇淋能卖多少，最简单的方法就是看过去几天卖了多少，然后拍个脑袋推测一下。\n\n谷歌这次开源的 TimesFM-3，干的也是这活儿。但和以前相比，它最大的变化在于——",
+    "source" : "来源:@Gorden_Sun",
+    "aiGenerated" : true,
+    "createdAt" : "2026-09-01T20:58:59.305505",
+    "innovationScore" : 8,
+    "originalUrl" : "https://x.com/Gorden_Sun/status/2094629598961299482",
+    "generationMode" : "REWRITE_WITH_MEDIA",
+    "mediaAuditMarkdown" : "#### 媒体审计 (media.json sidecar 权威状态)\n\n| # | 类型 | 下载状态 | 上传状态 | 可发布性 | 微信 URL | 本地路径 | 失败原因 | 原帖 URL |\n|---|---|---|---|---|---|---|---|---|\n| 1 | PHOTO | DOWNLOADED | UPLOADED | PUBLISHABLE | http://mmbiz.qpic.cn/sz_mmbiz_jpg/iaXamngtyiaXr2RICcSkhicwnbwBFMbvXXHHNhstFP3LJauVX1wYr2lMPKj1mYibSKZYRBFxxDSDbLg75KvxYaXnAnPIA2vpTo36mMXwVzXxicvQ/0?from=appmsg | media/twitter/2026-09-01/2094629598961299482/2094629577687744512-78173d77.jpg | - | https://x.com/Gorden_Sun/status/2094629598961299482 |\n"
+  }
+}

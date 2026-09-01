@@ -35,6 +35,25 @@ import java.util.List;
 @AllArgsConstructor
 public class Tweet {
 
+    /**
+     * 派生型 sourceAccessNote 的历史值: "provider 未返回文本" 快照标记.
+     *
+     * <p><b>已废弃写入 (2026-08-30 终局清理)</b> — 三个 provider client 曾在文本为空时写入
+     * 本 note, 但它只是调用时快照, 跨源合并后会与最终文本矛盾, 导致 {@code TweetPublishabilityGate}
+     * 误判推文级 BLOCKED (生产故障: 媒体全 PUBLISHABLE 但推文 BLOCKED)。文本缺失判定权现归
+     * gate T1 (三文本字段全 blank) 独占, 本 note 不再有任何写入端; 常量仅供
+     * {@code TwitterSource.mergeTweet} 净化 Redis 存量缓存 (24h TTL) 中的历史毒数据。
+     * {@code sourceAccessNote} 字段现仅保留给审计兼容读取，不再承担发布性主决策职责。
+     */
+    public static final String SOURCE_TEXT_MISSING_NOTE = "源文本为空或 provider 未返回文本";
+
+    /**
+     * 历史遗留 article note。
+     *
+     * <p>它本质是内容类型标签，不是访问受限信号；仅供兼容迁移旧缓存/旧序列化数据。
+     */
+    public static final String SOURCE_ARTICLE_TYPE_NOTE = "x-author-scraper article";
+
     /** 推文 ID(必填, Story 2.1 RSSHub 返回). */
     private String id;
 
@@ -90,7 +109,22 @@ public class Tweet {
     /** 引用推可读摘要文本；provider 未返回完整引用上下文时为 null。 */
     private String quotedTweetText;
 
-    /** 源访问或字段级降级提示；正常可访问时为 null。 */
+    /** 推文内容类型；缺省为 UNKNOWN。 */
+    @Builder.Default
+    private TweetContentType contentType = TweetContentType.UNKNOWN;
+
+    /** 推文源访问状态；缺省按可访问处理。 */
+    @Builder.Default
+    private TweetAccessStatus accessStatus = TweetAccessStatus.ACCESSIBLE;
+
+    /** 结构化受限原因；缺省为 NONE。 */
+    @Builder.Default
+    private TweetRestrictionReason restrictionReason = TweetRestrictionReason.NONE;
+
+    /** 受限原因补充细节；仅在结构化原因不足以表达时使用。 */
+    private String restrictionDetail;
+
+    /** 历史兼容/审计 note；正常可访问时为 null，不参与发布性主决策。 */
     private String sourceAccessNote;
 
     /**
@@ -102,4 +136,43 @@ public class Tweet {
      */
     @Builder.Default
     private Double innovationScore = null;
+
+    /**
+     * 结构化访问状态是否表示需阻断自动发布。
+     */
+    public boolean hasStructuredAccessBlock() {
+        if (accessStatus == null) {
+            return false;
+        }
+        return accessStatus == TweetAccessStatus.RESTRICTED
+                || accessStatus == TweetAccessStatus.DELETED
+                || accessStatus == TweetAccessStatus.WITHHELD;
+    }
+
+    /**
+     * 结构化阻断原因，缺省退化为访问状态默认文案。
+     */
+    public String structuredAccessBlockReason() {
+        if (!hasStructuredAccessBlock()) {
+            return null;
+        }
+        if (restrictionDetail != null && !restrictionDetail.isBlank()) {
+            return restrictionDetail;
+        }
+        if (restrictionReason != null && restrictionReason != TweetRestrictionReason.NONE) {
+            return switch (restrictionReason) {
+                case ACCESS_RESTRICTED -> "访问受限";
+                case DELETED_BY_AUTHOR -> "推文已被作者删除";
+                case WITHHELD_BY_PLATFORM -> "推文被平台限制展示";
+                case LEGACY_OTHER -> "历史受限原因";
+                case NONE -> null;
+            };
+        }
+        return switch (accessStatus) {
+            case RESTRICTED -> "访问受限";
+            case DELETED -> "推文已被作者删除";
+            case WITHHELD -> "推文被平台限制展示";
+            case UNKNOWN, ACCESSIBLE -> "访问状态未知";
+        };
+    }
 }

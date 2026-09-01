@@ -92,6 +92,30 @@ class ApifyDiscoveryClientTest {
         assertThat(tweets.get(0).getAuthor()).isEqualTo("@OpenAI");
     }
 
+    /**
+     * 终局清理 (2026-08-30): client 不再写派生 note "源文本为空或 provider 未返回文本" —
+     * 它只是调用时文本快照, 跨源合并后会与最终文本矛盾 (gate 误判推文级 BLOCKED 的
+     * 生产故障根因)。文本缺失判定权归 gate T1 独占, note 字段只留独立信号。
+     */
+    @Test
+    void shouldNotSetSourceAccessNoteWhenTextIsEmpty() {
+        String body = """
+                [
+                  {
+                    "id": "99999",
+                    "text": "",
+                    "username": "OpenAI"
+                  }
+                ]
+                """;
+
+        List<Tweet> tweets = client.parseResponse(body, "OpenAI");
+
+        assertThat(tweets).hasSize(1);
+        assertThat(tweets.get(0).getContent()).isNull();
+        assertThat(tweets.get(0).getSourceAccessNote()).isNull();
+    }
+
     @Test
     void shouldFailFastWhenTokenMissing() {
         properties.setToken("");

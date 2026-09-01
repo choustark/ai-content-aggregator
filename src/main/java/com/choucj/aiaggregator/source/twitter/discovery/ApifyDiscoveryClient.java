@@ -444,7 +444,6 @@ public class ApifyDiscoveryClient implements NamedTwitterDiscoveryProvider {
                 .links(parseLinks(item))
                 .mentions(parseMentions(item))
                 .quotedTweetUrl(parseQuotedTweetUrl(item))
-                .sourceAccessNote(StringUtils.hasText(content) ? null : "源文本为空或 provider 未返回文本")
                 .build();
     }
 

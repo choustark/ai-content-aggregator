@@ -5,6 +5,8 @@ import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.source.twitter.config.ScraperProperties;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
+import com.choucj.aiaggregator.source.twitter.model.TweetAccessStatus;
+import com.choucj.aiaggregator.source.twitter.model.TweetContentType;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaVariant;
@@ -260,8 +262,21 @@ public class XAuthorScraperDiscoveryClient implements NamedTwitterDiscoveryProvi
                 .links(extractTextArray(path(item, "links"), path(item, "article.links")))
                 .mentions(extractTextArray(path(item, "mentions")))
                 .quotedTweetUrl(buildQuotedTweetUrl(firstText(item, "quotedTweetUrl", "quotedTweetId")))
-                .sourceAccessNote("article".equals(firstText(item, "contentType")) ? "x-author-scraper article" : null)
+                .contentType(resolveContentType(firstText(item, "contentType")))
+                .accessStatus(TweetAccessStatus.ACCESSIBLE)
                 .build();
+    }
+
+    private TweetContentType resolveContentType(String rawContentType) {
+        if (!StringUtils.hasText(rawContentType)) {
+            return TweetContentType.UNKNOWN;
+        }
+        return switch (rawContentType.trim().toLowerCase()) {
+            case "article" -> TweetContentType.ARTICLE;
+            case "thread" -> TweetContentType.THREAD;
+            case "post", "tweet" -> TweetContentType.POST;
+            default -> TweetContentType.UNKNOWN;
+        };
     }
 
     private RuntimeException mapJobFailure(JsonNode job, String jobId, String username) {

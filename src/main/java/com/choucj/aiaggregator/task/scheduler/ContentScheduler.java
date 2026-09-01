@@ -26,7 +26,7 @@ import java.util.concurrent.TimeUnit;
  *
  * <p><b>触发机制:</b>
  * <ul>
- *   <li>{@code @Scheduled(cron = "${schedule.cron:0 0 * * * ?}")} — 默认每小时整点触发</li>
+ *   <li>{@code @Scheduled(cron = "${schedule.cron:0 0 22 * * ?}")} — 默认每天晚上 22:00 触发</li>
  *   <li>{@code @EventListener(ApplicationReadyEvent.class)} — 应用启动时执行一次
  *       (含断点恢复), 由 {@code schedule.run-on-startup} 控制是否启用(CR W2 修复)</li>
  * </ul>
@@ -47,7 +47,7 @@ import java.util.concurrent.TimeUnit;
  * {@link TaskRecoveryRunner} 不再独立监听 {@code ApplicationReadyEvent}, 避免双监听器顺序不确定
  * 导致 processing 集合中正在处理的任务被错误重入队.
  *
- * <p><b>CR W2 修复(2026-06-27):</b> 注入 {@code schedule.run-on-startup}(默认 {@code true}),
+ * <p><b>CR W2 修复(2026-06-27):</b> 注入 {@code schedule.run-on-startup}(默认 {@code false}),
  * 关闭时仅按 cron 周期触发, 应用启动后等待下一个 cron 时刻.
  *
  * <p>引用源: Story 1.6 创建;CR W1/W2 修复(2026-06-27);消费方 Story 2.6 Pipeline Integration.
@@ -86,14 +86,14 @@ public class ContentScheduler {
      * @param twitterProcessor         Twitter 处理流水线 (Story 2.6, 按 taskId 前缀路由)
      * @param githubProcessorOptional  GitHub 处理流水线 (Story 4.4, 常规运行常驻注册; 测试/未来拆分时可为空)
      * @param processorProperties      Processor 配置 (Story 2.6 Patch-3, 提供 task-id-prefix 路由判断)
-     * @param runOnStartup             启动时是否执行首次处理, 默认 true (来自 {@code schedule.run-on-startup})
+     * @param runOnStartup             启动时是否执行首次处理, 默认 false (来自 {@code schedule.run-on-startup})
      */
     public ContentScheduler(TaskQueue taskQueue,
                             TaskRecoveryRunner recoveryRunner,
                             TwitterProcessor twitterProcessor,
                             Optional<GitHubProcessor> githubProcessorOptional,
                             ProcessorProperties processorProperties,
-                            @Value("${schedule.run-on-startup:true}") boolean runOnStartup) {
+                            @Value("${schedule.run-on-startup:false}") boolean runOnStartup) {
         this(taskQueue, recoveryRunner, twitterProcessor, githubProcessorOptional, processorProperties,
                 Optional.empty(), runOnStartup);
     }
@@ -105,7 +105,7 @@ public class ContentScheduler {
                             Optional<GitHubProcessor> githubProcessorOptional,
                             ProcessorProperties processorProperties,
                             Optional<CostMonitor> costMonitorOptional,
-                            @Value("${schedule.run-on-startup:true}") boolean runOnStartup) {
+                            @Value("${schedule.run-on-startup:false}") boolean runOnStartup) {
         this.taskQueue = taskQueue;
         this.recoveryRunner = recoveryRunner;
         this.twitterProcessor = twitterProcessor;
@@ -116,11 +116,11 @@ public class ContentScheduler {
     }
 
     /**
-     * 每小时整点触发(默认),可通过 {@code schedule.cron} 配置覆盖.
+     * 每天晚上 22:00 触发(默认),可通过 {@code schedule.cron} 配置覆盖.
      *
      * <p>失败容错: 任意异常被 catch 记 error 日志, 不抛出, 保证调度器存活.
      */
-    @Scheduled(cron = "${schedule.cron:0 0 * * * ?}")
+    @Scheduled(cron = "${schedule.cron:0 0 22 * * ?}")
     public void processContent() {
         log.info("开始执行内容处理任务");
         try {

@@ -55,6 +55,20 @@ class ArticleStatusServiceTest {
         verify(redisRepository).set(STATUS_KEY, ArticleStatus.PENDING.name(), PENDING_TTL);
     }
 
+    @Test
+    void shouldMarkCreatedWriteCorrectKeyAndValue() {
+        service.markCreated(ARTICLE_ID);
+
+        verify(redisRepository).set(STATUS_KEY, ArticleStatus.CREATED.name(), PENDING_TTL);
+    }
+
+    @Test
+    void shouldMarkPendingPublishWriteCorrectKeyAndValue() {
+        service.markPendingPublish(ARTICLE_ID);
+
+        verify(redisRepository).set(STATUS_KEY, ArticleStatus.PENDING_PUBLISH.name(), PENDING_TTL);
+    }
+
     // ===== Task 2.4: markProcessing =====
 
     @Test

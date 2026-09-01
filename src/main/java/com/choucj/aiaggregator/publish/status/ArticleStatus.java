@@ -47,9 +47,22 @@ package com.choucj.aiaggregator.publish.status;
 public enum ArticleStatus {
 
     /**
-     * 待处理 — TwitterProcessor Stage 3 已开始处理该文章 (filter 通过, 即将进入 rewrite).
+     * 已创建 — 文章内容已生成并可被归档/发布池恢复, 尚未进入微信草稿创建动作.
      */
+    CREATED,
+
+    /**
+     * 待处理 — TwitterProcessor Stage 3 已开始处理该文章 (filter 通过, 即将进入 rewrite).
+     *
+     * @deprecated 新发布工作流使用 {@link #CREATED} / {@link #PENDING_PUBLISH}; 保留本值兼容旧状态查询.
+     */
+    @Deprecated
     PENDING,
+
+    /**
+     * 待发布 — 文章已进入发布池, 等待定时任务或人工触发创建微信草稿.
+     */
+    PENDING_PUBLISH,
 
     /**
      * 处理中 — 文章已传给 WeChatPublisher.publish, 微信 addDraft 调用进行中.

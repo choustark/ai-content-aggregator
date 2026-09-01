@@ -262,6 +262,24 @@ class MediaAwareRewriteArticleGeneratorTest {
         verifyNoInteractions(writer);
     }
 
+    /**
+     * 观测性修复 (2026-08-30 生产故障): 异常必须携带 gate 的 tweetReason —
+     * 否则 "tweetStatus=BLOCKED 但媒体全 PUBLISHABLE" 的矛盾日志无法区分
+     * T1 (源文本不可用) 与 T2 (结构化访问受限), 排障只能靠猜。
+     */
+    @Test
+    void should_include_gate_tweet_reason_in_blocked_exception() {
+        Tweet tweet = tweetWithPhoto();
+        when(contentRewriter.rewrite(any(Tweet.class))).thenReturn(rewrittenArticle());
+        when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+                .thenReturn(new TweetMediaArchiver.ArchiveResult(0, 1, 0, List.of()));
+        when(gate.evaluate(any(Tweet.class))).thenReturn(blockedResult());
+
+        assertThatThrownBy(() -> generator.generate(tweet))
+                .isInstanceOf(TweetPublishabilityBlockedException.class)
+                .hasMessageContaining("推文已被删除");
+    }
+
     @Test
     void should_fail_retryable_when_sidecar_missing_after_prepare_media() {
         Tweet tweet = tweetWithPhoto();

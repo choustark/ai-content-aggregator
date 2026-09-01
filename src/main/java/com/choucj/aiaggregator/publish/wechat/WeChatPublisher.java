@@ -96,6 +96,10 @@ public class WeChatPublisher {
     }
 
     public void publish(Article article) {
+        publishDraft(article);
+    }
+
+    public String publishDraft(Article article) {
         // AC-8: 入口 null check, 防 NPE 在 converter 内部触发.
         if (article == null) {
             throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR, "Article 为 null");
@@ -164,6 +168,7 @@ public class WeChatPublisher {
                     mediaId,
                     SingleModelRewriter.truncateForLog(article.getTitle(), LOG_TITLE_MAX_CODEPOINTS));
         }
+        return mediaId;
     }
 
     /** Article.id fail-fast 校验, 防止远程草稿已创建后才写入 unknown / 非法状态 key. */

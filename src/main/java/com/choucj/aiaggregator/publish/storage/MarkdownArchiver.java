@@ -6,10 +6,14 @@ import com.choucj.aiaggregator.common.model.ContentGenerationMode;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.common.util.TextTruncateUtil;
 import com.choucj.aiaggregator.publish.ContentPublisher;
+import com.choucj.aiaggregator.publish.status.ArticleStatus;
 import com.choucj.aiaggregator.publish.storage.config.ArchiverProperties;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.Order;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
@@ -60,6 +64,7 @@ import java.util.Objects;
  */
 @Slf4j
 @Component
+@Order(Ordered.HIGHEST_PRECEDENCE)
 @ConditionalOnProperty(name = "archive.enabled", havingValue = "true", matchIfMissing = true)
 public class MarkdownArchiver implements ContentPublisher {
 
@@ -79,12 +84,19 @@ public class MarkdownArchiver implements ContentPublisher {
     private static final String AI_DISCLAIMER = "\n> 本文由 AI 辅助生成\n";
 
     private final ArchiverProperties properties;
+    private final ArticleArchiveRepository articleArchiveRepository;
 
     /** 缓存日期格式器 (从 properties.datePattern 构造, @PostConstruct 初始化防重复创建开销). */
     private DateTimeFormatter fileNameDateFormatter;
 
     public MarkdownArchiver(ArchiverProperties properties) {
+        this(properties, null);
+    }
+
+    @Autowired
+    public MarkdownArchiver(ArchiverProperties properties, ArticleArchiveRepository articleArchiveRepository) {
         this.properties = properties;
+        this.articleArchiveRepository = articleArchiveRepository;
     }
 
     @PostConstruct
@@ -115,6 +127,9 @@ public class MarkdownArchiver implements ContentPublisher {
 
         String block = buildArticleBlock(article);
         int bytes = appendToFile(archiveFile, block, article.getId());
+        if (articleArchiveRepository != null) {
+            articleArchiveRepository.saveSnapshot(article, ArticleStatus.CREATED, article.getCreatedAt(), archiveFile);
+        }
 
         log.info("归档成功: articleId={}, 标题={}, 文件={}, 大小={}bytes",
                 article.getId(), truncateForLog(article.getTitle(), LOG_TITLE_MAX_LENGTH),
@@ -216,6 +231,9 @@ public class MarkdownArchiver implements ContentPublisher {
         sb.append("## ").append(article.getTitle()).append("\n\n");
 
         sb.append("- **日期**: ").append(article.getCreatedAt().format(META_DATE_FORMAT)).append("\n");
+        sb.append("- **状态**: 已创建\n");
+        sb.append("- **计划发布时间**: \n");
+        sb.append("- **草稿创建时间**: \n");
         sb.append("- **来源**: ").append(article.getSource()).append("\n");
         sb.append("- **AI 生成**: ").append(article.isAiGenerated() ? "是" : "否").append("\n");
         // Story 8.6 Task 6.1: 生成模式标注行 (AC4) — REWRITE=AI 改写 (既有块新增此行),

@@ -5,6 +5,7 @@ import com.choucj.aiaggregator.common.model.Article;
 import com.choucj.aiaggregator.source.twitter.model.MediaUploadStatus;
 import com.choucj.aiaggregator.source.twitter.model.PublishabilityStatus;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
+import com.choucj.aiaggregator.source.twitter.model.TweetAccessStatus;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import org.junit.jupiter.api.Test;
@@ -396,8 +397,8 @@ class OriginalPostRendererTest {
     }
 
     @Test
-    void should_throw_non_retryable_when_source_access_note_present() {
-        Tweet tweet = baseTweet().sourceAccessNote("推文已被作者删除").build();
+    void should_throw_non_retryable_when_access_status_blocked() {
+        Tweet tweet = baseTweet().accessStatus(TweetAccessStatus.DELETED).build();
 
         assertThatThrownBy(() -> renderer.render(tweet, null))
                 .isInstanceOf(NonRetryableException.class)

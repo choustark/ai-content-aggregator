@@ -4,6 +4,8 @@ import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.source.twitter.config.ScraperProperties;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
+import com.choucj.aiaggregator.source.twitter.model.TweetAccessStatus;
+import com.choucj.aiaggregator.source.twitter.model.TweetContentType;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
@@ -104,6 +106,9 @@ class XAuthorScraperDiscoveryClientTest {
         assertThat(tweet.getImageUrls()).containsExactly("https://img.example/a.jpg");
         assertThat(tweet.getMedia()).hasSize(1);
         assertThat(tweet.getLinks()).containsExactly("https://example.com");
+        assertThat(tweet.getContentType()).isEqualTo(TweetContentType.ARTICLE);
+        assertThat(tweet.getAccessStatus()).isEqualTo(TweetAccessStatus.ACCESSIBLE);
+        assertThat(tweet.getSourceAccessNote()).isNull();
         server.verify();
     }
 
