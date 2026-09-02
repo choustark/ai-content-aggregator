@@ -172,10 +172,13 @@ twscrape:
 #     deepseek:
 #       api-key: ${LLM_DEEPSEEK_API_KEY:your-deepseek-api-key}
 #       base-url: https://api.deepseek.com
+#       model-name: deepseek-chat
 #     glm:
 #       api-key: ${LLM_GLM_API_KEY:your-glm-api-key}
 #       base-url: https://open.bigmodel.cn/api/paas/v4
+#       model-name: glm-4.7
 # 主路径 DeepSeek + 备用 GLM, LlmConfig 注册两个 ChatModel Bean, LangChain4jLlmClient 自动降级.
+# model-name 默认值: deepseek-chat / glm-4.7; 智谱旧模型 (如 glm-4-plus) 下线时仅需改此处配置.
 
 # RAG / Embedding 配置 (Story 5.1/5.2) — 默认关闭, 开启后注册 EmbeddingService + ReferenceRetriever.
 # GLM embedding 复用 api-keys.yml 的 llm.glm.api-key / LLM_GLM_API_KEY.

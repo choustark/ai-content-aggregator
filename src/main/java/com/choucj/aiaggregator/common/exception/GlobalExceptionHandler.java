@@ -7,6 +7,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 /**
  * 全局异常处理器 — 拦截所有 {@code @RestController} 抛出的异常,统一转 HTTP 响应.
@@ -117,6 +118,24 @@ public class GlobalExceptionHandler {
         log.warn("资源不存在 [{}]: {}", e.getErrorCode(), e.getMessage());
         return ResponseEntity.status(HttpStatus.NOT_FOUND)
                 .body(new ErrorResponse(e.getErrorCode(), e.getMessage()));
+    }
+
+    /**
+     * 处理无匹配路由的请求路径(Spring Boot 3 静态资源兜底抛出).
+     *
+     * <p>URL 路径打错(如 {@code /api/article/...} 少了复数 s)时, 若无本 handler 会被
+     * {@link #handleUnexpected(Exception)} 兜底成 500 "系统错误", 误导排查方向.
+     * 路径不存在是客户端错误, 返回 404; ErrorCode 复用 {@code NON_RETRYABLE_ERROR}
+     * (重试策略与 400 一致, 语义由 message 承担, 不扩枚举).
+     *
+     * @param e 无匹配路由/静态资源缺失异常
+     * @return 404 NOT_FOUND + ErrorResponse
+     */
+    @ExceptionHandler(NoResourceFoundException.class)
+    public ResponseEntity<ErrorResponse> handleNoResourceFound(NoResourceFoundException e) {
+        log.warn("请求路径不存在: {}", e.getResourcePath());
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(new ErrorResponse(ErrorCode.NON_RETRYABLE_ERROR, "请求路径不存在"));
     }
 
     /**

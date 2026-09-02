@@ -1,0 +1,22 @@
+{
+  "articleId" : "tw-2094432269909815471",
+  "status" : "PENDING_PUBLISH",
+  "createdAt" : "2026-09-02T08:19:53.967209",
+  "scheduledPublishAt" : "2026-09-03T08:00:00",
+  "draftCreatedAt" : null,
+  "wechatDraftMediaId" : null,
+  "archiveFile" : "archive/2026-09-02.md",
+  "article" : {
+    "id" : "tw-2094432269909815471",
+    "title" : "从\"装上了\"到\"真装好了\"——Mole 1.13.0 的一次信任升级",
+    "content" : "用过 Mac 上各类工具软件的人，大概率都撞过这样的场景：更新提示明明写着\"成功\"，打开一看版本号压根没变；卸载时它跟你说\"已移除\"，转身在系统里留下一堆残渣。你无法确定它到底干了什么，只能靠猜。这种不透明，远比软件本身的小毛病更磨人。\n\nMole 的最新版本 1.13.0，恰好就是在动这个手术——它不是给你加什么炫酷新功能，而是把\"结果的可信度\"放到第一优先级。这听起来不够性感，但对日常依赖它管理开发环境的人来说，这可能是最实在的一次更新。\n\n**更新不再\"假成功\"**\n\n以前很多工具的逻辑是：把命令执行完，就算完成了。哪怕后台的文件根本没复制到位，或者配置没刷新，它也照样给你报喜。Mole 这次的做法很直接——更新流程走到最后，会再确认一次\"应用是否真的变了\"。\n\n就好比你去餐馆点菜，服务员不仅把菜端上来，还要等你动一筷子、确认味道没问题，才算这单真正完成。以前那种\"菜上了但没动过\"的假成功，从根源上被堵住了。\n\n**清理和卸载：先复查，再删除**\n\n另一个痛点是卸载残留。很多软件卸得拖泥带水，剩一堆配置、缓存、临时文件，等着你手动去收拾。Mole 这次在清理和卸载环节加了\"二次检查\"——删除动作之前，它会再扫描一遍，确认没有正在被占用的文件，或者不该删的系统数据。这相当于搬家前先列个清单，核对无误才动手。少删，但绝不误删。\n\n**系统数据跟随 macOS 的脚步**\n\n第三处改变比较细微，但对强迫症很友好：Mole 对系统数据的处理，现在更贴近 macOS 自身的规则。苹果系统里哪些目录归用户、哪些归缓存、哪些是系统私有，都有明确边界。以前工具可能\"一视同仁\"地扫扫删删，现在它学会看颜色办事了。不是你能删的都删，而是系统认可它该被删的才删。\n\n**这轮更新对谁最重要？**\n\n如果你是普通用户，可能体感到的是\"卸载后系统干净了，更新后软件确实在跑新版本\"。但对 macOS 上的开发者和自动化流程使用者，这种\"确定性\"就是生产力本身——你不需要为了验证一次更新是否生效，再手动去翻版本号、跑测试、检查遗留文件。机器给你的反馈越可靠，你对它的信任就越值钱。\n\n当然，边界也在于此：它优化的是\"执行后的确认机制\"，而不是替你决定\"该不该更新\"或者\"该不该清理\"。真正的判断还得你来掌握。工具的进化方向，从\"帮你做\"正在变成\"帮你确认做对了\"。\n\nMole 1.13.0 的步子不大，但每一步都踩在\"让结果经得起复查\"这个点上。软件世界的信任危机，往往就是这些没人愿意细抠的环节攒出来的。这轮更新，值得手动点个赞。\n\n![原帖图片-1](http://mmbiz.qpic.cn/sz_mmbiz_jpg/iaXamngtyiaXohicqGYibZP9Rce1s52zzV2VgqycsH645PXm6DgmgMuichM7Wk377gYtn6CSovbh7BqNjrTPldcfpSib7SACD8WibvnIV13tLicDpMA/0?from=appmsg)\n\n![原帖图片-2](http://mmbiz.qpic.cn/sz_mmbiz_jpg/iaXamngtyiaXowq18YcKj1VbgeUdZN2Vt5lLUElgu7gCRichibBnWUKq2ImxRhqxyoLCksojRbLltf7agH0HgQCN3Cv2I5wnYjQBmuWg4V2sItw/0?from=appmsg)\n\n![原帖图片-3](http://mmbiz.qpic.cn/mmbiz_jpg/iaXamngtyiaXpTFCYlObu1g6ibphQunyWlmxMV2pFPTpzrHBWNqA1ZQ8GrG9xA3UdljaAsg6cKP22nJo2ibQUQBUlaDSlib75DckwXdsbUyA6BzQ/0?from=appmsg)\n\n![原帖图片-4](http://mmbiz.qpic.cn/mmbiz_jpg/iaXamngtyiaXrZJ6UnUdOdtFEuk5PKg6CaT4g0FzI8T9EAq8ozyFUkTMbudvWiaPDp4IowF9esYTJae9myO3V6bUEwOp6B6UhLPjQgZ3YdKakc/0?from=appmsg)",
+    "digest" : "Mole 1.13.0 更新不再追求新功能，而是让执行结果更可信：更新成功后确认改动、清理卸载前二次复查、系统数据严格跟随 macOS 规则，减少\"假成功\"与残留问题，对开发者日常使用尤为关键。",
+    "source" : "来源:@HiTw93",
+    "aiGenerated" : true,
+    "createdAt" : "2026-09-02T08:19:53.967209",
+    "innovationScore" : 5,
+    "originalUrl" : "https://x.com/HiTw93/status/2094432269909815471",
+    "generationMode" : "REWRITE_WITH_MEDIA",
+    "mediaAuditMarkdown" : "#### 媒体审计 (media.json sidecar 权威状态)\n\n| # | 类型 | 下载状态 | 上传状态 | 可发布性 | 微信 URL | 本地路径 | 失败原因 | 原帖 URL |\n|---|---|---|---|---|---|---|---|---|\n| 1 | PHOTO | DOWNLOADED | UPLOADED | PUBLISHABLE | http://mmbiz.qpic.cn/sz_mmbiz_jpg/iaXamngtyiaXohicqGYibZP9Rce1s52zzV2VgqycsH645PXm6DgmgMuichM7Wk377gYtn6CSovbh7BqNjrTPldcfpSib7SACD8WibvnIV13tLicDpMA/0?from=appmsg | media/twitter/2026-08-31/2094432269909815471/2093876267875778560-cd83338d.jpg | - | https://x.com/HiTw93/status/2094432269909815471 |\n| 2 | PHOTO | DOWNLOADED | UPLOADED | PUBLISHABLE | http://mmbiz.qpic.cn/sz_mmbiz_jpg/iaXamngtyiaXowq18YcKj1VbgeUdZN2Vt5lLUElgu7gCRichibBnWUKq2ImxRhqxyoLCksojRbLltf7agH0HgQCN3Cv2I5wnYjQBmuWg4V2sItw/0?from=appmsg | media/twitter/2026-08-31/2094432269909815471/2093876267858923520-6076c335.jpg | - | https://x.com/HiTw93/status/2094432269909815471 |\n| 3 | PHOTO | DOWNLOADED | UPLOADED | PUBLISHABLE | http://mmbiz.qpic.cn/mmbiz_jpg/iaXamngtyiaXpTFCYlObu1g6ibphQunyWlmxMV2pFPTpzrHBWNqA1ZQ8GrG9xA3UdljaAsg6cKP22nJo2ibQUQBUlaDSlib75DckwXdsbUyA6BzQ/0?from=appmsg | media/twitter/2026-08-31/2094432269909815471/2093876267875811328-ebef2e19.jpg | - | https://x.com/HiTw93/status/2094432269909815471 |\n| 4 | PHOTO | DOWNLOADED | UPLOADED | PUBLISHABLE | http://mmbiz.qpic.cn/mmbiz_jpg/iaXamngtyiaXrZJ6UnUdOdtFEuk5PKg6CaT4g0FzI8T9EAq8ozyFUkTMbudvWiaPDp4IowF9esYTJae9myO3V6bUEwOp6B6UhLPjQgZ3YdKakc/0?from=appmsg | media/twitter/2026-08-31/2094432269909815471/2093876267951300608-0957ac23.jpg | - | https://x.com/HiTw93/status/2094432269909815471 |\n"
+  }
+}

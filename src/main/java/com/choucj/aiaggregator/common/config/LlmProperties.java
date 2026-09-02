@@ -34,6 +34,14 @@ public class LlmProperties {
         private String apiKey;
 
         private String baseUrl = "https://api.deepseek.com";
+
+        /**
+         * DeepSeek 对话模型名.
+         *
+         * <p>可配置: 平台旧模型下线时无需改代码 (历史教训: {@code glm-4-plus} 硬编码下线后
+         * 返回 400 InvalidRequestException, 见 {@link Glm#modelName}).
+         */
+        private String modelName = "deepseek-chat";
     }
 
     @Data
@@ -50,5 +58,14 @@ public class LlmProperties {
          * 已显式配置旧值的环境需同步改为 {@code https://open.bigmodel.cn/api/paas/v4}.
          */
         private String baseUrl = "https://open.bigmodel.cn/api/paas/v4";
+
+        /**
+         * GLM 对话模型名, 默认 {@code glm-4.7} (智谱在售旗舰).
+         *
+         * <p>历史教训: 曾硬编码 {@code glm-4-plus}, 该模型下线后上游返回 400 → langchain4j
+         * {@code InvalidRequestException}, 多模型投票的 GLM 分支全量失败. 现改为可配置,
+         * 平台旧模型下线时只需改 {@code api-keys.yml} / 环境变量.
+         */
+        private String modelName = "glm-4.7";
     }
 }

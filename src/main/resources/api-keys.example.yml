@@ -18,9 +18,13 @@ llm:
   deepseek:
     api-key: ${LLM_DEEPSEEK_API_KEY:your-deepseek-api-key}
     base-url: https://api.deepseek.com
+    # 可选, 默认 deepseek-chat
+    model-name: ${LLM_DEEPSEEK_MODEL:deepseek-chat}
   glm:
     api-key: ${LLM_GLM_API_KEY:your-glm-api-key}
     base-url: https://open.bigmodel.cn/api/paas/v4
+    # 可选, 默认 glm-4.7; 旧模型 (如 glm-4-plus) 平台已下线, 400 时换新模型名即可
+    model-name: ${LLM_GLM_MODEL:glm-4.7}
 
 github:
   token: ${GITHUB_TOKEN:your-github-token}

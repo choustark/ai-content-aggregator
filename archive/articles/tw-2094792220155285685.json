@@ -1,0 +1,22 @@
+{
+  "articleId" : "tw-2094792220155285685",
+  "status" : "PENDING_PUBLISH",
+  "createdAt" : "2026-09-02T08:19:33.199393",
+  "scheduledPublishAt" : "2026-09-03T08:00:00",
+  "draftCreatedAt" : null,
+  "wechatDraftMediaId" : null,
+  "archiveFile" : "archive/2026-09-02.md",
+  "article" : {
+    "id" : "tw-2094792220155285685",
+    "title" : "Kami：给AI代理一张「好纸」，让输出不再像草稿",
+    "content" : "你有没有过这样的体验？让AI帮你写一份方案，内容倒是齐全，但排版像临时拼凑的草稿——标题忽大忽小，段落挤成一团，重点全靠加粗硬撑。这背后的问题，不是AI不懂内容，而是它缺少一套「安静的排版规矩」。\n\n最近，一个叫Kami的开源项目更新到了V1.14版本。Kami在日语里是「纸」的意思——好内容值得一张好纸。这个项目的目标很纯粹：给AI代理一套设计系统，让它们把简报转成干净、清晰的文档。就像给打印机换上一叠质感上乘的纸，输出的观感立刻不一样。\n\n## 这次更新，带来两个明显的改变\n\n第一个是「更平静的页面」。听起来有点抽象，但你可以理解为：让文档学会呼吸。减少不必要的装饰线，统一标题层级，段间距和页边距更均匀，整体视觉噪音降到最低。这类改动很难用一句话说清，但你打开文档的第一眼，会感到「舒服」——就像从嘈杂市场走进一家安静的咖啡馆。\n\n第二个变化是「更强的输出检查」。AI生成文档时，偶尔会出现格式错乱、引用断裂、页码丢失之类的小毛病。Kami这次加强了对输出质量的校验，像是多了一位细心的校对员，在文档交付前反复确认每个细节。\n\n## 对普通读者意味着什么？\n\n如果你只是用AI写点备忘录或读书笔记，Kami的价值可能还不明显。但如果你让AI生成报告、合同初稿、项目提案，那么排版质量直接影响阅读体验和专业度。一份结构清晰、层次分明的文档，会让人更愿意认真读下去；反之，再好的内容也可能被混乱的排版拖累。\n\n对于开发者来说，Kami解决的是一个更实际的问题：AI代理生成的文档，能否直接交付给客户或上级，而不需要人工重新排版？过去这几乎是奢望，现在Kami提供了一个轻量级的解决方案。它不是替代Word或Markdown编辑器，而是嵌入在AI生成流程里的一层质量保障。\n\n## 需要注意的边界\n\n当然，Kami并非万能。它主要擅长处理文字密集型的文档，对复杂表格、图表混排的支持仍需完善；而且它提供的是「排版秩序」，不是「创意设计」——如果你的需求是炫酷的营销海报，那不在它的射程范围内。另外，V1.14版本更新后，建议在正式使用前先测试一下输出效果，毕竟不同场景的排版需求差异很大。\n\nAI生成的文档正在成为日常工作的一部分。Kami提醒我们：好的技术，不只让机器更聪明，也让结果更体面。下次让AI写东西时，记得问一句——它有没有一张好纸？\n\n> 摘要：开源项目Kami更新至V1.14，通过统一排版规矩和强化输出检查，改善AI生成文档的观感与质量。本文解读其更新亮点、适用场景及使用边界，帮助普通读者和开发者理解这项「小工具」如何提升AI文档的专业度。\n\n![原帖图片-1](http://mmbiz.qpic.cn/sz_mmbiz_jpg/iaXamngtyiaXrezSl6Naof6onyzp4iaUU259kNXk9K9wiaOicMpCGU8zPEic35tREfd9BsqAibZ3msARic1pePdxeHvJuscUEaguya9hvmosB3CWPAE/0?from=appmsg)\n\n![原帖图片-2](http://mmbiz.qpic.cn/mmbiz_jpg/iaXamngtyiaXo4yME4wic9VVOM8T6rzQ3vNPY4p0JDCrWdsYL3bic5MDoyOx34bY9p9cbxML7YRueOWeic91emOXMZHXu7JdbeDJsOK67WhKD9f8/0?from=appmsg)\n\n![原帖图片-3](http://mmbiz.qpic.cn/sz_mmbiz_jpg/iaXamngtyiaXpfiaFS0W8cUVGLbdqvSaVJV9WJ8jfTOxGibXaFtxYWaIHKviayWnnicXCcgQf3rpL9l34WG7LS2ZCGhoGuOND7g8WyTD7FYw2ZKwk/0?from=appmsg)",
+    "digest" : "你有没有过这样的体验？让AI帮你写一份方案，内容倒是齐全，但排版像临时拼凑的草稿——标题忽大忽小，段落挤成一团，重点全靠加粗硬撑。这背后的问题，不是AI不懂内容，而是它缺少一套「安静的排版规矩」。\n\n最近，一个叫Kami的开源项目更新到了V",
+    "source" : "来源:@HiTw93",
+    "aiGenerated" : true,
+    "createdAt" : "2026-09-02T08:19:33.199393",
+    "innovationScore" : 7,
+    "originalUrl" : "https://x.com/HiTw93/status/2094792220155285685",
+    "generationMode" : "REWRITE_WITH_MEDIA",
+    "mediaAuditMarkdown" : "#### 媒体审计 (media.json sidecar 权威状态)\n\n| # | 类型 | 下载状态 | 上传状态 | 可发布性 | 微信 URL | 本地路径 | 失败原因 | 原帖 URL |\n|---|---|---|---|---|---|---|---|---|\n| 1 | PHOTO | FAILED | FAILED | DEGRADED | - | - | local file missing (downloadStatus=FAILED) | https://x.com/HiTw93/status/2094792220155285685 |\n| 2 | PHOTO | DOWNLOADED | UPLOADED | PUBLISHABLE | http://mmbiz.qpic.cn/sz_mmbiz_jpg/iaXamngtyiaXrezSl6Naof6onyzp4iaUU259kNXk9K9wiaOicMpCGU8zPEic35tREfd9BsqAibZ3msARic1pePdxeHvJuscUEaguya9hvmosB3CWPAE/0?from=appmsg | media/twitter/2026-09-01/2094792220155285685/2094791635100217344-039a5cff.jpg | - | https://x.com/HiTw93/status/2094792220155285685 |\n| 3 | PHOTO | DOWNLOADED | UPLOADED | PUBLISHABLE | http://mmbiz.qpic.cn/mmbiz_jpg/iaXamngtyiaXo4yME4wic9VVOM8T6rzQ3vNPY4p0JDCrWdsYL3bic5MDoyOx34bY9p9cbxML7YRueOWeic91emOXMZHXu7JdbeDJsOK67WhKD9f8/0?from=appmsg | media/twitter/2026-09-01/2094792220155285685/2094791635133739008-11b3fc80.jpg | - | https://x.com/HiTw93/status/2094792220155285685 |\n| 4 | PHOTO | DOWNLOADED | UPLOADED | PUBLISHABLE | http://mmbiz.qpic.cn/sz_mmbiz_jpg/iaXamngtyiaXpfiaFS0W8cUVGLbdqvSaVJV9WJ8jfTOxGibXaFtxYWaIHKviayWnnicXCcgQf3rpL9l34WG7LS2ZCGhoGuOND7g8WyTD7FYw2ZKwk/0?from=appmsg | media/twitter/2026-09-01/2094792220155285685/2094791635108507648-a8a575ec.jpg | - | https://x.com/HiTw93/status/2094792220155285685 |\n"
+  }
+}

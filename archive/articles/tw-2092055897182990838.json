@@ -1,0 +1,22 @@
+{
+  "articleId" : "tw-2092055897182990838",
+  "status" : "PENDING_PUBLISH",
+  "createdAt" : "2026-09-02T08:20:33.741401",
+  "scheduledPublishAt" : "2026-09-03T08:00:00",
+  "draftCreatedAt" : null,
+  "wechatDraftMediaId" : null,
+  "archiveFile" : "archive/2026-09-02.md",
+  "article" : {
+    "id" : "tw-2092055897182990838",
+    "title" : "数字世界的\"诗与远方\"：当程序员开始玩转新玩具",
+    "content" : "这周在临安风之谷转了转，远处的水面泛着难得的蓝绿色，那种空旷感让人一下子从代码里跳脱出来。回到电脑前，发现自己追的潮流周刊已经更新到第279期了。就像有人坚持写日记、有人坚持跑步，这份周刊的坚持本身就是一件挺酷的事。这期收集了几个有意思的东西，想跟你们聊聊。\n\n## 不只是工具，更是新思路\n\n这期最让我眼前一亮的是 **Cumora** 开源的消息。你可能没听过Teams Agent，但你可以把它理解成\"团队协作里的智能管家\"——它能帮你自动整理消息、提炼重点、甚至回应常规问题。以前这种能力都是\"只此一家，别无分店\"，现在开源了，意味着普通开发者也能把它改造成自己想要的样子。就像你终于拿到了一把万能钥匙，开哪扇门、怎么开，全凭你的想象力。\n\n另一款叫 **Omarchy** 的操作系统，被很多人称为\"颜值天花板\"。说实话，Linux系统以往给人的印象总是\"呆板的效率工具\"，但Omarchy重新定义了这种认知——它像是一间装修极简、采光极好的工作室，让人愿意待在里面。使用它的人，追求的不只是功能，还有工作时的舒适感与美学享受。\n\n## 小而美，是技术的浪漫\n\n上周有个朋友问我，\"代码高亮\"是什么？打个比方：你在看一篇长文时，如果所有字都是一个颜色，找一段关键信息要花很久；但如果你把标题变成加粗、关键句变成蓝色，扫一眼就能抓到重点。**MicroLighter** 做的事，就是用极小的代码体积给程序加上这种\"色彩标注\"。在资源有限的环境里，这种\"小而美\"的解决方案很见功底，也很有温度。\n\n**iGhostty** 则更直接——它把命令行终端搬进了iPhone。可能你会好奇：手机上有必要用命令行吗？想象一下，当你出差在外，只能靠手机时，却能像在电脑上一样快速操作服务器、查看日志——这种\"随时随地的掌控感\"，对技术人而言是一种安全感。\n\n## 浪潮之下，我们在哪里\n\n本期还提到了一份《Claude Code创业公司指南》。Claude Code是AI编程助手，那份指南探讨的是：当AI能写代码时，一个技术创业者该如何定位自己？我的看法是，AI越强大，人的判断力越值钱。就像计算器普及后，会计并没有消失，而是转去做更复杂的财务分析。工具负责\"怎么做\"，而我们思考\"为什么做\"和\"做什么\"。\n\n不过，拥抱新工具的同时，也别忘了节奏。我那天在风之谷看着蓝绿色的水面，忽然觉得，技术更新的速度再快，也要留点时间给真实的世界。工具最终是服务于人的感受的，别走得太远，忘了出发时的期待。\n\n![原帖图片-1](http://mmbiz.qpic.cn/mmbiz_jpg/iaXamngtyiaXrmicJmWUSRyGYhiaaOibYrNsd6g79bWmaRJYFibr1PEGjal770vFLiaG6Par1O3NkXGkAdgOffXPontJJcyKamK8icBkSjWcRODnq00/0?from=appmsg)",
+    "digest" : "这次周刊推荐了开源AI助手、高颜值Linux系统、轻量级代码高亮库、iPhone终端应用，并探讨了AI时代创业者的定位。工具越来越强，但别忘了我们才是那个决定方向的人。",
+    "source" : "来源:@HiTw93",
+    "aiGenerated" : true,
+    "createdAt" : "2026-09-02T08:20:33.741401",
+    "innovationScore" : 5,
+    "originalUrl" : "https://x.com/HiTw93/status/2092055897182990838",
+    "generationMode" : "REWRITE_WITH_MEDIA",
+    "mediaAuditMarkdown" : "#### 媒体审计 (media.json sidecar 权威状态)\n\n| # | 类型 | 下载状态 | 上传状态 | 可发布性 | 微信 URL | 本地路径 | 失败原因 | 原帖 URL |\n|---|---|---|---|---|---|---|---|---|\n| 1 | PHOTO | DOWNLOADED | UPLOADED | PUBLISHABLE | http://mmbiz.qpic.cn/mmbiz_jpg/iaXamngtyiaXrmicJmWUSRyGYhiaaOibYrNsd6g79bWmaRJYFibr1PEGjal770vFLiaG6Par1O3NkXGkAdgOffXPontJJcyKamK8icBkSjWcRODnq00/0?from=appmsg | media/twitter/2026-08-25/2092055897182990838/2092055825342959616-cdfc1641.jpg | - | https://x.com/HiTw93/status/2092055897182990838 |\n"
+  }
+}

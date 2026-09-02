@@ -7,6 +7,7 @@ import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.ChatMessage;
+import dev.langchain4j.exception.InvalidRequestException;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.response.ChatResponse;
 import org.junit.jupiter.api.BeforeEach;
@@ -286,5 +287,37 @@ class LangChain4jLlmClientTest {
                 .isInstanceOf(RetryableException.class)
                 .extracting(e -> ((RetryableException) e).getErrorCode())
                 .isEqualTo(ErrorCode.EXTERNAL_API_ERROR);
+    }
+
+    @Test
+    void shouldDescribeUpstreamHttpErrorFromCauseChain() {
+        // 模拟 langchain4j 1.16 异常链: HttpException(400, body) 为 root cause,
+        // 被 ExceptionMapper 包装为 InvalidRequestException (今晨 glm 400 的场景).
+        dev.langchain4j.exception.HttpException httpException =
+                new dev.langchain4j.exception.HttpException(400, "{\"error\":{\"code\":\"1301\"}}");
+        InvalidRequestException wrapped = new InvalidRequestException(httpException);
+
+        assertThat(LangChain4jLlmClient.describe(wrapped))
+                .isEqualTo("HTTP 400, body={\"error\":{\"code\":\"1301\"}}");
+    }
+
+    @Test
+    void shouldReturnEmptyDescribeForNonHttpException() {
+        assertThat(LangChain4jLlmClient.describe(new RuntimeException("timeout")))
+                .isEmpty();
+    }
+
+    @Test
+    void shouldSanitizeApiKeyPatternsAndTruncateLongBody() {
+        assertThat(LangChain4jLlmClient.sanitizeBody("Bearer abc123def456ghi789 done"))
+                .isEqualTo("Bearer *** done");
+        assertThat(LangChain4jLlmClient.sanitizeBody("{\"api_key\":\"sk-abcdefgh1234567890\"}"))
+                .doesNotContain("sk-abcdefgh1234567890");
+        String longBody = "x".repeat(500);
+        assertThat(LangChain4jLlmClient.sanitizeBody(longBody))
+                .hasSize(300 + "...(截断)".length())
+                .endsWith("...(截断)");
+        assertThat(LangChain4jLlmClient.sanitizeBody(null)).isEqualTo("(空)");
+        assertThat(LangChain4jLlmClient.sanitizeBody("  ")).isEqualTo("(空)");
     }
 }

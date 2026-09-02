@@ -1,0 +1,22 @@
+{
+  "articleId" : "tw-2087912050379174224",
+  "status" : "PENDING_PUBLISH",
+  "createdAt" : "2026-09-02T08:22:20.785169",
+  "scheduledPublishAt" : "2026-09-03T08:00:00",
+  "draftCreatedAt" : null,
+  "wechatDraftMediaId" : null,
+  "archiveFile" : "archive/2026-09-02.md",
+  "article" : {
+    "id" : "tw-2087912050379174224",
+    "title" : "新版Mole for Mac：少打扰、不撒谎，让你的Mac更省心",
+    "content" : "如果你的Mac最近越用越慢，或者电量掉得像漏水的管道，那这款名为Mole的小工具，或许正是你需要的“系统管家”。前两天，Mole for Mac推出1.12版本，主题听上去有点哲学：**“少用你的Mac，以及诚实面对它做了什么。”**\n\n翻译成人话：它不再只是帮你“一键清理垃圾”，而是通过降低后台采样频率，减少CPU和电量的无用消耗。以前那些“瞬间提速”的工具，往往是通过激进清内存换来的虚假狂欢；而Mole这次追求的是“几天变轻，而非几分钟骗你”，长时间运行下拉菜单依然顺滑，也没有那种越用越卡的老毛病。\n\n**清理功能也不再莽撞。** 它能识别Dia、Zed这类开发工具残留的缓存，并清楚标注出哪些文件是云同步的——避免误删你正在用的数据。更贴心的是，它只报告“实际拿回多少空间”，而不是画个大饼。遇到顽固文件夹也不会卡死，直接跳过继续干活。聊天记录、本地AI模型、正在构建的项目，统统不会碰。这就像一位懂行的管家，清理的是灰尘，不动你的传家宝。\n\n**更新这件事，Mole也做了改进。** App Store的应用如果安全，它会直接代为更新；Homebrew的更新进度终于能如实显示，就算网络很差也能熬过去；ChatGPT、Chrome这类自带升级器的程序，它会乖乖交还控制权。最直观的进步是：当macOS拒绝替换软件时，它不只是沉默，而是告诉你“为什么不行”，并自动打开对应的设置界面。诚实，一直是很多工具最稀缺的美德。\n\n**电池护理新增“按需充到100%”**，旁边还多了一块实时仪表盘：当前功耗、真实健康状况、以及哪个应用最“贪吃”。对于总担心电池“健康值虚标”的用户来说，这算是个直给的答案。\n\n细节上同样花了不少心思：菜单栏里的小动物跑者现在换成了来自开源项目RunCat Neo的像素风素材，跑动速度会随真实负载变化，既美观又直观。此外，默认温度单位改为摄氏度，新增开源协议面板，SMART硬盘故障会直接纳入健康评分，VoiceOver辅助功能修复了，双屏显示的“分身窗口”问题也解决了。\n\n**对你的意义在哪？** 对普通用户来说，Mole的价值不在于“一天清出10GB”的震撼弹，而是它肯说实话：哪些空间真的回收了，哪些电池消耗是暂时的，哪些更新必须交给原厂。对开发者而言，它的克制和透明度——比如不碰你的聊天记录和本地模型——意味着可以放心在主力机上使用，而不是在清理工具和宝贵数据之间反复纠结。\n\n当然，它也不是万能药。清理缓存本身解决不了换新机的硬需求；电池“恢复”也有物理极限。但如果你厌倦了那些只会画饼、动不动就乱杀进程的“垃圾清理大师”，可以试试Mole 1.12——少折腾，多知情，本身就是一种高效。\n\n> 摘要：Mole for Mac 1.12新版理念“少用你的Mac，诚实面对其行为”，主打降低后台打扰、温和清理缓存、如实报告回收空间，并改进了应用更新、电池监控显示与视觉细节，让系统管理更省心可靠。\n\n![原帖图片-1](http://mmbiz.qpic.cn/mmbiz_jpg/iaXamngtyiaXoUKbUDVLZsAsgLyvaeEzDiasEiaEAUZyf12nV3PwicMNWE0UA52xL14PJ8ugmcvne4Uia1mibPLrE13m1WW1icCbAviaK7Dm5crjQBnk/0?from=appmsg)",
+    "digest" : "如果你的Mac最近越用越慢，或者电量掉得像漏水的管道，那这款名为Mole的小工具，或许正是你需要的“系统管家”。前两天，Mole for Mac推出1.12版本，主题听上去有点哲学：**“少用你的Mac，以及诚实面对它做了什么。”**\n\n翻",
+    "source" : "来源:@HiTw93",
+    "aiGenerated" : true,
+    "createdAt" : "2026-09-02T08:22:20.785169",
+    "innovationScore" : 7,
+    "originalUrl" : "https://x.com/HiTw93/status/2087912050379174224",
+    "generationMode" : "REWRITE_WITH_MEDIA",
+    "mediaAuditMarkdown" : "#### 媒体审计 (media.json sidecar 权威状态)\n\n| # | 类型 | 下载状态 | 上传状态 | 可发布性 | 微信 URL | 本地路径 | 失败原因 | 原帖 URL |\n|---|---|---|---|---|---|---|---|---|\n| 1 | PHOTO | DOWNLOADED | UPLOADED | PUBLISHABLE | http://mmbiz.qpic.cn/mmbiz_jpg/iaXamngtyiaXoUKbUDVLZsAsgLyvaeEzDiasEiaEAUZyf12nV3PwicMNWE0UA52xL14PJ8ugmcvne4Uia1mibPLrE13m1WW1icCbAviaK7Dm5crjQBnk/0?from=appmsg | media/twitter/2026-08-13/2087912050379174224/2087911925908987904-6290677a.jpg | - | https://x.com/HiTw93/status/2087912050379174224 |\n"
+  }
+}

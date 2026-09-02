@@ -1,0 +1,22 @@
+{
+  "articleId" : "tw-2091172295410876670",
+  "status" : "PENDING_PUBLISH",
+  "createdAt" : "2026-09-02T08:20:47.021814",
+  "scheduledPublishAt" : "2026-09-03T08:00:00",
+  "draftCreatedAt" : null,
+  "wechatDraftMediaId" : null,
+  "archiveFile" : "archive/2026-09-02.md",
+  "article" : {
+    "id" : "tw-2091172295410876670",
+    "title" : "你的Mac里藏了多少垃圾？这个小工具连屏幕都帮你擦干净",
+    "content" : "用过Mac的人应该都有这种感觉：刚买回来的时候，它像新媳妇一样干净利落，用了一年半载之后，打开软件就转圈，硬盘空间莫名其妙就没了，风扇呼呼地转，好像里面住了一个勤劳的扫地机器人，但扫出来的全是灰尘和垃圾。\n\n这就是Mac的日常——系统缓存、日志文件、没用的语言包、旧版本的App残留……它们像杂物间里舍不得扔的纸箱子，越堆越多，直到你把硬盘塞满，才意识到问题的严重性。\n\n**清理垃圾，是每个Mac用户的必修课**\n\n市面上清理Mac的工具不少，但大多都专注在“内部”问题上——清缓存、删垃圾、释放内存。有的做得确实不错，操作也简单，一键扫描，清理完你会觉得系统轻快了不少。\n\n但你有没有想过，Mac的“脏”其实分两种：一种是里面看不见的，还有一种是你每天都能看见的——屏幕上的指纹，键盘缝隙里的碎屑和灰尘。尤其是那些喜欢一边吃零食一边敲代码或者写稿的人，键盘上那画面，简直是灾难现场。\n\n针对这个问题，Mole也给出了一个非常“Mac风格”的解决方案。\n\n**别小看这个功能，它解决了一个大痛点**\n\nMole在清理完系统垃圾之后，还有一招叫“Clean Screen Input Protection”——屏幕清洁输入保护。简单说，就是在你擦屏幕和键盘的时候，锁住所有按键，防止误触。\n\n听起来很麻烦对不对？实际上操作简单到不行：在设置里打开这个保护功能，然后从菜单栏选择“Clean Screen”，所有按键就都“死”了。这时候你就可以放心大胆地拿湿巾、抹布、甚至酒精棉去擦屏幕和键盘，不管你怎么碰，屏幕上都不会弹出一堆乱七八糟的东西。\n\n你可能会问，这有什么稀奇的？很多笔记本都有“笔记本模式”或者合盖清洁，但Mac笔记本不一样——你按下Touch ID或者开机键，它会解锁；你碰一下触摸板，它会有反应；甚至你在擦键盘的时候，按到了Command+Q，正在写的文章就直接关了。\n\n这个功能的巧妙之处就在于：它把“清洁”这件事从“物理操作”升级成了“系统操作”，让你在擦电脑的时候，不需要小心翼翼地避开键盘，也不用怕误触导致数据丢失。擦完，再合上盖子或者按一下键，一切恢复正常，干净又安心。\n\n**内外兼修，才算真的干净**\n\n说实话，Mole这个名字起得就挺妙——它像一只小鼹鼠，钻进你的Mac内部，把藏在各个角落的垃圾都“拱”出来，清理干净。而当你想擦擦外面的时候，它又变身成一个贴心的管家，把你和电脑之间的“误操作”挡在门外。\n\n对于普通用户来说，Mole的价值在于省心：清理垃圾这件事不需要懂什么技术细节，扫一下，清一下，完事；对于开发者或者重度用户来说，它的价值在于专业：能处理那些手动清理很难触及的深层文件，而且不会误删系统文件。\n\n当然，任何清理工具都要注意一个问题——不要过度清理。有些工具为了显示自己“清理能力强”，动不动就删掉一堆看似无用但实际上系统还在调用的文件，结果清理完系统反而崩溃了。Mole在这一点上做得相对谨慎，它不会碰你的用户数据，只处理真正无用的缓存和临时文件。\n\n如果你发现自己的Mac越来越慢，开机越来越久，硬盘空间越来越紧，不妨试试Mole。清理完里面，顺带把外面也擦一擦，内外兼修，才是一台真正干净的Mac。\n\n> 摘要：Mole是一款Mac清理工具，不仅能清扫系统内部的缓存和垃圾文件，还推出了屏幕清洁输入保护功能，擦屏幕时锁住所有按键防误触，让内外同时焕新。操作简单，适合从普通用户到开发者，但需注意避免过度清理。\n\n![原帖图片-1](http://mmbiz.qpic.cn/sz_mmbiz_jpg/iaXamngtyiaXomhKBVpUewIXe3VDETvTib4a9H4EoBN5dhFXTELtibjw3O0E96prDfibbb9zTyVicgkJdU8LaOMWkKw58eKceKib68LeM7cJEiclkdk/0?from=appmsg)\n\n![原帖图片-2](http://mmbiz.qpic.cn/sz_mmbiz_jpg/iaXamngtyiaXoRGa9aNYowNTRibyTEFSRAJhbT3SmTevggtj83b3XLfias4CwEB9nScpkhMjxic3qlISWwnlnUVXNUCTsg8FO1KqxkBiaFuxsOaPg/0?from=appmsg)\n\n![原帖图片-3](http://mmbiz.qpic.cn/mmbiz_jpg/iaXamngtyiaXoGYJlPDdjDXzBFkic4496lUlHrM8UVe39HzJy0KYasckV9oWo0o36ZLtct1U9f5ME4GDD5RV6znaF5iaicClnnRxe7k3hDsO6ribs/0?from=appmsg)",
+    "digest" : "用过Mac的人应该都有这种感觉：刚买回来的时候，它像新媳妇一样干净利落，用了一年半载之后，打开软件就转圈，硬盘空间莫名其妙就没了，风扇呼呼地转，好像里面住了一个勤劳的扫地机器人，但扫出来的全是灰尘和垃圾。\n\n这就是Mac的日常——系统缓存、",
+    "source" : "来源:@HiTw93",
+    "aiGenerated" : true,
+    "createdAt" : "2026-09-02T08:20:47.021814",
+    "innovationScore" : 4,
+    "originalUrl" : "https://x.com/HiTw93/status/2091172295410876670",
+    "generationMode" : "REWRITE_WITH_MEDIA",
+    "mediaAuditMarkdown" : "#### 媒体审计 (media.json sidecar 权威状态)\n\n| # | 类型 | 下载状态 | 上传状态 | 可发布性 | 微信 URL | 本地路径 | 失败原因 | 原帖 URL |\n|---|---|---|---|---|---|---|---|---|\n| 1 | PHOTO | DOWNLOADED | UPLOADED | PUBLISHABLE | http://mmbiz.qpic.cn/sz_mmbiz_jpg/iaXamngtyiaXomhKBVpUewIXe3VDETvTib4a9H4EoBN5dhFXTELtibjw3O0E96prDfibbb9zTyVicgkJdU8LaOMWkKw58eKceKib68LeM7cJEiclkdk/0?from=appmsg | media/twitter/2026-08-22/2091172295410876670/2091172218147622912-c6739749.jpg | - | https://x.com/HiTw93/status/2091172295410876670 |\n| 2 | PHOTO | DOWNLOADED | UPLOADED | PUBLISHABLE | http://mmbiz.qpic.cn/sz_mmbiz_jpg/iaXamngtyiaXoRGa9aNYowNTRibyTEFSRAJhbT3SmTevggtj83b3XLfias4CwEB9nScpkhMjxic3qlISWwnlnUVXNUCTsg8FO1KqxkBiaFuxsOaPg/0?from=appmsg | media/twitter/2026-08-22/2091172295410876670/2091172278205870080-cd17f2e6.jpg | - | https://x.com/HiTw93/status/2091172295410876670 |\n| 3 | PHOTO | DOWNLOADED | UPLOADED | PUBLISHABLE | http://mmbiz.qpic.cn/mmbiz_jpg/iaXamngtyiaXoGYJlPDdjDXzBFkic4496lUlHrM8UVe39HzJy0KYasckV9oWo0o36ZLtct1U9f5ME4GDD5RV6znaF5iaicClnnRxe7k3hDsO6ribs/0?from=appmsg | media/twitter/2026-08-22/2091172295410876670/2091172278201700352-a2025c25.jpg | - | https://x.com/HiTw93/status/2091172295410876670 |\n"
+  }
+}

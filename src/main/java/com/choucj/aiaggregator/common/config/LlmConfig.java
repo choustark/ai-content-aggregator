@@ -14,8 +14,8 @@ import java.time.Duration;
  *
  * <p>注册两个 {@link ChatModel} Bean:
  * <ul>
- *   <li>{@code deepSeekChatModel} — 主路径, DeepSeek 兼容 OpenAI API (modelName = {@code deepseek-chat})</li>
- *   <li>{@code glmChatModel} — 备用路径, 智谱 GLM 兼容 OpenAI API (modelName = {@code glm-4-plus})</li>
+ *   <li>{@code deepSeekChatModel} — 主路径, DeepSeek 兼容 OpenAI API (modelName 可配置, 默认 {@code deepseek-chat})</li>
+ *   <li>{@code glmChatModel} — 备用路径, 智谱 GLM 兼容 OpenAI API (modelName 可配置, 默认 {@code glm-4.7})</li>
  * </ul>
  *
  * <p>调用方 (InnovationFilter / ContentRewriter) 通过 {@link Qualifier} 区分注入.
@@ -38,7 +38,7 @@ public class LlmConfig {
     /**
      * DeepSeek 主路径 ChatModel.
      *
-     * @param properties LLM 配置 (deepseek.apiKey / deepseek.baseUrl)
+     * @param properties LLM 配置 (deepseek.apiKey / deepseek.baseUrl / deepseek.modelName)
      * @return OpenAI 兼容的 DeepSeek ChatModel
      */
     @Bean(name = "deepSeekChatModel")
@@ -48,7 +48,7 @@ public class LlmConfig {
         return OpenAiChatModel.builder()
                 .baseUrl(deepseek.getBaseUrl())
                 .apiKey(deepseek.getApiKey())
-                .modelName("deepseek-chat")
+                .modelName(deepseek.getModelName())
                 .timeout(DEFAULT_TIMEOUT)
                 .build();
     }
@@ -56,7 +56,7 @@ public class LlmConfig {
     /**
      * GLM 备用路径 ChatModel.
      *
-     * @param properties LLM 配置 (glm.apiKey / glm.baseUrl)
+     * @param properties LLM 配置 (glm.apiKey / glm.baseUrl / glm.modelName)
      * @return OpenAI 兼容的 GLM ChatModel
      */
     @Bean(name = "glmChatModel")
@@ -66,7 +66,7 @@ public class LlmConfig {
         return OpenAiChatModel.builder()
                 .baseUrl(glm.getBaseUrl())
                 .apiKey(glm.getApiKey())
-                .modelName("glm-4-plus")
+                .modelName(glm.getModelName())
                 .timeout(DEFAULT_TIMEOUT)
                 .build();
     }

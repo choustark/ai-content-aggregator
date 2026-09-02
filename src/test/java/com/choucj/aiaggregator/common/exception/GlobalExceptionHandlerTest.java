@@ -3,10 +3,12 @@ package com.choucj.aiaggregator.common.exception;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpMethod;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.servlet.resource.NoResourceFoundException;
 
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -23,12 +25,13 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *   <li>测试速度 &lt; 0.1s / 用例</li>
  * </ul>
  *
- * <p>验证 4 条映射路径:
+ * <p>验证 6 条映射路径:
  * <ol>
  *   <li>{@code RetryableException} → 503 + ErrorResponse(code=RETRYABLE_ERROR)</li>
  *   <li>{@code NonRetryableException} → 400 + ErrorResponse(code=NON_RETRYABLE_ERROR)</li>
  *   <li>{@code DegradationException} → 503 + ErrorResponse(code=DEGRADATION_NEEDED, message="服务降级,请稍后重试")</li>
  *   <li>{@code NotFoundException} → 404 + ErrorResponse(code=NON_RETRYABLE_ERROR)</li>
+ *   <li>{@code NoResourceFoundException} → 404 + ErrorResponse(路由不存在, 不落入 500 兜底)</li>
  *   <li>{@code Exception} 兜底 → 500 + ErrorResponse(code=INTERNAL_ERROR, message="系统错误")</li>
  * </ol>
  */
@@ -88,6 +91,17 @@ class GlobalExceptionHandlerTest {
     }
 
     @Test
+    void shouldMapNoResourceFoundExceptionTo404Not500() throws Exception {
+        // 路径打错是客户端错误 → 404, 不应被 Exception 兜底吞成 500 "系统错误" 误导排查
+        // (standalone MockMvc 无静态资源 handler, 由测试端点直接抛 NoResourceFoundException 模拟
+        //  Spring Boot 3 生产环境未匹配路由时 ResourceHttpRequestHandler 的抛出行为)
+        mockMvc.perform(get("/test/no-resource"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.code").value(ErrorCode.NON_RETRYABLE_ERROR.name()))
+                .andExpect(jsonPath("$.message").value("请求路径不存在"));
+    }
+
+    @Test
     void shouldMapUnexpectedExceptionTo500WithoutStackTraceLeak() throws Exception {
         mockMvc.perform(get("/test/unexpected"))
                 .andExpect(status().isInternalServerError())
@@ -129,6 +143,11 @@ class GlobalExceptionHandlerTest {
         @GetMapping("/test/not-found")
         public void throwNotFound() {
             throw new NotFoundException(ErrorCode.NON_RETRYABLE_ERROR, "Article 状态未找到");
+        }
+
+        @GetMapping("/test/no-resource")
+        public void throwNoResourceFound() throws NoResourceFoundException {
+            throw new NoResourceFoundException(HttpMethod.GET, "test/no-such-route");
         }
 
         @GetMapping("/test/unexpected")

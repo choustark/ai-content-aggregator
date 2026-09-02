@@ -31,7 +31,9 @@ import java.util.Objects;
  * 不细分 LLM 来源 / 状态码 (YAGNI — 调用方按 Retryable / NonRetryable 决策降级即可,
  * Story 5.4 多模型投票若需统计再扩展).
  *
- * <p><b>日志:</b> 不记录 prompt、响应正文或上游异常 message；仅记录 model、耗时、长度和异常类型.
+ * <p><b>日志:</b> 不记录 prompt、响应正文；失败时记录 model、耗时、长度和异常类型, 并附上游
+ * HTTP 状态与错误体摘要 ({@link #sanitizeBody} 脱敏 + 300 字符截断) — 否则上游 4xx
+ * (智谱内容审核 1301 / 参数拒绝等) 只剩 {@code InvalidRequestException} 一个类型名, 无法定位根因.
  *
  * <p>架构 delta (Story 2.3a): 默认 DeepSeek + 降级 GLM 决策, Story 5.4 多模型投票时
  * 本逻辑会被覆盖.
@@ -111,7 +113,8 @@ public class LangChain4jLlmClient implements LlmClient {
                     model, System.currentTimeMillis() - start, response == null ? 0 : response.length());
             return response;
         } catch (RuntimeException e) {
-            log.error("LLM 调用失败 (model={}, 不降级): errorType={}", model, e.getClass().getSimpleName());
+            log.error("LLM 调用失败 (model={}, 不降级): errorType={}, upstream={}",
+                    model, e.getClass().getSimpleName(), describe(e));
             throw new RetryableException(
                     ErrorCode.EXTERNAL_API_ERROR,
                     "LLM 调用失败(model=" + model + ", errorType=" + e.getClass().getSimpleName() + ")");
@@ -140,7 +143,8 @@ public class LangChain4jLlmClient implements LlmClient {
                     model, System.currentTimeMillis() - start, response == null ? 0 : response.length());
             return new ChatResult(model, response);
         } catch (RuntimeException e) {
-            log.error("LLM 调用失败 (model={}, 不降级): errorType={}", model, e.getClass().getSimpleName());
+            log.error("LLM 调用失败 (model={}, 不降级): errorType={}, upstream={}",
+                    model, e.getClass().getSimpleName(), describe(e));
             throw new RetryableException(
                     ErrorCode.EXTERNAL_API_ERROR,
                     "LLM 调用失败(model=" + model + ", errorType=" + e.getClass().getSimpleName() + ")");
@@ -205,6 +209,38 @@ public class LangChain4jLlmClient implements LlmClient {
         if (value == null || value.isBlank()) {
             throw new IllegalArgumentException("prompt 不能为空");
         }
+    }
+
+    /**
+     * 提取上游 HTTP 错误摘要 — 形如 {@code HTTP 400, body={...}}.
+     *
+     * <p>langchain4j 1.16 异常链: 上游 4xx/5xx → {@code HttpException(statusCode, body)} (root cause)
+     * → {@code ExceptionMapper} 包装为 {@code InvalidRequestException} 等具体类型.
+     * 非 HTTP 异常 (超时/连接拒绝) 返回空串, 不额外记录.
+     */
+    static String describe(Throwable e) {
+        Throwable root = e;
+        while (root.getCause() != null && root.getCause() != root) {
+            root = root.getCause();
+        }
+        if (root instanceof dev.langchain4j.exception.HttpException httpException) {
+            return "HTTP " + httpException.statusCode() + ", body=" + sanitizeBody(httpException.getMessage());
+        }
+        return "";
+    }
+
+    /**
+     * 错误体脱敏 + 截断 — api-key / Bearer token 模式替换为掩码, 300 字符截断.
+     */
+    static String sanitizeBody(String body) {
+        if (body == null || body.isBlank()) {
+            return "(空)";
+        }
+        String sanitized = body
+                .replaceAll("(?i)(bearer\\s+)[A-Za-z0-9._\\-]+", "$1***")
+                .replaceAll("(?i)((?:api[-_]?key|access[_-]?token)[\"'\\s:=]+)[^\"'\\s,}&]+", "$1***")
+                .replaceAll("(sk-[A-Za-z0-9]{6})[A-Za-z0-9]+", "$1***");
+        return sanitized.length() > 300 ? sanitized.substring(0, 300) + "...(截断)" : sanitized;
     }
 
     private static String extractText(ChatResponse response) {

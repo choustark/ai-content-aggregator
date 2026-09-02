@@ -1,0 +1,22 @@
+{
+  "articleId" : "tw-2093597055126212627",
+  "status" : "PENDING_PUBLISH",
+  "createdAt" : "2026-09-02T08:20:21.427524",
+  "scheduledPublishAt" : "2026-09-03T08:00:00",
+  "draftCreatedAt" : null,
+  "wechatDraftMediaId" : null,
+  "archiveFile" : "archive/2026-09-02.md",
+  "article" : {
+    "id" : "tw-2093597055126212627",
+    "title" : "从“小而美”到“被看见”，一个独立开发者的产品登上了 Product Hunt",
+    "content" : "今天，独立开发者的圈子被一个消息刷屏了：Mole 正式上线 Product Hunt 了。\n\n如果你还没听过 Mole，简单来说，它是一个体积很小、但很实用的效率工具。你可以在菜单栏常驻它，随时帮你处理一些复制、粘贴之外更复杂的文本操作。\n\n这不是什么大厂发布会，也不是融资公告，但这件事对于做产品的人，尤其是独立开发者来说，分量不轻。Product Hunt 是全球最大的“新产品首发地”，无数优秀的产品每天在那里被全球用户和投资人“考古”。能上线，本身就意味着产品具备了一定的完成度和可被验证的价值。\n\n对于 Mole 的开发者来说，这一步意味着**产品开始从“自己用着好”走向“用户说了算”**。不再只是自己写给自己用的脚本，而是要把用户体验、边界情况和稳定性都收拾利索，放到聚光灯下接受检验。\n\n对普通用户而言，这其实也是一个很微妙的信号：**一个好的工具，不是看它功能堆了多少，而是看它能不能像 Mole 这样，把一个点做到极致**。很多效率工具的痛点不是不够强大，而是太笨重，反而让人没耐心用。Mole 的设计思路恰恰相反。\n\n当然，Product Hunt 的上线只是开始，不代表产品就完美了。投票数和评论热度可能会带来一波流量，但真正决定产品命运的，还是用户留存和口碑。后续的 bug 响应速度、功能迭代方向、是否愿意听取非技术用户的反馈，才是更重要的。\n\n如果你用过 Mole，觉得它帮到你，或者甚至觉得“还差点意思”，也欢迎去投上一票，或留下真实的使用感受。对独立开发者来说，**真实反馈比客气点赞珍贵得多**。\n\n**[你也可以在这里找到 Mole 并留下你的意见](https://www.producthunt.com/products/mole-3)**\n\n![原帖图片-1](http://mmbiz.qpic.cn/mmbiz_jpg/iaXamngtyiaXo7sicHPo9ZfUnWGWXCKEcNUPDNRAKgyswfGiaNibwg4aVxn1gnxgkYq1UY2yOhfmTBmDdlIPib5mHFfnWzLHXxHibibZG5ia8bBwe5TU/0?from=appmsg)",
+    "digest" : "Mole 正式上线 Product Hunt，标志着这款小而美的效率工具迈入公众检验阶段。对独立开发者，这是从自用到被看见的转折；对用户，则提供了支持独立产品的机会，也提醒我们关注工具的本质价值。",
+    "source" : "来源:@HiTw93",
+    "aiGenerated" : true,
+    "createdAt" : "2026-09-02T08:20:21.427524",
+    "innovationScore" : 6,
+    "originalUrl" : "https://x.com/HiTw93/status/2093597055126212627",
+    "generationMode" : "REWRITE_WITH_MEDIA",
+    "mediaAuditMarkdown" : "#### 媒体审计 (media.json sidecar 权威状态)\n\n| # | 类型 | 下载状态 | 上传状态 | 可发布性 | 微信 URL | 本地路径 | 失败原因 | 原帖 URL |\n|---|---|---|---|---|---|---|---|---|\n| 1 | PHOTO | DOWNLOADED | UPLOADED | PUBLISHABLE | http://mmbiz.qpic.cn/mmbiz_jpg/iaXamngtyiaXo7sicHPo9ZfUnWGWXCKEcNUPDNRAKgyswfGiaNibwg4aVxn1gnxgkYq1UY2yOhfmTBmDdlIPib5mHFfnWzLHXxHibibZG5ia8bBwe5TU/0?from=appmsg | media/twitter/2026-08-29/2093597055126212627/2093596980249530368-b89f7b77.jpg | - | https://x.com/HiTw93/status/2093597055126212627 |\n"
+  }
+}

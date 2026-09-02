@@ -54,6 +54,38 @@ class LlmPropertiesTest {
     }
 
     @Test
+    void shouldBindModelNameWhenConfigured() {
+        new ApplicationContextRunner()
+                .withUserConfiguration(TestConfig.class)
+                .withInitializer(ctx -> ctx.getEnvironment().getPropertySources()
+                        .addFirst(new MapPropertySource("test", Map.of(
+                                "llm.deepseek.api-key", "ds-key",
+                                "llm.deepseek.model-name", "deepseek-reasoner",
+                                "llm.glm.api-key", "glm-key",
+                                "llm.glm.model-name", "glm-5.3-flash"))))
+                .run(ctx -> {
+                    LlmProperties props = ctx.getBean(LlmProperties.class);
+                    assertThat(props.getDeepseek().getModelName()).isEqualTo("deepseek-reasoner");
+                    assertThat(props.getGlm().getModelName()).isEqualTo("glm-5.3-flash");
+                });
+    }
+
+    @Test
+    void shouldApplyDefaultModelNameWhenOmitted() {
+        new ApplicationContextRunner()
+                .withUserConfiguration(TestConfig.class)
+                .withInitializer(ctx -> ctx.getEnvironment().getPropertySources()
+                        .addFirst(new MapPropertySource("test", Map.of(
+                                "llm.deepseek.api-key", "ds-key",
+                                "llm.glm.api-key", "glm-key"))))
+                .run(ctx -> {
+                    LlmProperties props = ctx.getBean(LlmProperties.class);
+                    assertThat(props.getDeepseek().getModelName()).isEqualTo("deepseek-chat");
+                    assertThat(props.getGlm().getModelName()).isEqualTo("glm-4.7");
+                });
+    }
+
+    @Test
     void shouldFailToStartWhenDeepSeekKeyMissing() {
         new ApplicationContextRunner()
                 .withUserConfiguration(TestConfig.class)
