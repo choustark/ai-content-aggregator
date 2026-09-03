@@ -34,7 +34,8 @@ import java.util.List;
  * <ol>
  *   <li>遍历 {@code twitter.accounts} 列表, 逐个调 {@link TwitterDiscoveryClient#discoverTweets(String)}</li>
  *   <li>对每条发现返回的 Tweet 调 {@link #enrichTweet(Tweet)}</li>
- *   <li>enrichTweet: 先查 {@code tweet:{id}} Redis 缓存 → 命中直接合并 →
+ *   <li>enrichTweet: discovery 已含正文(x-author scraper) → 直接归一化返回;
+ *       否则查 {@code tweet:{id}} Redis 缓存 → 命中直接合并 →
  *       未命中走 twscrape 主 → FxTwitter 备 双链降级, 用 {@link Tweet#toBuilder()} 合并 → 写回缓存</li>
  * </ol>
  *
@@ -106,6 +107,9 @@ public class TwitterSource implements DataSource<Tweet> {
      *
      * <p>流程:
      * <ol>
+     *   <li>discovery 已返回完整数据 (正文 + 媒体或互动数, 如 x-author scraper provider)
+     *       → 直接归一化返回, 跳过缓存与双链调用 — 双链只服务 RSSHub 等部分字段 provider;
+     *       仅 content 非空但缺媒体/互动数 (RSSHub 偶发带正文) 仍走补全, 保住媒体补齐与 note 清理</li>
      *   <li>查 tweet:{id} Redis 缓存 → 命中 → 用缓存的补全字段 toBuilder 合并到 partial, 跳过双链调用</li>
      *   <li>twscrape + FxTwitter 均禁用 → 降级返回 partial(等价 Story 2.2a 行为)</li>
      *   <li>twscrape.enabled=true → 主路径调用 twscrapeClient.fetchTweetDetail
@@ -118,10 +122,19 @@ public class TwitterSource implements DataSource<Tweet> {
      * <p>架构 delta (Story 2.2b): 双链降级编排 — twscrape(主, 已登录账号) → FxTwitter(备, 公共实例).
      * 缓存命中优先级最高, 避免无谓的双链调用. 失败时不写缓存(避免 24h 毒化).
      *
-     * @param partial discovery provider 返回的部分 Tweet(id/author/summary/url/publishedAt 已填)
+     * <p>架构 delta (完整度短路): discovery-providers=scraper 时推文自带全文/互动数/媒体,
+     * 短路双链省去每条推文一次 twscrape 子进程调用, 降低 X 风控/限流暴露面.
+     *
+     * @param partial discovery provider 返回的部分 Tweet(RSSHub 下仅 id/author/summary/url/publishedAt 已填;
+     *                scraper provider 下全文/互动数/媒体已填)
      * @return 合并后的完整 Tweet; null 表示该 Tweet 应被剔除
      */
     Tweet enrichTweet(Tweet partial) {
+        if (isComplete(partial)) {
+            log.debug("discovery 已返回完整推文, 跳过双链补全: tweetId={}", partial.getId());
+            return sanitizeLegacySignals(partial);
+        }
+
         boolean twsEnabled = twscrapeProperties.isEnabled();
         boolean fxEnabled = fxTwitterProperties.isEnabled();
 
@@ -165,6 +178,22 @@ public class TwitterSource implements DataSource<Tweet> {
                     partial.getId(), e.getMessage());
             return null;
         }
+    }
+
+    /**
+     * discovery 返回是否已"完整" — 正文非空且带媒体或任一互动数.
+     *
+     * <p>x-author scraper provider 返回全文/互动数/媒体, 满足即跳过 twscrape/FxTwitter 双链.
+     * RSSHub partial 不满足 (无正文或无媒体/互动数), 行为不变;
+     * RSSHub 偶发带正文但缺媒体时仍走补全, 保住媒体补齐与 8/30 生产故障的 note 清理语义.
+     */
+    private boolean isComplete(Tweet tweet) {
+        return tweet != null
+                && hasText(tweet.getContent())
+                && ((tweet.getMedia() != null && !tweet.getMedia().isEmpty())
+                        || tweet.getReplyCount() > 0
+                        || tweet.getRetweetCount() > 0
+                        || tweet.getLikeCount() > 0);
     }
 
     /**

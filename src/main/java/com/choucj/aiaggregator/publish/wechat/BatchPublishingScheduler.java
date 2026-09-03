@@ -10,7 +10,11 @@ import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 /**
- * 批量发布调度器: 每天早上扫描本地发布池中到期文章, 推送到微信草稿.
+ * 批量发布调度器: 高频轮询本地发布池中到期文章, 推送到微信草稿.
+ *
+ * <p>默认每 30 分钟触发 (batch-cron 可配). 扫描是到期制 (scheduledPublishAt &lt;= now),
+ * 机器睡眠/应用未启动造成的积压在任意下次触发时一次性补发 — 替代原"每天 08:00 定点一次"
+ * 的设计 (定点 cron 在本机睡眠场景会整批漏发且 Spring @Scheduled 无补跑机制).
  */
 @Slf4j
 @Component
@@ -21,9 +25,9 @@ public class BatchPublishingScheduler {
     private final ArticlePublicationWorkflow publicationWorkflow;
 
     /**
-     * 默认每天 08:00 触发批量发布.
+     * 默认每 30 分钟轮询到期稿件 (到期制扫描 + 状态机防重, 幂等补发积压).
      */
-    @Scheduled(cron = "${wechat.mp.publishing.batch-cron:0 0 8 * * ?}")
+    @Scheduled(cron = "${wechat.mp.publishing.batch-cron:0 */30 * * * ?}")
     public void processBatch() {
         try {
             ArticlePublicationWorkflow.PublishDueResult result = publicationWorkflow.publishDueArticles();

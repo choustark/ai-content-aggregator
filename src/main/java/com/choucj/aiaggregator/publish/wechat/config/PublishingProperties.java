@@ -20,7 +20,7 @@ import org.springframework.validation.annotation.Validated;
  *     enabled: true
  *     publishing:
  *       realtime-threshold: 8
- *       batch-cron: "0 0 8 * * ?"
+ *       batch-cron: "0 *&#47;30 * * * ?"
  *       daily-publish-hour: 8
  *       batch-enabled: true
  *       queue-ttl-days: 7
@@ -36,7 +36,8 @@ import org.springframework.validation.annotation.Validated;
  * <ul>
  *   <li>{@link #realtimeThreshold} — Article.innovationScore {@code >=} 此阈值时实时发布 (Story 3.4 AC-2),
  *       严格 {@code >=} 与 epics.md "重要内容 (innovationScore {@code >=} 8)" 文案对齐 (D3 决策).</li>
- *   <li>{@link #batchCron} — 默认 {@code 0 0 8 * * ?} 每天早上 8:00 触发批量发布.</li>
+ *   <li>{@link #batchCron} — 默认 {@code 0 *&#47;30 * * * ?} 每 30 分钟轮询到期稿件批量发布
+ *       (定点单次 cron 在机器睡眠/应用未启动时会整批漏发且无补跑, 高频轮询靠到期制扫描幂等补发).</li>
  *   <li>{@link #batchEnabled} — 默认 {@code true} ({@code matchIfMissing=true}), 关闭时低于阈值的
  *       Article 由 PublishingModeDecider 降级走实时路径, 避免写入无人消费的队列.</li>
  *   <li>{@link #queueTtlDays} — 旧 Redis 批量队列兼容项, 新发布池不再依赖它.</li>
@@ -63,11 +64,13 @@ public class PublishingProperties {
     /**
      * 批量发布 cron 表达式 — BatchPublishingScheduler 触发时机.
      *
-     * <p>默认 {@code 0 0 8 * * ?} 每天早上 8:00 (Spring CronExpression 格式: 秒 分 时 日 月 周).
-     * 非法格式由 Spring {@code CronExpression.parse} 在 @Scheduled 解析时抛 IllegalArgumentException.
+     * <p>默认 {@code 0 *&#47;30 * * * ?} 每 30 分钟轮询 (Spring CronExpression 格式: 秒 分 时 日 月 周).
+     * 发布扫描是到期制 ({@code scheduledPublishAt <= now}), 高频轮询幂等 — 机器睡眠/应用未启动
+     * 造成的积压在任意下次触发时一次性补发. 非法格式由 Spring {@code CronExpression.parse}
+     * 在 @Scheduled 解析时抛 IllegalArgumentException.
      */
     @NotBlank(message = "wechat.mp.publishing.batch-cron 不能为空")
-    private String batchCron = "0 0 8 * * ?";
+    private String batchCron = "0 */30 * * * ?";
 
     /**
      * 每日计划发布小时 — 低于实时阈值的文章默认进入下一次该小时的发布窗口.

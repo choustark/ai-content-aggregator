@@ -536,4 +536,61 @@ class TwitterSourceTest {
                 .publishedAt(LocalDateTime.now())
                 .build();
     }
+
+    // ===================== 完整度短路 (x-author scraper provider 自带全文/互动数/媒体) =====================
+
+    /**
+     * discovery-providers=scraper 时推文已完整 (正文+互动数+媒体), 不得再调 twscrape/FxTwitter 双链,
+     * 也不做缓存 I/O — 否则每条推文白烧一次 twscrape 子进程调用, 增加 X 风控暴露面.
+     */
+    @Test
+    void shouldSkipEnrichmentWhenDiscoveryTweetAlreadyComplete() {
+        Tweet scraperTweet = baseTweet("1", "scrape-title").toBuilder()
+                .content("scrape full content")
+                .replyCount(3).retweetCount(4).likeCount(5)
+                .media(List.of(TweetMedia.builder()
+                        .type(TweetMediaType.PHOTO)
+                        .sourceUrl("https://img.example/s.jpg")
+                        .build()))
+                .build();
+        when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(scraperTweet));
+        twscrapeProperties.setEnabled(true);
+
+        List<Tweet> result = source.fetch();
+
+        assertThat(result).hasSize(1);
+        assertThat(result.get(0).getContent()).isEqualTo("scrape full content");
+        assertThat(result.get(0).getLikeCount()).isEqualTo(5);
+        verify(twscrapeClient, never()).fetchTweetDetail(anyString(), anyString());
+        verify(fxTwitterClient, never()).fetchTweetDetail(anyString());
+        verify(redisRepository, never()).getObject(anyString(), any());
+        verify(redisRepository, never()).setObject(anyString(), any(), any(Duration.class));
+    }
+
+    /**
+     * 仅 content 非空但缺媒体/互动数 (RSSHub 偶发带正文) 不算完整 —
+     * 仍须走双链补全, 保住媒体补齐与 2026-08-30 派生 note 清理语义.
+     */
+    @Test
+    void shouldStillEnrichWhenContentPresentButMediaAndMetricsMissing() {
+        Tweet partial = baseTweet("1", "summary-rsshub").toBuilder()
+                .content("rsshub content")
+                .build();
+        when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(partial));
+        when(redisRepository.getObject(eq(RedisKeys.tweet("1")), eq(Tweet.class))).thenReturn(null);
+        Tweet enriched = Tweet.builder()
+                .id("1").replyCount(5).likeCount(100)
+                .media(List.of(TweetMedia.builder()
+                        .type(TweetMediaType.PHOTO)
+                        .sourceUrl("https://img.example/1.jpg")
+                        .build()))
+                .build();
+        when(fxTwitterClient.fetchTweetDetail("1")).thenReturn(enriched);
+
+        List<Tweet> result = source.fetch();
+
+        assertThat(result).hasSize(1);
+        assertThat(result.get(0).getMedia()).hasSize(1);
+        verify(fxTwitterClient).fetchTweetDetail("1");
+    }
 }

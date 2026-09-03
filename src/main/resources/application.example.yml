@@ -397,14 +397,15 @@ wechat:
     review-reminder-enabled: true
     # 混合发布模式配置 (Story 3.4) — 仅在 enabled=true 时生效.
     # PublishingModeDecider 按 innovationScore 阈值实时/批量分流,
-    # BatchPublishingScheduler 每天早上 08:00 扫描本地发布池并创建微信草稿.
+    # BatchPublishingScheduler 每 30 分钟轮询本地发布池并创建微信草稿.
     publishing:
       # 实时发布阈值 — Article.innovationScore >= 此值时实时创建草稿 (默认 8).
       # 严格 >= 比较 (与 epics.md "重要内容 innovationScore>=8" 文案对齐). 范围 [1, 10].
       realtime-threshold: 8
       # 批量发布 cron — Spring CronExpression 格式 (秒 分 时 日 月 周).
-      # 默认 "0 0 8 * * ?" 每天早上 08:00 触发 BatchPublishingScheduler.
-      batch-cron: "0 0 8 * * ?"
+      # 默认 "0 */30 * * * ?" 每 30 分钟轮询到期稿件; 机器睡眠/应用未启动导致的积压在
+      # 任意下次触发时一次性补发 (到期制扫描 + 状态机防重, 幂等).
+      batch-cron: "0 */30 * * * ?"
       # 低分文章默认进入下一次该小时发布窗口; 晚上抓取时会排到次日 08:00.
       daily-publish-hour: 8
       # 批量调度器总开关 — false 时 BatchPublishingScheduler Bean 不注册.

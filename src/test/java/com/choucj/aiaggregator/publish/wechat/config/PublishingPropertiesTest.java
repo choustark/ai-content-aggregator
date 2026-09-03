@@ -48,7 +48,7 @@ class PublishingPropertiesTest {
                 .run(ctx -> {
                     PublishingProperties props = ctx.getBean(PublishingProperties.class);
                     assertThat(props.getRealtimeThreshold()).isEqualTo(8);
-                    assertThat(props.getBatchCron()).isEqualTo("0 0 8 * * ?");
+                    assertThat(props.getBatchCron()).isEqualTo("0 */30 * * * ?");
                     assertThat(props.getDailyPublishHour()).isEqualTo(8);
                     assertThat(props.isBatchEnabled()).isTrue();
                     assertThat(props.getQueueTtlDays()).isEqualTo(7);

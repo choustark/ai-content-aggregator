@@ -1,10 +1,10 @@
 {
   "articleId" : "tw-2093843732777070870",
-  "status" : "PENDING_PUBLISH",
+  "status" : "DRAFT_CREATED",
   "createdAt" : "2026-09-01T23:22:59.515692",
   "scheduledPublishAt" : "2026-09-02T08:00:00",
-  "draftCreatedAt" : null,
-  "wechatDraftMediaId" : null,
+  "draftCreatedAt" : "2026-09-03T20:30:47.992748",
+  "wechatDraftMediaId" : "wg4g8CqjFHslpI00w8TaQYxgcTn87jDaJPAoSzmdXkEQuzoP7ISFZ7o5IWFsue5v",
   "archiveFile" : "archive/2026-09-01.md",
   "article" : {
     "id" : "tw-2093843732777070870",
