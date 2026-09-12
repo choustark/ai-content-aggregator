@@ -1,8 +1,10 @@
 package com.choucj.aiaggregator.task.scheduler;
 
 import com.choucj.aiaggregator.common.exception.RetryableException;
+import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.monitoring.CostMonitor;
+import com.choucj.aiaggregator.monitoring.TaskMetrics;
 import com.choucj.aiaggregator.processor.GitHubProcessor;
 import com.choucj.aiaggregator.processor.TwitterProcessor;
 import com.choucj.aiaggregator.processor.config.ProcessorProperties;
@@ -69,6 +71,9 @@ class ContentSchedulerTest {
     @Mock
     private CostMonitor costMonitor;
 
+    @Mock
+    private TaskMetrics taskMetrics;
+
     private ContentScheduler scheduler;
 
     @BeforeEach
@@ -82,7 +87,7 @@ class ContentSchedulerTest {
     }
 
     @Test
-    void shouldCompleteTaskWhenProcessSucceeds() {
+    void should_complete_task_when_process_succeeds() {
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
                 .thenReturn("task-1")
                 .thenReturn(null);
@@ -93,7 +98,7 @@ class ContentSchedulerTest {
     }
 
     @Test
-    void shouldNotCallCompleteWhenQueueIsEmpty() {
+    void should_not_call_complete_when_queue_is_empty() {
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
         scheduler.processContent();
@@ -102,7 +107,7 @@ class ContentSchedulerTest {
     }
 
     @Test
-    void shouldSurviveWhenPollThrowsRetryableException() {
+    void should_survive_when_poll_throws_retryable_exception() {
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
                 .thenThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "redis down"));
 
@@ -115,7 +120,7 @@ class ContentSchedulerTest {
     }
 
     @Test
-    void shouldTriggerRecoveryBeforeProcessContentOnStartup() {
+    void should_trigger_recovery_before_processing_when_application_starts() {
         when(taskQueue.isQueued("twitter:run")).thenReturn(false, true);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
@@ -127,7 +132,7 @@ class ContentSchedulerTest {
     }
 
     @Test
-    void shouldContinueProcessContentEvenIfRecoveryThrowsRetryable() {
+    void should_continue_processing_when_recovery_throws_retryable_exception() {
         doThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "recovery fail"))
                 .when(recoveryRunner).recoverPendingTasks();
         when(taskQueue.isQueued("twitter:run")).thenReturn(false, true);
@@ -141,7 +146,7 @@ class ContentSchedulerTest {
     }
 
     @Test
-    void shouldContinueProcessContentEvenIfRecoveryThrowsUnexpectedException() {
+    void should_continue_processing_when_recovery_throws_unexpected_exception() {
         doThrow(new RuntimeException("unexpected"))
                 .when(recoveryRunner).recoverPendingTasks();
         when(taskQueue.isQueued("twitter:run")).thenReturn(false, true);
@@ -157,7 +162,7 @@ class ContentSchedulerTest {
     // ============ CR W2 修复: schedule.run-on-startup=false 早返回 ============
 
     @Test
-    void shouldSkipStartupProcessingWhenRunOnStartupIsFalse() {
+    void should_skip_startup_processing_when_run_on_startup_is_false() {
         ContentScheduler disabled = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
                 Optional.of(githubProcessor), processorProperties, false);
 
@@ -169,7 +174,7 @@ class ContentSchedulerTest {
     }
 
     @Test
-    void shouldStillHonorCronWhenRunOnStartupIsFalse() {
+    void should_honor_cron_when_run_on_startup_is_false() {
         // run-on-startup=false 不影响 cron 触发的 processContent
         ContentScheduler disabled = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
                 Optional.of(githubProcessor), processorProperties, false);
@@ -185,7 +190,7 @@ class ContentSchedulerTest {
     // ============ Story 2.6 Task 7: processTask 路由用例 (AC-6) ============
 
     @Test
-    void shouldRouteTwitterTaskToProcessor() {
+    void should_route_twitter_task_when_prefix_matches() {
         // taskId 以 "twitter:" 前缀开头 → 路由到 TwitterProcessor.process()
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
                 .thenReturn("twitter:run")
@@ -199,7 +204,7 @@ class ContentSchedulerTest {
     }
 
     @Test
-    void shouldSkipUnknownTaskIdPrefix(CapturedOutput output) {
+    void should_skip_task_when_prefix_is_unknown(CapturedOutput output) {
         // taskId 不以 "twitter:" 开头 → 记 warn 跳过, 不调用 process, 仍 complete
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
                 .thenReturn("unknown:xyz")
@@ -214,7 +219,7 @@ class ContentSchedulerTest {
     }
 
     @Test
-    void shouldHandleBlankTaskId(CapturedOutput output) {
+    void should_skip_task_when_task_id_is_blank(CapturedOutput output) {
         // taskId 为空白 → 记 warn 跳过, 不调用 process, 仍 complete
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
                 .thenReturn("   ")
@@ -229,7 +234,7 @@ class ContentSchedulerTest {
     }
 
     @Test
-    void shouldRouteMultipleTwitterTasksInOneBatch() {
+    void should_route_multiple_twitter_tasks_when_batch_contains_multiple_items() {
         // 队列中含多个 twitter: 任务 → 顺序路由, 全部 process + complete
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
                 .thenReturn("twitter:run")
@@ -251,7 +256,7 @@ class ContentSchedulerTest {
      * 早期实现硬编码 "twitter:" — 改 prefix 后处理器产生的任务会被视为未知前缀跳过.
      */
     @Test
-    void shouldRouteTaskByConfiguredPrefix() {
+    void should_route_task_when_configured_prefix_matches() {
         when(processorProperties.getTaskIdPrefix()).thenReturn("twitter-stage");
         ContentScheduler staged = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
                 Optional.of(githubProcessor), processorProperties, true);
@@ -270,7 +275,7 @@ class ContentSchedulerTest {
      * Patch-3 修复: 改 prefix 后旧前缀的任务应被视为未知 (验证配置真正生效, 不是硬编码兼容).
      */
     @Test
-    void shouldTreatOldPrefixAsUnknownAfterConfigChange(CapturedOutput output) {
+    void should_treat_old_prefix_as_unknown_when_configuration_changes(CapturedOutput output) {
         when(processorProperties.getTaskIdPrefix()).thenReturn("twitter-stage");
         ContentScheduler staged = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
                 Optional.of(githubProcessor), processorProperties, true);
@@ -287,7 +292,7 @@ class ContentSchedulerTest {
     // ============ Story 4.4 Task 4.5: github: 路由 (AC-7) ============
 
     @Test
-    void shouldRouteGithubTaskToGitHubProcessor() {
+    void should_route_github_task_when_processor_is_registered() {
         // AC-7: github: 前缀 → GitHubProcessor.process(), 不调 TwitterProcessor
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
                 .thenReturn("github:run")
@@ -301,7 +306,7 @@ class ContentSchedulerTest {
     }
 
     @Test
-    void shouldWarnAndSkipGithubTaskWhenProcessorNotRegistered(CapturedOutput output) {
+    void should_warn_and_skip_github_task_when_processor_is_not_registered(CapturedOutput output) {
         // AC-7: github.enabled=false → GitHubProcessor Bean 未注册, Optional.empty
         // github: 任务走 warn 日志跳过, 不抛异常 (仍 complete 避免队列阻塞)
         ContentScheduler withoutGithub = new ContentScheduler(taskQueue, recoveryRunner,
@@ -319,7 +324,7 @@ class ContentSchedulerTest {
     }
 
     @Test
-    void shouldPushTwitterRunOnCronTrigger() {
+    void should_push_twitter_run_when_cron_triggers() {
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
         scheduler.processContent();
@@ -328,7 +333,7 @@ class ContentSchedulerTest {
     }
 
     @Test
-    void shouldSkipAutoProcessingWhenCostBudgetHalted(CapturedOutput output) {
+    void should_skip_automatic_processing_when_cost_budget_is_halted(CapturedOutput output) {
         ContentScheduler budgetGated = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
                 Optional.of(githubProcessor), processorProperties, Optional.of(costMonitor), true);
         when(costMonitor.refreshAndCheckProcessingHalted(any(YearMonth.class))).thenReturn(true);
@@ -342,7 +347,7 @@ class ContentSchedulerTest {
     }
 
     @Test
-    void shouldContinueAutoProcessingWhenCostMonitorFails(CapturedOutput output) {
+    void should_continue_automatic_processing_when_cost_monitor_fails(CapturedOutput output) {
         ContentScheduler budgetGated = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
                 Optional.of(githubProcessor), processorProperties, Optional.of(costMonitor), true);
         when(costMonitor.refreshAndCheckProcessingHalted(any(YearMonth.class))).thenThrow(new RuntimeException("redis down"));
@@ -356,7 +361,7 @@ class ContentSchedulerTest {
     }
 
     @Test
-    void shouldRefreshCurrentMonthCostBeforeAutomaticProcessing() {
+    void should_refresh_current_month_cost_when_automatic_processing_starts() {
         ContentScheduler budgetGated = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
                 Optional.of(githubProcessor), processorProperties, Optional.of(costMonitor), true);
         when(costMonitor.refreshAndCheckProcessingHalted(any(YearMonth.class))).thenReturn(false);
@@ -369,7 +374,7 @@ class ContentSchedulerTest {
     }
 
     @Test
-    void shouldNotEnqueueStartupTaskBeforeBudgetGate() {
+    void should_not_enqueue_task_when_budget_gate_halts_processing() {
         ContentScheduler budgetGated = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
                 Optional.of(githubProcessor), processorProperties, Optional.of(costMonitor), true);
         when(costMonitor.refreshAndCheckProcessingHalted(any(YearMonth.class))).thenReturn(true);
@@ -382,7 +387,7 @@ class ContentSchedulerTest {
     }
 
     @Test
-    void shouldPushTwitterRunOnStartup() {
+    void should_push_twitter_run_when_application_starts() {
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
         scheduler.onStartup();
@@ -391,7 +396,7 @@ class ContentSchedulerTest {
     }
 
     @Test
-    void shouldSkipPushWhenRunTaskAlreadyQueued() {
+    void should_skip_push_when_run_task_is_already_queued() {
         when(taskQueue.isQueued("twitter:run")).thenReturn(true);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
@@ -401,7 +406,7 @@ class ContentSchedulerTest {
     }
 
     @Test
-    void shouldSkipPushWhenRunTaskAlreadyProcessing() {
+    void should_skip_push_when_run_task_is_already_processing() {
         when(taskQueue.getProcessingTasks()).thenReturn(Set.of("twitter:run"));
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
@@ -411,7 +416,64 @@ class ContentSchedulerTest {
     }
 
     @Test
-    void shouldStillTriggerProcessContentWhenStartupEnqueueFails() {
+    void should_record_success_and_window_once_when_task_completes() {
+        ContentScheduler observed = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
+                Optional.of(githubProcessor), processorProperties, Optional.empty(), Optional.of(taskMetrics), true);
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn("twitter:run", null);
+
+        observed.processContent();
+
+        verify(taskMetrics).recordProcessed(TaskMetrics.Source.TWITTER, TaskMetrics.Outcome.SUCCESS);
+        verify(taskMetrics).recordScheduleSuccess(TaskMetrics.Operation.CONTENT_FETCH);
+    }
+
+    @Test
+    void should_record_skipped_when_task_prefix_is_unknown() {
+        ContentScheduler observed = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
+                Optional.of(githubProcessor), processorProperties, Optional.empty(), Optional.of(taskMetrics), true);
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn("unknown:https://secret.example/id", null);
+
+        observed.processContent();
+
+        verify(taskMetrics).recordProcessed(TaskMetrics.Source.UNKNOWN, TaskMetrics.Outcome.SKIPPED);
+    }
+
+    @Test
+    void should_record_closed_failure_outcomes_when_processing_fails() {
+        ContentScheduler observed = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
+                Optional.of(githubProcessor), processorProperties, Optional.empty(), Optional.of(taskMetrics), true);
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter:retryable", "twitter:non-retryable", "twitter:unexpected", null);
+        doThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "temporary"))
+                .doThrow(new NonRetryableException(ErrorCode.INTERNAL_ERROR, "permanent"))
+                .doThrow(new IllegalStateException("unexpected"))
+                .when(twitterProcessor).process();
+
+        observed.processContent();
+        observed.processContent();
+        observed.processContent();
+
+        verify(taskMetrics).recordProcessed(TaskMetrics.Source.TWITTER, TaskMetrics.Outcome.RETRYABLE_FAILURE);
+        verify(taskMetrics).recordProcessed(TaskMetrics.Source.TWITTER, TaskMetrics.Outcome.NON_RETRYABLE_FAILURE);
+        verify(taskMetrics).recordProcessed(TaskMetrics.Source.TWITTER, TaskMetrics.Outcome.UNEXPECTED_FAILURE);
+    }
+
+    @Test
+    void should_record_unknown_failure_when_route_resolution_fails() {
+        ContentScheduler observed = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
+                Optional.of(githubProcessor), processorProperties, Optional.empty(), Optional.of(taskMetrics), true);
+        when(processorProperties.getTaskIdPrefix())
+                .thenReturn("twitter")
+                .thenThrow(new IllegalStateException("route config unavailable"));
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn("twitter:run");
+
+        observed.processContent();
+
+        verify(taskMetrics).recordProcessed(TaskMetrics.Source.UNKNOWN, TaskMetrics.Outcome.UNEXPECTED_FAILURE);
+    }
+
+    @Test
+    void should_enqueue_and_process_when_startup_task_is_absent() {
         when(taskQueue.isQueued("twitter:run"))
                 .thenReturn(false);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
@@ -419,5 +481,17 @@ class ContentSchedulerTest {
         scheduler.onStartup();
 
         verify(taskQueue).push("twitter:run");
+    }
+
+    @Test
+    void should_keep_startup_listener_alive_when_enqueue_fails() {
+        doThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "redis down"))
+                .when(taskQueue).push("twitter:run");
+
+        scheduler.onStartup();
+
+        verify(recoveryRunner).recoverPendingTasks();
+        verify(taskQueue).push("twitter:run");
+        verify(taskQueue, never()).poll(eq(0L), eq(TimeUnit.SECONDS));
     }
 }

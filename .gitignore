@@ -70,3 +70,6 @@ design-artifacts/
 
 ### Sisyphus 运行时状态 (临时状态文件, 不入版本控制) ###
 .sisyphus/
+
+### 应用运行时归档产物 (本地运行数据, 不入 Git) ###
+archive/

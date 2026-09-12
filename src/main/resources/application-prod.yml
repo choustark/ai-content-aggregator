@@ -26,8 +26,11 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info
-  endpoint.env.show-values: NEVER
+        include: health,info,prometheus
+  endpoint:
+    env:
+      access: none
+      show-values: NEVER
 
 logging:
   level:

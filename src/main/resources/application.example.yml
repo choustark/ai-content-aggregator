@@ -37,7 +37,8 @@ management:
       exposure:
         # env 端点会暴露所有属性 (含密钥), prod 必须收紧到 health,info.
         # dev/test 保留 env 方便调试.
-        include: health,info,env,features,costs
+        # 开发环境可按需保留 env/features/costs；生产环境仅暴露 health,info,prometheus。
+        include: health,info,env,features,costs,prometheus
   endpoint:
     health:
       show-details: when-authorized

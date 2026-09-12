@@ -262,4 +262,23 @@ class TaskQueueTest {
 
         assertThat(taskQueue.isQueued("task-2")).isFalse();
     }
+
+    @Test
+    void should_expose_counts_when_queue_state_is_requested() {
+        when(stringRedisTemplate.opsForList()).thenReturn(listOps);
+        when(stringRedisTemplate.opsForSet()).thenReturn(setOps);
+        when(listOps.size("task:queue")).thenReturn(4L);
+        when(setOps.size("task:processing")).thenReturn(2L);
+
+        assertThat(taskQueue.pendingCount()).isEqualTo(4);
+        assertThat(taskQueue.processingCount()).isEqualTo(2);
+    }
+
+    @Test
+    void should_treat_count_as_zero_when_redis_returns_null() {
+        when(stringRedisTemplate.opsForList()).thenReturn(listOps);
+        when(listOps.size("task:queue")).thenReturn(null);
+
+        assertThat(taskQueue.pendingCount()).isZero();
+    }
 }

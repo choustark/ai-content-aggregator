@@ -1,0 +1,101 @@
+{
+  "annotations": {"list": []},
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "panels": [
+    {
+      "id": 1,
+      "title": "应用存活",
+      "type": "stat",
+      "datasource": {"type": "prometheus", "uid": "aiaggregator-prometheus"},
+      "targets": [{"refId": "A", "expr": "up{job=\"ai-content-aggregator\"}", "legendFormat": "应用"}],
+      "fieldConfig": {"defaults": {"noValue": "N/A", "mappings": [{"options": {"0": {"text": "DOWN"}, "1": {"text": "UP"}}, "type": "value"}]}, "overrides": []},
+      "gridPos": {"h": 5, "w": 4, "x": 0, "y": 0}
+    },
+    {
+      "id": 2,
+      "title": "JVM Heap 使用量",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "aiaggregator-prometheus"},
+      "targets": [{"refId": "A", "expr": "sum(jvm_memory_used_bytes{area=\"heap\"})", "legendFormat": "used"}, {"refId": "B", "expr": "sum(jvm_memory_max_bytes{area=\"heap\"} > 0)", "legendFormat": "max"}],
+      "fieldConfig": {"defaults": {"noValue": "N/A", "unit": "bytes"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 10, "x": 4, "y": 0}
+    },
+    {
+      "id": 3,
+      "title": "GC 暂停与线程",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "aiaggregator-prometheus"},
+      "targets": [{"refId": "A", "expr": "rate(jvm_gc_pause_seconds_sum[5m])", "legendFormat": "GC pause/s"}, {"refId": "B", "expr": "jvm_threads_live_threads", "legendFormat": "live threads"}],
+      "fieldConfig": {"defaults": {"noValue": "N/A"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 10, "x": 14, "y": 0}
+    },
+    {
+      "id": 4,
+      "title": "应用进程 CPU",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "aiaggregator-prometheus"},
+      "targets": [{"refId": "A", "expr": "process_cpu_usage", "legendFormat": "process"}],
+      "fieldConfig": {"defaults": {"noValue": "N/A", "unit": "percentunit"}, "overrides": []},
+      "gridPos": {"h": 6, "w": 8, "x": 0, "y": 8}
+    },
+    {
+      "id": 5,
+      "title": "容器 CPU",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "aiaggregator-prometheus"},
+      "targets": [{"refId": "A", "expr": "sum by (name) (rate(container_cpu_usage_seconds_total{name!=\"\"}[5m]))", "legendFormat": "{{name}}"}],
+      "fieldConfig": {"defaults": {"noValue": "N/A", "unit": "cores"}, "overrides": []},
+      "gridPos": {"h": 6, "w": 8, "x": 8, "y": 8}
+    },
+    {
+      "id": 6,
+      "title": "容器内存",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "aiaggregator-prometheus"},
+      "targets": [{"refId": "A", "expr": "container_memory_working_set_bytes{name!=\"\"}", "legendFormat": "{{name}}"}],
+      "fieldConfig": {"defaults": {"noValue": "N/A", "unit": "bytes"}, "overrides": []},
+      "gridPos": {"h": 6, "w": 8, "x": 16, "y": 8}
+    },
+    {
+      "id": 7,
+      "title": "HTTP 5xx 比率",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "aiaggregator-prometheus"},
+      "targets": [{"refId": "A", "expr": "sum(rate(http_server_requests_seconds_count{status=~\"5..\"}[5m])) / sum(rate(http_server_requests_seconds_count[5m]))", "legendFormat": "5xx ratio"}],
+      "fieldConfig": {"defaults": {"noValue": "N/A", "unit": "percentunit"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 0, "y": 14}
+    },
+    {
+      "id": 8,
+      "title": "队列积压",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "aiaggregator-prometheus"},
+      "targets": [{"refId": "A", "expr": "aiaggregator_task_queue_size", "legendFormat": "{{state}}"}],
+      "fieldConfig": {"defaults": {"noValue": "N/A", "unit": "short"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 8, "y": 14}
+    },
+    {
+      "id": 9,
+      "title": "队列执行结果（非内容业务成功率）",
+      "description": "仅表示 ContentScheduler 队列调用边界的结果；processor 内部软降级仍可能正常返回。",
+      "type": "timeseries",
+      "datasource": {"type": "prometheus", "uid": "aiaggregator-prometheus"},
+      "targets": [{"refId": "A", "expr": "sum by (source, outcome) (rate(aiaggregator_task_processed_total[5m]))", "legendFormat": "{{source}} / {{outcome}}"}],
+      "fieldConfig": {"defaults": {"noValue": "N/A", "unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 7, "w": 8, "x": 16, "y": 14}
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 42,
+  "tags": ["aiaggregator", "single-host"],
+  "templating": {"list": []},
+  "time": {"from": "now-24h", "to": "now"},
+  "timezone": "browser",
+  "title": "AI Content Aggregator 总览",
+  "uid": "aiaggregator-overview",
+  "version": 1
+}

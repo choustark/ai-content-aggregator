@@ -8,8 +8,8 @@ feature-flags:
   github:
     enabled: true               # Phase 4 启用
   rag:
-    enabled: false               # Phase 4 启用
-    batch-async-enabled: false    # Story 5.1: 历史文章批量 Embedding 异步开关
+    enabled: true               # Phase 4 启用
+    batch-async-enabled: true    # Story 5.1: 历史文章批量 Embedding 异步开关
   multi-model:
     enabled: true               # Phase 4 启用
   wechat:

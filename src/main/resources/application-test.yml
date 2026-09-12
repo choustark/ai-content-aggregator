@@ -2,6 +2,8 @@
 # Redis 通过 Docker container name 解析, LangChain4j Redis 关闭以避免外部依赖.
 
 spring:
+  autoconfigure:
+    exclude: ""
   data:
     redis:
       cluster:
@@ -27,6 +29,15 @@ langchain4j:
       enabled: false
       index-name: aiaggregator-embeddings-test
       dimension: 1024
+
+features:
+  rag:
+    enabled: false
+
+feature-flags:
+  rag:
+    enabled: false
+    batch-async-enabled: false
 
 logging:
   level:

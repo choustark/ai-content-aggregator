@@ -1,0 +1,150 @@
+groups:
+  - name: aiaggregator-availability-and-windows
+    rules:
+      - alert: AiAggregatorApplicationDown
+        expr: up{job="ai-content-aggregator"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: AI Content Aggregator 指标端点不可采集
+          runbook: ops/observability/README.md#告警处置
+          recovery: up{job="ai-content-aggregator"} == 1
+
+      - alert: AiAggregatorContentWindowMissed
+        expr: absent(aiaggregator_schedule_last_success_seconds{operation="content_fetch"}) or (aiaggregator_schedule_last_success_seconds{operation="content_fetch"} unless aiaggregator_schedule_last_success_seconds{operation="content_fetch"} > 0) or (time() - aiaggregator_schedule_last_success_seconds{operation="content_fetch"} > 90000)
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: 内容抓取调度窗口超过 25 小时未执行完整返回
+          runbook: ops/observability/README.md#告警处置
+          recovery: 最近成功时间恢复到 25 小时窗口内
+
+      - alert: AiAggregatorBatchPublishWindowMissed
+        expr: absent(aiaggregator_schedule_last_success_seconds{operation="batch_publish"}) or (aiaggregator_schedule_last_success_seconds{operation="batch_publish"} unless aiaggregator_schedule_last_success_seconds{operation="batch_publish"} > 0) or (time() - aiaggregator_schedule_last_success_seconds{operation="batch_publish"} > 93600)
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: 批量发布调度窗口超过 26 小时未执行完整返回
+          runbook: ops/observability/README.md#告警处置
+          recovery: 最近成功时间恢复到 26 小时窗口内
+
+  - name: aiaggregator-queue-and-resources
+    rules:
+      - alert: AiAggregatorTaskQueueBacklog
+        expr: aiaggregator_task_queue_size{state="pending"} > 20
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: 待处理任务积压超过 20
+          runbook: ops/observability/README.md#告警处置
+          recovery: pending 队列恢复到 20 个及以下
+
+      - alert: AiAggregatorTaskQueueSignalUnavailable
+        expr: absent(aiaggregator_task_queue_size{state="pending"}) or absent(aiaggregator_task_queue_size{state="processing"}) or (aiaggregator_task_queue_size{state=~"pending|processing"} unless aiaggregator_task_queue_size{state=~"pending|processing"} >= 0) or absent(aiaggregator_task_queue_collection_last_success_seconds{state="pending"}) or absent(aiaggregator_task_queue_collection_last_success_seconds{state="processing"}) or (aiaggregator_task_queue_collection_last_success_seconds{state=~"pending|processing"} unless aiaggregator_task_queue_collection_last_success_seconds{state=~"pending|processing"} > 0) or (time() - aiaggregator_task_queue_collection_last_success_seconds{state=~"pending|processing"} > 300)
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 任务队列 Gauge 缺失、无效或超过 5 分钟未成功采集
+          runbook: ops/observability/README.md#告警处置
+          recovery: pending 与 processing Gauge 均为非负有限值且最近 5 分钟采集成功
+
+      - alert: AiAggregatorTaskProcessingStuck
+        expr: aiaggregator_task_queue_size{state="processing"} > 0
+        for: 30m
+        labels:
+          severity: warning
+          signal_owner: story-10.5
+        annotations:
+          summary: processing 集合持续非空超过 30 分钟
+          runbook: ops/observability/README.md#告警处置
+          recovery: processing 集合恢复为空
+          calibration: 30 分钟阈值尚无生产任务时长测量依据，由 Story 10.5 基于任务年龄数据定标
+
+      - alert: AiAggregatorTaskOldestAgeHigh
+        expr: aiaggregator_task_oldest_age_seconds > 3600
+        for: 10m
+        labels:
+          severity: warning
+          signal_owner: story-10.5
+        annotations:
+          summary: 最老任务等待超过 1 小时（生产信号由 Story 10.5 提供）
+          runbook: ops/observability/README.md#告警处置
+          recovery: 最老任务年龄恢复到 3600 秒及以下，或队列为空
+
+      - alert: AiAggregatorCadvisorDown
+        expr: absent(up{job="cadvisor"}) or up{job="cadvisor"} == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: cAdvisor 不可采集，容器资源告警已失去数据源
+          runbook: ops/observability/README.md#告警处置
+          recovery: cAdvisor target 恢复为 UP
+
+      - alert: AiAggregatorContainerMemoryPressure
+        expr: (container_memory_working_set_bytes{name!=""} / container_spec_memory_limit_bytes{name!=""} > 0.85) and container_spec_memory_limit_bytes{name!=""} > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 容器工作集内存持续超过限制的 85%
+          runbook: ops/observability/README.md#告警处置
+          recovery: 内存占用恢复到限制的 85% 及以下
+
+      - alert: AiAggregatorContainerCpuThrottlingHigh
+        expr: sum by (name) (rate(container_cpu_cfs_throttled_periods_total{name!=""}[5m])) / sum by (name) (rate(container_cpu_cfs_periods_total{name!=""}[5m])) > 0.25
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: 容器 CPU throttling 比率持续超过 25%
+          runbook: ops/observability/README.md#告警处置
+          recovery: CPU throttling 比率恢复到 25% 及以下
+
+      - alert: AiAggregatorExternalDependencyConsecutiveFailures
+        expr: aiaggregator_external_dependency_consecutive_failures >= 3
+        for: 5m
+        labels:
+          severity: warning
+          signal_owner: story-10.3
+        annotations:
+          summary: 外部依赖连续失败至少 3 次（生产信号由 Story 10.3 提供）
+          runbook: ops/observability/README.md#告警处置
+          recovery: 连续失败计数恢复到 3 以下
+
+  - name: aiaggregator-cost
+    rules:
+      - alert: AiAggregatorCostMetricsInvalid
+        expr: absent(aiaggregator_cost_monthly_usage_percent) or (aiaggregator_cost_monthly_usage_percent unless aiaggregator_cost_monthly_usage_percent >= 0) or absent(aiaggregator_cost_monthly_threshold_percent{level="warning"}) or (aiaggregator_cost_monthly_threshold_percent{level="warning"} unless aiaggregator_cost_monthly_threshold_percent{level="warning"} > 0) or absent(aiaggregator_cost_monthly_threshold_percent{level="stop"}) or (aiaggregator_cost_monthly_threshold_percent{level="stop"} unless aiaggregator_cost_monthly_threshold_percent{level="stop"} > 0) or (aiaggregator_cost_monthly_threshold_percent{level="stop"} <= on() aiaggregator_cost_monthly_threshold_percent{level="warning"})
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 成本指标缺失、采集失败或阈值配置无效
+          runbook: ops/observability/README.md#告警处置
+          recovery: 使用率与阈值 Gauge 恢复，且 0 < warning < stop
+
+      - alert: AiAggregatorMonthlyCostWarning
+        expr: (aiaggregator_cost_monthly_usage_percent >= on() aiaggregator_cost_monthly_threshold_percent{level="warning"}) and (aiaggregator_cost_monthly_usage_percent < on() aiaggregator_cost_monthly_threshold_percent{level="stop"}) and on() (aiaggregator_cost_monthly_threshold_percent{level="warning"} > 0) and on() (aiaggregator_cost_monthly_threshold_percent{level="stop"} > on() aiaggregator_cost_monthly_threshold_percent{level="warning"})
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: 月度成本达到既有 warning 阈值
+          runbook: ops/observability/README.md#告警处置
+          recovery: 使用率低于 warning 阈值，或进入 stop 阈值
+
+      - alert: AiAggregatorMonthlyCostHalted
+        expr: (aiaggregator_cost_monthly_usage_percent >= on() aiaggregator_cost_monthly_threshold_percent{level="stop"}) and on() (aiaggregator_cost_monthly_threshold_percent{level="warning"} > 0) and on() (aiaggregator_cost_monthly_threshold_percent{level="stop"} > on() aiaggregator_cost_monthly_threshold_percent{level="warning"})
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: 月度成本达到既有 stop 阈值，自动处理应已暂停
+          runbook: ops/observability/README.md#告警处置
+          recovery: 使用率低于 stop 阈值并按 Story 5.5 流程确认恢复

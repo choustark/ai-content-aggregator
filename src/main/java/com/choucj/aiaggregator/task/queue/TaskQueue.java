@@ -140,6 +140,20 @@ public class TaskQueue {
         return tasks != null && tasks.contains(taskId);
     }
 
+    /** 返回当前待处理队列长度，供监控等只读调用方使用。 */
+    public long pendingCount() {
+        Long count = supplyWithMapping("pendingCount", RedisKeys.taskQueue(), () ->
+                stringRedisTemplate.opsForList().size(RedisKeys.taskQueue()));
+        return count != null ? count : 0L;
+    }
+
+    /** 返回当前 processing 集合大小，供监控等只读调用方使用。 */
+    public long processingCount() {
+        Long count = supplyWithMapping("processingCount", RedisKeys.taskProcessing(), () ->
+                stringRedisTemplate.opsForSet().size(RedisKeys.taskProcessing()));
+        return count != null ? count : 0L;
+    }
+
     /**
      * 异常包装 helper — 沿用 Story 1.5b {@code RedisRepositoryImpl.supplyWithMapping} 模式.
      *

@@ -1,0 +1,12 @@
+apiVersion: 1
+
+providers:
+  - name: AI Content Aggregator
+    orgId: 1
+    folder: AI Content Aggregator
+    type: file
+    disableDeletion: true
+    editable: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

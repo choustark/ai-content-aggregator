@@ -1,0 +1,438 @@
+rule_files:
+  - ../alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: application-down-fires-and-recovers
+    interval: 1m
+    input_series:
+      - series: up{job="ai-content-aggregator",instance="app:8080"}
+        values: 0x5 1x5
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: AiAggregatorApplicationDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: ai-content-aggregator, instance: "app:8080"}
+            exp_annotations:
+              summary: AI Content Aggregator 指标端点不可采集
+              runbook: ops/observability/README.md#告警处置
+              recovery: up{job="ai-content-aggregator"} == 1
+      - eval_time: 7m
+        alertname: AiAggregatorApplicationDown
+        exp_alerts: []
+
+  - name: schedule-windows-fire-on-missing-series-and-recover
+    interval: 1m
+    input_series:
+      - series: aiaggregator_schedule_last_success_seconds{operation="content_fetch"}
+        values: _x32 1800x5
+      - series: aiaggregator_schedule_last_success_seconds{operation="batch_publish"}
+        values: _x32 1800x5
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: AiAggregatorContentWindowMissed
+        exp_alerts:
+          - exp_labels: {severity: warning, operation: content_fetch}
+            exp_annotations:
+              summary: 内容抓取调度窗口超过 25 小时未执行完整返回
+              runbook: ops/observability/README.md#告警处置
+              recovery: 最近成功时间恢复到 25 小时窗口内
+      - eval_time: 33m
+        alertname: AiAggregatorContentWindowMissed
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: AiAggregatorBatchPublishWindowMissed
+        exp_alerts:
+          - exp_labels: {severity: warning, operation: batch_publish}
+            exp_annotations:
+              summary: 批量发布调度窗口超过 26 小时未执行完整返回
+              runbook: ops/observability/README.md#告警处置
+              recovery: 最近成功时间恢复到 26 小时窗口内
+      - eval_time: 33m
+        alertname: AiAggregatorBatchPublishWindowMissed
+        exp_alerts: []
+
+  - name: schedule-windows-fire-on-nan-series-and-recover
+    interval: 1m
+    input_series:
+      - series: aiaggregator_schedule_last_success_seconds{operation="content_fetch"}
+        values: NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN 1920x5
+      - series: aiaggregator_schedule_last_success_seconds{operation="batch_publish"}
+        values: NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN NaN 1920x5
+    alert_rule_test:
+      - eval_time: 31m
+        alertname: AiAggregatorContentWindowMissed
+        exp_alerts:
+          - exp_labels: {severity: warning, operation: content_fetch}
+            exp_annotations:
+              summary: 内容抓取调度窗口超过 25 小时未执行完整返回
+              runbook: ops/observability/README.md#告警处置
+              recovery: 最近成功时间恢复到 25 小时窗口内
+      - eval_time: 33m
+        alertname: AiAggregatorContentWindowMissed
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: AiAggregatorBatchPublishWindowMissed
+        exp_alerts:
+          - exp_labels: {severity: warning, operation: batch_publish}
+            exp_annotations:
+              summary: 批量发布调度窗口超过 26 小时未执行完整返回
+              runbook: ops/observability/README.md#告警处置
+              recovery: 最近成功时间恢复到 26 小时窗口内
+      - eval_time: 33m
+        alertname: AiAggregatorBatchPublishWindowMissed
+        exp_alerts: []
+
+  - name: schedule-windows-fire-on-stale-series-and-recover
+    interval: 1h
+    input_series:
+      - series: aiaggregator_schedule_last_success_seconds{operation="content_fetch"}
+        values: 1x27 100800x3
+      - series: aiaggregator_schedule_last_success_seconds{operation="batch_publish"}
+        values: 1x27 100800x3
+    alert_rule_test:
+      - eval_time: 25h31m
+        alertname: AiAggregatorContentWindowMissed
+        exp_alerts:
+          - exp_labels: {severity: warning, operation: content_fetch}
+            exp_annotations:
+              summary: 内容抓取调度窗口超过 25 小时未执行完整返回
+              runbook: ops/observability/README.md#告警处置
+              recovery: 最近成功时间恢复到 25 小时窗口内
+      - eval_time: 26h31m
+        alertname: AiAggregatorBatchPublishWindowMissed
+        exp_alerts:
+          - exp_labels: {severity: warning, operation: batch_publish}
+            exp_annotations:
+              summary: 批量发布调度窗口超过 26 小时未执行完整返回
+              runbook: ops/observability/README.md#告警处置
+              recovery: 最近成功时间恢复到 26 小时窗口内
+      - eval_time: 29h
+        alertname: AiAggregatorContentWindowMissed
+        exp_alerts: []
+      - eval_time: 29h
+        alertname: AiAggregatorBatchPublishWindowMissed
+        exp_alerts: []
+
+  - name: queue-backlog-and-processing-stuck-fire-and-recover
+    interval: 1m
+    input_series:
+      - series: aiaggregator_task_queue_size{state="pending"}
+        values: 21x20 10x20
+      - series: aiaggregator_task_queue_size{state="processing"}
+        values: 1x32 0x8
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: AiAggregatorTaskQueueBacklog
+        exp_alerts:
+          - exp_labels: {severity: warning, state: pending}
+            exp_annotations:
+              summary: 待处理任务积压超过 20
+              runbook: ops/observability/README.md#告警处置
+              recovery: pending 队列恢复到 20 个及以下
+      - eval_time: 22m
+        alertname: AiAggregatorTaskQueueBacklog
+        exp_alerts: []
+      - eval_time: 31m
+        alertname: AiAggregatorTaskProcessingStuck
+        exp_alerts:
+          - exp_labels: {severity: warning, signal_owner: story-10.5, state: processing}
+            exp_annotations:
+              summary: processing 集合持续非空超过 30 分钟
+              runbook: ops/observability/README.md#告警处置
+              recovery: processing 集合恢复为空
+              calibration: 30 分钟阈值尚无生产任务时长测量依据，由 Story 10.5 基于任务年龄数据定标
+      - eval_time: 34m
+        alertname: AiAggregatorTaskProcessingStuck
+        exp_alerts: []
+
+  - name: queue-signal-missing-fires-and-recovers
+    interval: 1m
+    input_series:
+      - series: aiaggregator_task_queue_size{state="pending"}
+        values: _x7 0x5
+      - series: aiaggregator_task_queue_size{state="processing"}
+        values: 0x12
+      - series: aiaggregator_task_queue_collection_last_success_seconds{state="pending"}
+        values: 1+60x11
+      - series: aiaggregator_task_queue_collection_last_success_seconds{state="processing"}
+        values: 1+60x11
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: AiAggregatorTaskQueueSignalUnavailable
+        exp_alerts:
+          - exp_labels: {severity: warning, state: pending}
+            exp_annotations:
+              summary: 任务队列 Gauge 缺失、无效或超过 5 分钟未成功采集
+              runbook: ops/observability/README.md#告警处置
+              recovery: pending 与 processing Gauge 均为非负有限值且最近 5 分钟采集成功
+      - eval_time: 9m
+        alertname: AiAggregatorTaskQueueSignalUnavailable
+        exp_alerts: []
+
+  - name: queue-nan-signal-fires-and-recovers
+    interval: 1m
+    input_series:
+      - series: aiaggregator_task_queue_size{state="pending"}
+        values: NaN NaN NaN NaN NaN NaN NaN 0 0 0
+      - series: aiaggregator_task_queue_size{state="processing"}
+        values: 0x10
+      - series: aiaggregator_task_queue_collection_last_success_seconds{state="pending"}
+        values: 1+60x9
+      - series: aiaggregator_task_queue_collection_last_success_seconds{state="processing"}
+        values: 1+60x9
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: AiAggregatorTaskQueueSignalUnavailable
+        exp_alerts:
+          - exp_labels: {severity: warning, state: pending}
+            exp_annotations:
+              summary: 任务队列 Gauge 缺失、无效或超过 5 分钟未成功采集
+              runbook: ops/observability/README.md#告警处置
+              recovery: pending 与 processing Gauge 均为非负有限值且最近 5 分钟采集成功
+      - eval_time: 9m
+        alertname: AiAggregatorTaskQueueSignalUnavailable
+        exp_alerts: []
+
+  - name: queue-last-good-snapshot-fires-when-collection-is-stale-and-recovers
+    interval: 1m
+    input_series:
+      - series: aiaggregator_task_queue_size{state="pending"}
+        values: 7x16
+      - series: aiaggregator_task_queue_size{state="processing"}
+        values: 0x16
+      - series: aiaggregator_task_queue_collection_last_success_seconds{state="pending"}
+        values: 1x12 721+60x4
+      - series: aiaggregator_task_queue_collection_last_success_seconds{state="processing"}
+        values: 1+60x16
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: AiAggregatorTaskQueueSignalUnavailable
+        exp_alerts:
+          - exp_labels: {severity: warning, state: pending}
+            exp_annotations:
+              summary: 任务队列 Gauge 缺失、无效或超过 5 分钟未成功采集
+              runbook: ops/observability/README.md#告警处置
+              recovery: pending 与 processing Gauge 均为非负有限值且最近 5 分钟采集成功
+      - eval_time: 13m
+        alertname: AiAggregatorTaskQueueSignalUnavailable
+        exp_alerts: []
+
+  - name: oldest-task-age-fires-and-recovers
+    interval: 1m
+    input_series:
+      - series: aiaggregator_task_oldest_age_seconds
+        values: 3601x12 0x5
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: AiAggregatorTaskOldestAgeHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, signal_owner: story-10.5}
+            exp_annotations:
+              summary: 最老任务等待超过 1 小时（生产信号由 Story 10.5 提供）
+              runbook: ops/observability/README.md#告警处置
+              recovery: 最老任务年龄恢复到 3600 秒及以下，或队列为空
+      - eval_time: 14m
+        alertname: AiAggregatorTaskOldestAgeHigh
+        exp_alerts: []
+
+  - name: cadvisor-down-and-memory-pressure-fire-and-recover
+    interval: 1m
+    input_series:
+      - series: up{job="cadvisor",instance="cadvisor:8080"}
+        values: 0x7 1x20
+      - series: container_memory_working_set_bytes{name="prometheus"}
+        values: 90x12 50x15
+      - series: container_spec_memory_limit_bytes{name="prometheus"}
+        values: 100x27
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: AiAggregatorCadvisorDown
+        exp_alerts:
+          - exp_labels: {severity: warning, job: cadvisor, instance: "cadvisor:8080"}
+            exp_annotations:
+              summary: cAdvisor 不可采集，容器资源告警已失去数据源
+              runbook: ops/observability/README.md#告警处置
+              recovery: cAdvisor target 恢复为 UP
+      - eval_time: 9m
+        alertname: AiAggregatorCadvisorDown
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: AiAggregatorContainerMemoryPressure
+        exp_alerts:
+          - exp_labels: {severity: warning, name: prometheus}
+            exp_annotations:
+              summary: 容器工作集内存持续超过限制的 85%
+              runbook: ops/observability/README.md#告警处置
+              recovery: 内存占用恢复到限制的 85% 及以下
+      - eval_time: 14m
+        alertname: AiAggregatorContainerMemoryPressure
+        exp_alerts: []
+
+  - name: container-cpu-throttling-fires-and-recovers
+    interval: 1m
+    input_series:
+      - series: up{job="cadvisor"}
+        values: 1x26
+      - series: container_cpu_cfs_throttled_periods_total{name="grafana"}
+        values: 0+30x15 450+0x10
+      - series: container_cpu_cfs_periods_total{name="grafana"}
+        values: 0+100x25
+    alert_rule_test:
+      - eval_time: 11m
+        alertname: AiAggregatorContainerCpuThrottlingHigh
+        exp_alerts:
+          - exp_labels: {severity: warning, name: grafana}
+            exp_annotations:
+              summary: 容器 CPU throttling 比率持续超过 25%
+              runbook: ops/observability/README.md#告警处置
+              recovery: CPU throttling 比率恢复到 25% 及以下
+      - eval_time: 21m
+        alertname: AiAggregatorContainerCpuThrottlingHigh
+        exp_alerts: []
+
+  - name: controlled-downstream-and-valid-cost-series
+    interval: 1m
+    input_series:
+      - series: aiaggregator_external_dependency_consecutive_failures{dependency="x-api"}
+        values: 3x7 0x8
+      - series: aiaggregator_cost_monthly_usage_percent
+        values: 80x7 100x4 10x4
+      - series: aiaggregator_cost_monthly_threshold_percent{level="warning"}
+        values: 80x15
+      - series: aiaggregator_cost_monthly_threshold_percent{level="stop"}
+        values: 100x15
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: AiAggregatorExternalDependencyConsecutiveFailures
+        exp_alerts:
+          - exp_labels: {dependency: x-api, severity: warning, signal_owner: story-10.3}
+            exp_annotations:
+              summary: 外部依赖连续失败至少 3 次（生产信号由 Story 10.3 提供）
+              runbook: ops/observability/README.md#告警处置
+              recovery: 连续失败计数恢复到 3 以下
+      - eval_time: 9m
+        alertname: AiAggregatorExternalDependencyConsecutiveFailures
+        exp_alerts: []
+      - eval_time: 6m
+        alertname: AiAggregatorMonthlyCostWarning
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: 月度成本达到既有 warning 阈值
+              runbook: ops/observability/README.md#告警处置
+              recovery: 使用率低于 warning 阈值，或进入 stop 阈值
+      - eval_time: 9m
+        alertname: AiAggregatorMonthlyCostWarning
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: AiAggregatorMonthlyCostHalted
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: 月度成本达到既有 stop 阈值，自动处理应已暂停
+              runbook: ops/observability/README.md#告警处置
+              recovery: 使用率低于 stop 阈值并按 Story 5.5 流程确认恢复
+      - eval_time: 13m
+        alertname: AiAggregatorMonthlyCostHalted
+        exp_alerts: []
+
+  - name: direct-stop-jump-is-tested-and-invalid-threshold-is-guarded
+    interval: 1m
+    input_series:
+      - series: aiaggregator_cost_monthly_usage_percent
+        values: 10x2 100x10
+      - series: aiaggregator_cost_monthly_threshold_percent{level="warning"}
+        values: 80x12
+      - series: aiaggregator_cost_monthly_threshold_percent{level="stop"}
+        values: 50x7 100x5
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: AiAggregatorCostMetricsInvalid
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: 成本指标缺失、采集失败或阈值配置无效
+              runbook: ops/observability/README.md#告警处置
+              recovery: 使用率与阈值 Gauge 恢复，且 0 < warning < stop
+      - eval_time: 6m
+        alertname: AiAggregatorMonthlyCostHalted
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: AiAggregatorCostMetricsInvalid
+        exp_alerts: []
+      - eval_time: 9m
+        alertname: AiAggregatorMonthlyCostHalted
+        exp_alerts:
+          - exp_labels: {severity: critical}
+            exp_annotations:
+              summary: 月度成本达到既有 stop 阈值，自动处理应已暂停
+              runbook: ops/observability/README.md#告警处置
+              recovery: 使用率低于 stop 阈值并按 Story 5.5 流程确认恢复
+
+  - name: missing-cost-threshold-series-fires-invalid-signal-alert
+    interval: 1m
+    input_series:
+      - series: aiaggregator_cost_monthly_usage_percent
+        values: 10x12
+      - series: aiaggregator_cost_monthly_threshold_percent{level="warning"}
+        values: 80x12
+      - series: aiaggregator_cost_monthly_threshold_percent{level="stop"}
+        values: _x7 100x5
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: AiAggregatorCostMetricsInvalid
+        exp_alerts:
+          - exp_labels: {severity: warning, level: stop}
+            exp_annotations:
+              summary: 成本指标缺失、采集失败或阈值配置无效
+              runbook: ops/observability/README.md#告警处置
+              recovery: 使用率与阈值 Gauge 恢复，且 0 < warning < stop
+      - eval_time: 9m
+        alertname: AiAggregatorCostMetricsInvalid
+        exp_alerts: []
+
+  - name: missing-warning-cost-threshold-preserves-level-label
+    interval: 1m
+    input_series:
+      - series: aiaggregator_cost_monthly_usage_percent
+        values: 10x12
+      - series: aiaggregator_cost_monthly_threshold_percent{level="warning"}
+        values: _x7 80x5
+      - series: aiaggregator_cost_monthly_threshold_percent{level="stop"}
+        values: 100x12
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: AiAggregatorCostMetricsInvalid
+        exp_alerts:
+          - exp_labels: {severity: warning, level: warning}
+            exp_annotations:
+              summary: 成本指标缺失、采集失败或阈值配置无效
+              runbook: ops/observability/README.md#告警处置
+              recovery: 使用率与阈值 Gauge 恢复，且 0 < warning < stop
+      - eval_time: 9m
+        alertname: AiAggregatorCostMetricsInvalid
+        exp_alerts: []
+
+  - name: nan-cost-usage-fires-invalid-signal-alert
+    interval: 1m
+    input_series:
+      - series: aiaggregator_cost_monthly_usage_percent
+        values: NaN NaN NaN NaN NaN NaN NaN 10 10 10
+      - series: aiaggregator_cost_monthly_threshold_percent{level="warning"}
+        values: 80x10
+      - series: aiaggregator_cost_monthly_threshold_percent{level="stop"}
+        values: 100x10
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: AiAggregatorCostMetricsInvalid
+        exp_alerts:
+          - exp_labels: {severity: warning}
+            exp_annotations:
+              summary: 成本指标缺失、采集失败或阈值配置无效
+              runbook: ops/observability/README.md#告警处置
+              recovery: 使用率与阈值 Gauge 恢复，且 0 < warning < stop
+      - eval_time: 9m
+        alertname: AiAggregatorCostMetricsInvalid
+        exp_alerts: []

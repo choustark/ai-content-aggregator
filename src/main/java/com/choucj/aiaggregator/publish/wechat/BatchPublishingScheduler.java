@@ -1,13 +1,16 @@
 package com.choucj.aiaggregator.publish.wechat;
 
-import lombok.RequiredArgsConstructor;
+import com.choucj.aiaggregator.monitoring.TaskMetrics;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.AllNestedConditions;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Conditional;
 import org.springframework.context.annotation.ConfigurationCondition;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+
+import java.util.Optional;
 
 /**
  * 批量发布调度器: 高频轮询本地发布池中到期文章, 推送到微信草稿.
@@ -18,19 +21,36 @@ import org.springframework.stereotype.Component;
  */
 @Slf4j
 @Component
-@RequiredArgsConstructor
 @Conditional(BatchPublishingScheduler.OnWeChatAndBatchEnabled.class)
 public class BatchPublishingScheduler {
 
     private final ArticlePublicationWorkflow publicationWorkflow;
+    private final Optional<TaskMetrics> taskMetricsOptional;
+
+    public BatchPublishingScheduler(ArticlePublicationWorkflow publicationWorkflow) {
+        this(publicationWorkflow, Optional.empty());
+    }
+
+    @Autowired
+    public BatchPublishingScheduler(ArticlePublicationWorkflow publicationWorkflow,
+                                    Optional<TaskMetrics> taskMetricsOptional) {
+        this.publicationWorkflow = publicationWorkflow;
+        this.taskMetricsOptional = taskMetricsOptional;
+    }
 
     /**
      * 默认每 30 分钟轮询到期稿件 (到期制扫描 + 状态机防重, 幂等补发积压).
+     * 工作流完整返回即记录窗口执行成功；文章级成功/失败通过独立 Counter 记录，
+     * 避免单篇永久失败把“窗口未执行”告警永久锁定。
      */
     @Scheduled(cron = "${wechat.mp.publishing.batch-cron:0 */30 * * * ?}")
     public void processBatch() {
         try {
             ArticlePublicationWorkflow.PublishDueResult result = publicationWorkflow.publishDueArticles();
+            taskMetricsOptional.ifPresent(metrics -> {
+                metrics.recordScheduleSuccess(TaskMetrics.Operation.BATCH_PUBLISH);
+                metrics.recordBatchArticles(result.success(), result.failure());
+            });
             log.info("批量发布完成: total={}, success={}, failure={}",
                     result.total(), result.success(), result.failure());
         } catch (Exception e) {

@@ -3,6 +3,7 @@ package com.choucj.aiaggregator.task.scheduler;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.monitoring.CostMonitor;
+import com.choucj.aiaggregator.monitoring.TaskMetrics;
 import com.choucj.aiaggregator.processor.GitHubProcessor;
 import com.choucj.aiaggregator.processor.TwitterProcessor;
 import com.choucj.aiaggregator.processor.config.ProcessorProperties;
@@ -63,6 +64,7 @@ public class ContentScheduler {
     private final Optional<GitHubProcessor> githubProcessorOptional;
     private final ProcessorProperties processorProperties;
     private final Optional<CostMonitor> costMonitorOptional;
+    private final Optional<TaskMetrics> taskMetricsOptional;
     private final boolean runOnStartup;
 
     /**
@@ -95,7 +97,18 @@ public class ContentScheduler {
                             ProcessorProperties processorProperties,
                             @Value("${schedule.run-on-startup:false}") boolean runOnStartup) {
         this(taskQueue, recoveryRunner, twitterProcessor, githubProcessorOptional, processorProperties,
-                Optional.empty(), runOnStartup);
+                Optional.empty(), Optional.empty(), runOnStartup);
+    }
+
+    public ContentScheduler(TaskQueue taskQueue,
+                            TaskRecoveryRunner recoveryRunner,
+                            TwitterProcessor twitterProcessor,
+                            Optional<GitHubProcessor> githubProcessorOptional,
+                            ProcessorProperties processorProperties,
+                            Optional<CostMonitor> costMonitorOptional,
+                            @Value("${schedule.run-on-startup:false}") boolean runOnStartup) {
+        this(taskQueue, recoveryRunner, twitterProcessor, githubProcessorOptional, processorProperties,
+                costMonitorOptional, Optional.empty(), runOnStartup);
     }
 
     @Autowired
@@ -105,6 +118,7 @@ public class ContentScheduler {
                             Optional<GitHubProcessor> githubProcessorOptional,
                             ProcessorProperties processorProperties,
                             Optional<CostMonitor> costMonitorOptional,
+                            Optional<TaskMetrics> taskMetricsOptional,
                             @Value("${schedule.run-on-startup:false}") boolean runOnStartup) {
         this.taskQueue = taskQueue;
         this.recoveryRunner = recoveryRunner;
@@ -112,6 +126,7 @@ public class ContentScheduler {
         this.githubProcessorOptional = githubProcessorOptional;
         this.processorProperties = processorProperties;
         this.costMonitorOptional = costMonitorOptional;
+        this.taskMetricsOptional = taskMetricsOptional;
         this.runOnStartup = runOnStartup;
     }
 
@@ -130,6 +145,8 @@ public class ContentScheduler {
             }
             enqueueRunTaskIfAbsent("cron");
             processQueueOnce();
+            taskMetricsOptional.ifPresent(metrics ->
+                    metrics.recordScheduleSuccess(TaskMetrics.Operation.CONTENT_FETCH));
             log.info("内容处理任务完成");
         } catch (Exception e) {
             log.error("内容处理任务失败(调度器存活, 等待下次 cron 触发)", e);
@@ -185,14 +202,22 @@ public class ContentScheduler {
     private void processQueueOnce() {
         String taskId;
         while ((taskId = taskQueue.poll(0, TimeUnit.SECONDS)) != null) {
+            TaskRoute route = TaskRoute.UNKNOWN;
             try {
-                processTask(taskId);
+                route = routeOf(taskId);
+                TaskMetrics.Outcome outcome = processTask(taskId, route);
                 taskQueue.complete(taskId);
+                recordProcessed(route.source(), outcome);
             } catch (RetryableException e) {
+                recordProcessed(route.source(), TaskMetrics.Outcome.RETRYABLE_FAILURE);
                 log.warn("任务 {} 失败(可重试), 留在 processing 集合中待启动时重入队", taskId, e);
             } catch (NonRetryableException e) {
+                recordProcessed(route.source(), TaskMetrics.Outcome.NON_RETRYABLE_FAILURE);
                 log.error("任务 {} 失败(不可重试), 标记 complete 以避免阻塞队列", taskId, e);
                 taskQueue.complete(taskId);
+            } catch (RuntimeException e) {
+                recordProcessed(route.source(), TaskMetrics.Outcome.UNEXPECTED_FAILURE);
+                throw e;
             }
         }
     }
@@ -234,27 +259,59 @@ public class ContentScheduler {
      * 引入 {@code Map<String, Processor>} 或 Spring 自动注入 {@code List<Processor>} +
      * {@code @Qualifier} 替换 if-else, 支持多 Processor 路由.
      */
-    private void processTask(String taskId) {
+    private TaskMetrics.Outcome processTask(String taskId, TaskRoute route) {
         log.info("处理任务: taskId={}", taskId);
-        if (taskId == null || taskId.isBlank()) {
+        if (taskId.isBlank()) {
             log.warn("taskId 为空, 跳过");
-            return;
+            return TaskMetrics.Outcome.SKIPPED;
         }
-        String prefix = processorProperties.getTaskIdPrefix() + ":";
-        if (taskId.startsWith(prefix)) {
+        if (route == TaskRoute.TWITTER) {
             twitterProcessor.process();
-            return;
+            return TaskMetrics.Outcome.SUCCESS;
         }
-        if (taskId.startsWith("github:")) {
+        if (route == TaskRoute.GITHUB) {
             if (githubProcessorOptional.isPresent()) {
                 githubProcessorOptional.get().process();
+                return TaskMetrics.Outcome.SUCCESS;
             } else {
                 log.warn("github: 任务到达但 GitHubProcessor 未注册 (github.enabled=false), 跳过: taskId={}", taskId);
             }
-            return;
+            return TaskMetrics.Outcome.SKIPPED;
         }
+        String prefix = processorProperties.getTaskIdPrefix() + ":";
         log.warn("未知 taskId 前缀, 跳过 (Epic 5+ 其他前缀待扩展): taskId={}, expectedPrefix={}",
                 taskId, prefix);
+        return TaskMetrics.Outcome.SKIPPED;
+    }
+
+    private TaskRoute routeOf(String taskId) {
+        if (taskId != null && taskId.startsWith(processorProperties.getTaskIdPrefix() + ":")) {
+            return TaskRoute.TWITTER;
+        }
+        if (taskId != null && taskId.startsWith("github:")) {
+            return TaskRoute.GITHUB;
+        }
+        return TaskRoute.UNKNOWN;
+    }
+
+    private void recordProcessed(TaskMetrics.Source source, TaskMetrics.Outcome outcome) {
+        taskMetricsOptional.ifPresent(metrics -> metrics.recordProcessed(source, outcome));
+    }
+
+    private enum TaskRoute {
+        TWITTER(TaskMetrics.Source.TWITTER),
+        GITHUB(TaskMetrics.Source.GITHUB),
+        UNKNOWN(TaskMetrics.Source.UNKNOWN);
+
+        private final TaskMetrics.Source source;
+
+        TaskRoute(TaskMetrics.Source source) {
+            this.source = source;
+        }
+
+        TaskMetrics.Source source() {
+            return source;
+        }
     }
 
     private boolean isBudgetHalted() {
