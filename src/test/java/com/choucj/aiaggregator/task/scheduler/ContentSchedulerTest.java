@@ -3,6 +3,7 @@ package com.choucj.aiaggregator.task.scheduler;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.observability.CorrelationContext;
 import com.choucj.aiaggregator.monitoring.CostMonitor;
 import com.choucj.aiaggregator.monitoring.TaskMetrics;
 import com.choucj.aiaggregator.processor.GitHubProcessor;
@@ -15,6 +16,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.MDC;
 import java.time.YearMonth;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
@@ -27,6 +29,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -78,12 +81,53 @@ class ContentSchedulerTest {
 
     @BeforeEach
     void setUp() {
+        MDC.clear();
         // lenient: 不所有用例都会路由到 processTask (例如 run-on-startup=false 的早返回用例)
         lenient().when(processorProperties.getTaskIdPrefix()).thenReturn("twitter");
         lenient().when(taskQueue.getProcessingTasks()).thenReturn(Set.of());
         lenient().when(taskQueue.isQueued("twitter:run")).thenReturn(false);
         scheduler = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
                 Optional.of(githubProcessor), processorProperties, true);
+    }
+
+    @Test
+    void should_expose_task_context_and_clear_mdc_when_task_is_processed() {
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter:tweet:42")
+                .thenReturn(null);
+        doAnswer(invocation -> {
+            assertThat(CorrelationContext.require()).isNotBlank();
+            assertThat(MDC.get(CorrelationContext.TASK_ID_KEY)).isEqualTo("twitter:tweet:42");
+            return null;
+        }).when(twitterProcessor).process();
+
+        scheduler.processContent();
+
+        assertThat(MDC.getCopyOfContextMap()).isNullOrEmpty();
+    }
+
+    @Test
+    void should_use_separate_recovery_and_processing_contexts_when_application_starts() {
+        String[] recoveryCorrelationId = new String[1];
+        String[] processingCorrelationId = new String[1];
+        doAnswer(invocation -> {
+            recoveryCorrelationId[0] = CorrelationContext.require();
+            assertThat(MDC.get(CorrelationContext.TASK_ID_KEY)).isEqualTo("startup-recovery");
+            return null;
+        }).when(recoveryRunner).recoverPendingTasks();
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter:run")
+                .thenReturn(null);
+        doAnswer(invocation -> {
+            processingCorrelationId[0] = CorrelationContext.require();
+            return null;
+        }).when(twitterProcessor).process();
+
+        scheduler.onStartup();
+
+        assertThat(recoveryCorrelationId[0]).isNotBlank();
+        assertThat(processingCorrelationId[0]).isNotBlank().isNotEqualTo(recoveryCorrelationId[0]);
+        assertThat(MDC.getCopyOfContextMap()).isNullOrEmpty();
     }
 
     @Test

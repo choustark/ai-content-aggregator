@@ -4,6 +4,7 @@ import com.choucj.aiaggregator.common.client.LlmClient;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.Article;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.observability.MdcPropagation;
 import com.choucj.aiaggregator.content.rag.service.ReferenceRetriever;
 import com.choucj.aiaggregator.content.rewriter.config.RewriterProperties;
 import com.choucj.aiaggregator.monitoring.TokenUsageTracker;
@@ -80,10 +81,10 @@ public class MultiModelRewriter implements ContentRewriter {
         LocalDate trackingDate = LocalDate.now();
         long startNanos = System.nanoTime();
         long deadlineNanos = startNanos + TimeUnit.MILLISECONDS.toNanos(properties.getMultiModelDeadlineMs());
-        Future<ModelOutcome> deepSeekFuture = modelExecutor.submit(
-                () -> callModel(MODEL_DEEPSEEK, prepared, articleFactory, trackingDate));
-        Future<ModelOutcome> glmFuture = modelExecutor.submit(
-                () -> callModel(MODEL_GLM, prepared, articleFactory, trackingDate));
+        Future<ModelOutcome> deepSeekFuture = modelExecutor.submit(MdcPropagation.wrap(
+                (Callable<ModelOutcome>) () -> callModel(MODEL_DEEPSEEK, prepared, articleFactory, trackingDate)));
+        Future<ModelOutcome> glmFuture = modelExecutor.submit(MdcPropagation.wrap(
+                (Callable<ModelOutcome>) () -> callModel(MODEL_GLM, prepared, articleFactory, trackingDate)));
 
         ModelOutcome deepSeek = awaitOutcome(deepSeekFuture, MODEL_DEEPSEEK, deadlineNanos);
         ModelOutcome glm = awaitOutcome(glmFuture, MODEL_GLM, deadlineNanos);
@@ -242,7 +243,8 @@ public class MultiModelRewriter implements ContentRewriter {
     private ModelScorer.ScoreResult scoreWithDeadline(ModelOutcome outcome,
                                                       ModelScorer.SourceContext sourceContext,
                                                       long deadlineNanos) {
-        Future<ModelScorer.ScoreResult> future = modelExecutor.submit(scoreTask(outcome, sourceContext));
+        Future<ModelScorer.ScoreResult> future = modelExecutor.submit(
+                MdcPropagation.wrap(scoreTask(outcome, sourceContext)));
         try {
             return future.get(remainingMillis(deadlineNanos), TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {

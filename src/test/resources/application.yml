@@ -1,0 +1,99 @@
+# 自动化测试专用、自包含配置，仅进入测试 classpath，不打包到生产 JAR。
+# 不导入本地模板、开关或密钥；Boot 导入文档优先级高于导入方，可能破坏隔离。
+
+spring:
+  application:
+    name: ai-content-aggregator
+  autoconfigure:
+    exclude: ""
+  data:
+    redis:
+      cluster:
+        nodes:
+          - redis-cluster-1:7001
+          - redis-cluster-2:7002
+          - redis-cluster-3:7003
+        max-redirects: 3
+
+redis:
+  cluster:
+    nodes:
+      - host: redis-cluster-1
+        port: 7001
+      - host: redis-cluster-2
+        port: 7002
+      - host: redis-cluster-3
+        port: 7003
+
+langchain4j:
+  community:
+    redis:
+      enabled: false
+      index-name: aiaggregator-embeddings-test
+      dimension: 1024
+
+features:
+  rag:
+    enabled: false
+
+feature-flags:
+  twitter:
+    enabled: true
+  github:
+    enabled: true
+  multi-model:
+    enabled: false
+  rag:
+    enabled: false
+    batch-async-enabled: false
+
+# 仅满足装配校验的假凭据；测试需要外部调用时须显式提供专用配置。
+llm:
+  deepseek:
+    api-key: test-only-deepseek
+    base-url: http://127.0.0.1:1
+  glm:
+    api-key: test-only-glm
+    base-url: http://127.0.0.1:1
+
+github:
+  token: test-only-github
+
+rsshub:
+  instances:
+    - http://127.0.0.1:1
+
+schedule:
+  run-on-startup: false
+  cron: "-"
+
+cost:
+  monitor:
+    daily-cron: "-"
+
+wechat:
+  mp:
+    enabled: false
+    publishing:
+      batch-cron: "-"
+
+wx:
+  mp:
+    app-id: test-only-app-id
+    secret: test-only-secret
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,env,features,costs,prometheus
+
+logging:
+  structured:
+    format:
+      console: ecs
+    ecs:
+      service:
+        name: ai-content-aggregator
+  level:
+    com.choucj.aiaggregator: INFO

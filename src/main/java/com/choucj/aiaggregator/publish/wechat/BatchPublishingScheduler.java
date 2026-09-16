@@ -1,5 +1,6 @@
 package com.choucj.aiaggregator.publish.wechat;
 
+import com.choucj.aiaggregator.common.observability.CorrelationContext;
 import com.choucj.aiaggregator.monitoring.TaskMetrics;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -45,6 +46,7 @@ public class BatchPublishingScheduler {
      */
     @Scheduled(cron = "${wechat.mp.publishing.batch-cron:0 */30 * * * ?}")
     public void processBatch() {
+        CorrelationContext.begin(null);
         try {
             ArticlePublicationWorkflow.PublishDueResult result = publicationWorkflow.publishDueArticles();
             taskMetricsOptional.ifPresent(metrics -> {
@@ -55,6 +57,8 @@ public class BatchPublishingScheduler {
                     result.total(), result.success(), result.failure());
         } catch (Exception e) {
             log.error("批量发布失败(调度器存活, 等待下次 cron 触发)", e);
+        } finally {
+            CorrelationContext.end();
         }
     }
 

@@ -42,6 +42,8 @@ _bmad-output/
 # 主配置入口: 不入 Git, 每个开发者本地维护, 避免本地调过的配置被误提交.
 application.yml
 application.yaml
+# 自动化测试配置不含密钥，必须提交，且只进入测试 classpath。
+!src/test/resources/application.yml
 # 密钥文件: 永远不入 Git. 提交模板 api-keys.example.yml 即可.
 api-keys.yml
 api-keys.yaml

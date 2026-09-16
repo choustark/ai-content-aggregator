@@ -2,6 +2,10 @@ package com.choucj.aiaggregator.monitoring;
 
 import com.choucj.aiaggregator.common.repository.RedisRepository;
 import com.choucj.aiaggregator.common.util.RedisKeys;
+import com.choucj.aiaggregator.common.observability.CorrelationContext;
+import com.choucj.aiaggregator.common.observability.LogEventCapture;
+import org.slf4j.MDC;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -12,12 +16,17 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.time.Duration;
 import java.time.LocalDate;
 import java.time.YearMonth;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.spy;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -27,6 +36,41 @@ import static org.mockito.Mockito.when;
  */
 @ExtendWith(MockitoExtension.class)
 class CostMonitorTest {
+
+    @AfterEach
+    void clearMdc() {
+        MDC.clear();
+    }
+
+    @Test
+    void should_correlate_warning_and_clear_context_when_daily_summary_reads_invalid_value() {
+        List<String> ids = new ArrayList<>();
+        when(redisRepository.get(anyString())).thenAnswer(invocation -> {
+            ids.add(CorrelationContext.require());
+            return "invalid-number";
+        });
+        try (var logs = new LogEventCapture(CostMonitor.class)) {
+            costMonitor.summarizeCurrentMonth();
+            assertThat(MDC.getCopyOfContextMap()).isNullOrEmpty();
+            assertThat(ids).isNotEmpty();
+            String firstId = ids.getFirst();
+            assertThat(ids).allMatch(firstId::equals);
+            assertThat(logs.events()).isNotEmpty().allSatisfy(event ->
+                    assertThat(event.getMDCPropertyMap()).containsEntry("correlationId", firstId));
+            ids.clear();
+            costMonitor.summarizeCurrentMonth();
+            assertThat(ids.getFirst()).isNotEqualTo(firstId);
+            assertThat(MDC.getCopyOfContextMap()).isNullOrEmpty();
+        }
+    }
+
+    @Test
+    void should_clear_context_when_daily_summary_throws() {
+        CostMonitor monitor = spy(costMonitor);
+        doThrow(new IllegalStateException("failed")).when(monitor).summarizeMonth(any(YearMonth.class));
+        assertThatThrownBy(monitor::summarizeCurrentMonth).isInstanceOf(IllegalStateException.class);
+        assertThat(MDC.getCopyOfContextMap()).isNullOrEmpty();
+    }
 
     private static final YearMonth MONTH = YearMonth.of(2026, 7);
     private static final LocalDate FIRST_DAY = LocalDate.of(2026, 7, 1);

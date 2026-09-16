@@ -2,6 +2,7 @@ package com.choucj.aiaggregator.task.scheduler;
 
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
+import com.choucj.aiaggregator.common.observability.CorrelationContext;
 import com.choucj.aiaggregator.monitoring.CostMonitor;
 import com.choucj.aiaggregator.monitoring.TaskMetrics;
 import com.choucj.aiaggregator.processor.GitHubProcessor;
@@ -137,8 +138,9 @@ public class ContentScheduler {
      */
     @Scheduled(cron = "${schedule.cron:0 0 22 * * ?}")
     public void processContent() {
-        log.info("开始执行内容处理任务");
+        CorrelationContext.begin(null);
         try {
+            log.info("开始执行内容处理任务");
             if (isBudgetHalted()) {
                 log.error("成本预算已停机, 跳过本次自动内容处理");
                 return;
@@ -150,6 +152,8 @@ public class ContentScheduler {
             log.info("内容处理任务完成");
         } catch (Exception e) {
             log.error("内容处理任务失败(调度器存活, 等待下次 cron 触发)", e);
+        } finally {
+            CorrelationContext.end();
         }
     }
 
@@ -177,11 +181,14 @@ public class ContentScheduler {
             log.info("schedule.run-on-startup=false, 跳过启动时处理, 等待下一个 cron 时刻");
             return;
         }
-        log.info("应用启动完成, 触发首次内容处理");
+        CorrelationContext.begin("startup-recovery");
         try {
+            log.info("应用启动完成, 执行断点恢复");
             recoveryRunner.recoverPendingTasks();
         } catch (Exception e) {
             log.warn("启动时断点恢复失败, 继续触发首次内容处理", e);
+        } finally {
+            CorrelationContext.end();
         }
         processContent();
     }
@@ -200,8 +207,13 @@ public class ContentScheduler {
      * </ul>
      */
     private void processQueueOnce() {
-        String taskId;
-        while ((taskId = taskQueue.poll(0, TimeUnit.SECONDS)) != null) {
+        while (true) {
+            CorrelationContext.putTaskId(null);
+            String taskId = taskQueue.poll(0, TimeUnit.SECONDS);
+            if (taskId == null) {
+                return;
+            }
+            CorrelationContext.putTaskId(taskId);
             TaskRoute route = TaskRoute.UNKNOWN;
             try {
                 route = routeOf(taskId);

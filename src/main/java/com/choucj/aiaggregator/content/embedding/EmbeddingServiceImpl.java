@@ -3,6 +3,7 @@ package com.choucj.aiaggregator.content.embedding;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.observability.MdcPropagation;
 import dev.langchain4j.community.store.embedding.redis.RedisRequestFailedException;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
@@ -167,13 +168,13 @@ public class EmbeddingServiceImpl implements EmbeddingService {
             }
         };
         try {
-            Future<?> task = embeddingExecutor.submit(() -> {
+            Future<?> task = embeddingExecutor.submit(MdcPropagation.wrap(() -> {
                 try {
                     result.complete(embedText(articleId, text));
                 } catch (RuntimeException e) {
                     result.completeExceptionally(e);
                 }
-            });
+            }));
             taskRef.set(task);
         } catch (RejectedExecutionException e) {
             result.completeExceptionally(new RetryableException(ErrorCode.EXTERNAL_API_ERROR,
@@ -182,7 +183,7 @@ public class EmbeddingServiceImpl implements EmbeddingService {
         }
         ScheduledFuture<?> timeout;
         try {
-            timeout = timeoutScheduler.schedule(() -> {
+            timeout = timeoutScheduler.schedule(MdcPropagation.wrap(() -> {
                 if (result.completeExceptionally(new RetryableException(ErrorCode.EXTERNAL_API_ERROR,
                         "GLM embedding 超时: articleId=" + articleId))) {
                     Future<?> task = taskRef.get();
@@ -190,7 +191,7 @@ public class EmbeddingServiceImpl implements EmbeddingService {
                         task.cancel(true);
                     }
                 }
-            }, asyncTimeout.toMillis(), TimeUnit.MILLISECONDS);
+            }), asyncTimeout.toMillis(), TimeUnit.MILLISECONDS);
         } catch (RejectedExecutionException e) {
             Future<?> task = taskRef.get();
             if (task != null) {

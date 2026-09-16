@@ -308,15 +308,25 @@ class LangChain4jLlmClientTest {
     }
 
     @Test
-    void shouldSanitizeApiKeyPatternsAndTruncateLongBody() {
+    void should_sanitize_all_sensitive_patterns_and_truncate_when_upstream_body_is_logged() {
         assertThat(LangChain4jLlmClient.sanitizeBody("Bearer abc123def456ghi789 done"))
                 .isEqualTo("Bearer *** done");
         assertThat(LangChain4jLlmClient.sanitizeBody("{\"api_key\":\"sk-abcdefgh1234567890\"}"))
                 .doesNotContain("sk-abcdefgh1234567890");
+        for (String canary : java.util.List.of(
+                "Authorization: Bearer authorization-real-path-canary",
+                "Cookie=cookie-real-path-canary",
+                "api-key=api-key-real-path-canary",
+                "token: Bearer token-real-path-canary=tail",
+                "password=password-real-path-canary")) {
+            assertThat(LangChain4jLlmClient.sanitizeBody(canary))
+                    .contains("***")
+                    .doesNotContain("real-path-canary");
+        }
         String longBody = "x".repeat(500);
         assertThat(LangChain4jLlmClient.sanitizeBody(longBody))
-                .hasSize(300 + "...(截断)".length())
-                .endsWith("...(截断)");
+                .hasSize(300)
+                .endsWith("...");
         assertThat(LangChain4jLlmClient.sanitizeBody(null)).isEqualTo("(空)");
         assertThat(LangChain4jLlmClient.sanitizeBody("  ")).isEqualTo("(空)");
     }

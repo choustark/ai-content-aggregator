@@ -2,6 +2,7 @@ package com.choucj.aiaggregator.common.client;
 
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.observability.LogSanitizer;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatModel;
@@ -233,14 +234,7 @@ public class LangChain4jLlmClient implements LlmClient {
      * 错误体脱敏 + 截断 — api-key / Bearer token 模式替换为掩码, 300 字符截断.
      */
     static String sanitizeBody(String body) {
-        if (body == null || body.isBlank()) {
-            return "(空)";
-        }
-        String sanitized = body
-                .replaceAll("(?i)(bearer\\s+)[A-Za-z0-9._\\-]+", "$1***")
-                .replaceAll("(?i)((?:api[-_]?key|access[_-]?token)[\"'\\s:=]+)[^\"'\\s,}&]+", "$1***")
-                .replaceAll("(sk-[A-Za-z0-9]{6})[A-Za-z0-9]+", "$1***");
-        return sanitized.length() > 300 ? sanitized.substring(0, 300) + "...(截断)" : sanitized;
+        return LogSanitizer.sanitizeBody(body);
     }
 
     private static String extractText(ChatResponse response) {

@@ -6,6 +6,8 @@ import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.source.github.config.GitHubProperties;
 import com.choucj.aiaggregator.source.github.model.GitHubRepo;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.choucj.aiaggregator.common.observability.LogEventCapture;
+import ch.qos.logback.classic.Level;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -251,10 +253,15 @@ class GitHubClientImplTest {
         }
         stubReturn(buildReadmeBody(sb.toString()));
 
-        String result = client.fetchReadme("owner", "repo");
+        try (var logs = new LogEventCapture(GitHubClientImpl.class)) {
+            String result = client.fetchReadme("owner", "repo");
 
-        assertThat(result).hasSize(1024);
-        assertThat(output.getOut()).contains(" WARN ", "GitHub README 截断");
+            assertThat(result).hasSize(1024);
+            assertThat(logs.events()).anySatisfy(event -> {
+                assertThat(event.getLevel()).isEqualTo(Level.WARN);
+                assertThat(event.getFormattedMessage()).contains("GitHub README 截断");
+            });
+        }
     }
 
     @Test

@@ -9,12 +9,14 @@
 #   - 本文件不含密钥. 密钥统一放 api-keys.yml (复制 api-keys.example.yml).
 #   - feature-flags.yml / resilience.yml 不含密钥, 直接提交, 无需 example.
 #   - Spring Boot 加载顺序: application.yml → application-{profile}.yml → spring.config.import 引入的外部 yml.
+#   - 默认/dev 使用本文件内的本地配置；prod 由 application-prod.yml 覆盖；测试配置位于 src/test/resources，不进入生产包.
+#   - 本地控制台保留可读 pattern，并同时写入 logs/ 下的限额滚动文件；prod/test 控制台使用 Boot 原生 ECS 单行 JSON.
 
 spring:
   application:
     name: ai-content-aggregator
   profiles:
-    # 通过 SPRING_PROFILES_ACTIVE 环境变量切换 dev/test/prod, 默认 dev.
+    # 通过 SPRING_PROFILES_ACTIVE 环境变量切换 test/prod；默认 dev 直接使用 application.yml.
     active: ${SPRING_PROFILES_ACTIVE:dev}
   config:
     # 引入外部配置. optional: 前缀表示缺失不报错 (如未复制 api-keys.yml 时启动 dev 也能跑).
@@ -28,8 +30,45 @@ spring:
       cluster:
         # 业务键值(Lettuce)集群总开关.
         # 关闭时 RedisClusterLettuceConfiguration 不注册 RedisConnectionFactory / StringRedisTemplate.
-        # 集群节点列表(nodes)由 application-{profile}.yml 提供.
         enabled: true
+        nodes:
+          - localhost:7001
+          - localhost:7002
+          - localhost:7003
+        max-redirects: 3
+
+redis:
+  cluster:
+    nodes:
+      - host: localhost
+        port: 7001
+      - host: localhost
+        port: 7002
+      - host: localhost
+        port: 7003
+    username:
+    password:
+    client:
+      connect-timeout: 10s
+      command-timeout: 5s
+      keep-alive: true
+      topology-refresh-period: 5m
+
+logging:
+  # 本地运行日志：控制台为可读纯文本，文件按日期/大小滚动并压缩。
+  file:
+    name: logs/ai-content-aggregator.log
+  logback:
+    rollingpolicy:
+      file-name-pattern: logs/ai-content-aggregator.%d{yyyy-MM-dd}.%i.log.gz
+      max-file-size: 20MB
+      max-history: 14
+      total-size-cap: 1GB
+      clean-history-on-start: false
+  level:
+    com.choucj.aiaggregator: DEBUG
+    io.lettuce.core.protocol.ConnectionWatchdog: WARN
+    io.lettuce.core.protocol.ReconnectionHandler: WARN
 
 management:
   endpoints:

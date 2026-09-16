@@ -1,17 +1,20 @@
 package com.choucj.aiaggregator.publish.wechat;
 
+import com.choucj.aiaggregator.common.observability.CorrelationContext;
 import com.choucj.aiaggregator.monitoring.TaskMetrics;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.slf4j.MDC;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.never;
 
@@ -30,7 +33,21 @@ class BatchPublishingSchedulerTest {
 
     @BeforeEach
     void setUp() {
+        MDC.clear();
         scheduler = new BatchPublishingScheduler(publicationWorkflow);
+    }
+
+    @Test
+    void should_expose_context_when_batch_scheduler_runs() {
+        doAnswer(invocation -> {
+            assertThat(CorrelationContext.require()).isNotBlank();
+            assertThat(MDC.get(CorrelationContext.TASK_ID_KEY)).isNull();
+            return new ArticlePublicationWorkflow.PublishDueResult(0, 0, 0);
+        }).when(publicationWorkflow).publishDueArticles();
+
+        scheduler.processBatch();
+
+        assertThat(MDC.getCopyOfContextMap()).isNullOrEmpty();
     }
 
     @Test

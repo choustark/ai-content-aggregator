@@ -33,6 +33,15 @@ management:
       show-values: NEVER
 
 logging:
+  file:
+    # 容器生产环境只写 stdout ECS；持久化由部署层日志采集负责。
+    name: ""
+  structured:
+    format:
+      console: ecs
+    ecs:
+      service:
+        name: ai-content-aggregator
   level:
     com.choucj.aiaggregator: INFO
     org.springframework.boot.context.config: WARN

@@ -67,7 +67,7 @@ flowchart LR
 ./mvnw clean test
 ```
 
-需要配置：`application.yml`（主配置，参考 `application.example.yml`）、`api-keys.yml`（LLM / X / 微信凭据，不入库）。
+需要配置：`application.yml`（主配置，参考 `application.example.yml`）、`api-keys.yml`（LLM / X / 微信凭据，不入库）。本地日志同时输出到控制台和 `logs/ai-content-aggregator.log`，按日期或 20 MB 滚动；生产覆盖配置为 `application-prod.yml`，自动化测试配置位于 `src/test/resources/application.yml`。
 
 ## 当前状态
 
@@ -75,4 +75,4 @@ MVP 已交付并在真实环境运行：内容抓取、过滤、改写、媒体�
 
 ---
 
-_最后更新：2026-09-12_
+_最后更新：2026-09-13_

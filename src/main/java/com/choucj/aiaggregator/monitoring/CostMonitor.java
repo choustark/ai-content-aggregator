@@ -2,6 +2,7 @@ package com.choucj.aiaggregator.monitoring;
 
 import com.choucj.aiaggregator.common.repository.RedisRepository;
 import com.choucj.aiaggregator.common.util.RedisKeys;
+import com.choucj.aiaggregator.common.observability.CorrelationContext;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -44,7 +45,12 @@ public class CostMonitor {
      */
     @Scheduled(cron = "${cost.monitor.daily-cron:0 5 0 * * ?}")
     public void summarizeCurrentMonth() {
-        summarizeMonth(YearMonth.now());
+        CorrelationContext.begin(null);
+        try {
+            summarizeMonth(YearMonth.now());
+        } finally {
+            CorrelationContext.end();
+        }
     }
 
     /**

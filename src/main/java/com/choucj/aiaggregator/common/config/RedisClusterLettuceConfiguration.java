@@ -85,7 +85,7 @@ public class RedisClusterLettuceConfiguration {
 
         List<RedisClusterProperties.Node> nodes = clusterProperties.getNodes();
         Assert.notEmpty(nodes,
-                "redis.cluster.nodes must be configured (e.g. in application-dev.yml) "
+                "redis.cluster.nodes must be configured (e.g. in application.yml) "
                         + "when spring.data.redis.cluster.enabled=true");
 
         RedisClusterConfiguration clusterConfig = new RedisClusterConfiguration();

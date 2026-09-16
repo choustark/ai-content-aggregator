@@ -42,7 +42,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * {@code PING};失败则 {@link Assumptions#assumeTrue(boolean, String)} 跳过全部测试,
  * 不阻塞 CI(本地无 Cluster 时).
  *
- * <p><b>profile=test:</b> 加载 {@code application-test.yml},集群节点指向
+ * <p><b>profile=test:</b> 加载 {@code src/test/resources/application.yml},集群节点指向
  * {@code redis-cluster-1/2/3:7001/7002/7003}(Docker container name).
  *
  * <p><b>键隔离:</b> 所有测试键以 {@code test:1.5b:json:} 为前缀,{@link AfterEach} 统一清理.

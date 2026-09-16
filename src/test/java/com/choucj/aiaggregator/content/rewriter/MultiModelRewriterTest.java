@@ -4,6 +4,7 @@ import com.choucj.aiaggregator.common.client.LlmClient;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.Article;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.observability.CorrelationContext;
 import com.choucj.aiaggregator.content.rewriter.config.RewriterProperties;
 import com.choucj.aiaggregator.monitoring.TokenUsageTracker;
 import com.choucj.aiaggregator.source.github.model.GitHubRepo;
@@ -12,15 +13,19 @@ import ch.qos.logback.classic.Logger;
 import ch.qos.logback.classic.spi.ILoggingEvent;
 import ch.qos.logback.core.read.ListAppender;
 import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.LocalDate;
 import java.util.Optional;
+import java.util.List;
+import java.util.Collections;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
@@ -52,11 +57,39 @@ class MultiModelRewriterTest {
 
     @BeforeEach
     void setUp() {
+        MDC.clear();
         RewriterProperties properties = new RewriterProperties();
         properties.setMaxRetries(0);
         properties.setRetryBackoffMs(100L);
         properties.setContentMaxCodePoints(2000);
         rewriter = new MultiModelRewriter(llmClient, properties, tokenUsageTracker, Optional.empty(), modelScorer);
+    }
+
+    @AfterEach
+    void tearDown() {
+        MDC.clear();
+        rewriter.shutdownExecutor();
+    }
+
+    @Test
+    void should_propagate_same_context_when_model_and_scoring_use_virtual_threads() {
+        String correlationId = CorrelationContext.begin("rewrite-task");
+        List<String> observed = Collections.synchronizedList(new java.util.ArrayList<>());
+        when(llmClient.chatWithModel(anyString(), anyString(), anyString()))
+                .thenAnswer(invocation -> {
+                    observed.add(CorrelationContext.require());
+                    return response(invocation.getArgument(0) + " 标题", "正文");
+                });
+        when(modelScorer.score(any(Article.class), any(ModelScorer.SourceContext.class), anyString()))
+                .thenAnswer(invocation -> {
+                    observed.add(CorrelationContext.require());
+                    return score(invocation.getArgument(2), 80);
+                });
+
+        rewriter.rewrite(sampleTweet());
+
+        assertThat(observed).hasSize(4).containsOnly(correlationId);
+        CorrelationContext.end();
     }
 
     @Test

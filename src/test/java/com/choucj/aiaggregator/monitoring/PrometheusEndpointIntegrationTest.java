@@ -23,7 +23,16 @@ import static org.assertj.core.api.Assertions.assertThat;
         "feature-flags.github.enabled=false",
         "features.rag.enabled=false",
         "feature-flags.rag.enabled=false",
-        "langchain4j.community.redis.enabled=false"
+        "langchain4j.community.redis.enabled=false",
+        "spring.data.redis.cluster.nodes[0]=redis-cluster-1:7001",
+        "spring.data.redis.cluster.nodes[1]=redis-cluster-2:7002",
+        "spring.data.redis.cluster.nodes[2]=redis-cluster-3:7003",
+        "redis.cluster.nodes[0].host=redis-cluster-1",
+        "redis.cluster.nodes[0].port=7001",
+        "redis.cluster.nodes[1].host=redis-cluster-2",
+        "redis.cluster.nodes[1].port=7002",
+        "redis.cluster.nodes[2].host=redis-cluster-3",
+        "redis.cluster.nodes[2].port=7003"
 })
 @ActiveProfiles({"prod", "test"})
 @AutoConfigureObservability

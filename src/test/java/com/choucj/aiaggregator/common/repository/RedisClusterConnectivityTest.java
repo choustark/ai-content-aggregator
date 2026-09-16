@@ -31,7 +31,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * {@link StringRedisTemplate},执行 {@code PING} 探活;失败则
  * {@link Assumptions#assumeTrue(boolean, String)} 跳过全部 4 个测试.
  *
- * <p><b>profile=test:</b> 加载 {@code application-test.yml},集群节点指向
+ * <p><b>profile=test:</b> 加载 {@code src/test/resources/application.yml},集群节点指向
  * {@code redis-cluster-1/2/3:7001/7002/7003}(Docker container name).
  * 本地开发机需手动起 3 节点 Cluster 或调整 host 为 localhost.
  *

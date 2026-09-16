@@ -5,6 +5,8 @@ import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.Article;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.observability.LogEventCapture;
+import ch.qos.logback.classic.Level;
 import com.choucj.aiaggregator.publish.status.ArticleStatusService;
 import com.choucj.aiaggregator.publish.wechat.converter.ArticleToWxArticleConverter;
 import me.chanjar.weixin.common.error.WxError;
@@ -101,13 +103,16 @@ class WeChatPublisherTest {
         when(wxMpService.getDraftService()).thenReturn(wxMpDraftService);
         when(wxMpDraftService.addDraft(any(WxMpAddDraft.class))).thenReturn("media-id-xyz");
 
-        publisher.publish(article);
+        try (var logs = new LogEventCapture(WeChatPublisher.class)) {
+            publisher.publish(article);
 
-        assertThat(output)
-                .contains("articleId=tw-art-001")
-                .contains("mediaId=media-id-xyz")
-                .contains("标题=\"标题-tw-art-001\"")
-                .contains("html 长度=" + html.length());
+            assertThat(logs.events()).anySatisfy(event -> {
+                assertThat(event.getLevel()).isEqualTo(Level.INFO);
+                assertThat(event.getFormattedMessage())
+                        .contains("articleId=tw-art-001", "mediaId=media-id-xyz",
+                                "标题=\"标题-tw-art-001\"", "html 长度=" + html.length());
+            });
+        }
     }
 
     // ===== Task 3: AC-3 / AC-6 WxErrorException 异常路径 =====

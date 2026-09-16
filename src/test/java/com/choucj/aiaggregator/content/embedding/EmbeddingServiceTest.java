@@ -3,6 +3,7 @@ package com.choucj.aiaggregator.content.embedding;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.observability.CorrelationContext;
 import dev.langchain4j.community.store.embedding.redis.RedisRequestFailedException;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.exception.InvalidRequestException;
@@ -18,6 +19,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.slf4j.MDC;
 import redis.clients.jedis.exceptions.JedisConnectionException;
 import redis.clients.jedis.exceptions.JedisDataException;
 
@@ -31,6 +33,8 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -53,6 +57,7 @@ class EmbeddingServiceTest {
 
     @BeforeEach
     void setUp() {
+        MDC.clear();
         embeddingModel = mock(EmbeddingModel.class);
         embeddingStore = mock(EmbeddingStore.class);
         embeddingExecutor = Executors.newSingleThreadExecutor();
@@ -63,8 +68,28 @@ class EmbeddingServiceTest {
 
     @AfterEach
     void tearDown() {
+        MDC.clear();
         embeddingExecutor.shutdownNow();
         timeoutScheduler.shutdownNow();
+    }
+
+    @Test
+    void should_propagate_async_context_when_worker_is_reused() throws Exception {
+        String correlationId = CorrelationContext.begin("embedding-task");
+        when(embeddingModel.embed("first")).thenAnswer(invocation -> {
+            assertThat(CorrelationContext.require()).isEqualTo(correlationId);
+            return Response.from(Embedding.from(vector(1024)));
+        });
+
+        assertThat(service.embedTextAsync("article-1", "first").get()).hasSize(1024);
+        CorrelationContext.end();
+        when(embeddingModel.embed("second")).thenAnswer(invocation -> {
+            assertThat(MDC.get(CorrelationContext.CORRELATION_ID_KEY)).isNull();
+            return Response.from(Embedding.from(vector(1024)));
+        });
+
+        assertThat(service.embedTextAsync("article-2", "second").get()).hasSize(1024);
+        assertThat(embeddingExecutor.submit(MDC::getCopyOfContextMap).get()).isNullOrEmpty();
     }
 
     @Test
@@ -329,6 +354,40 @@ class EmbeddingServiceTest {
                     .withThrowableOfType(java.util.concurrent.ExecutionException.class)
                     .withCauseInstanceOf(RetryableException.class);
         } finally {
+            executor.shutdownNow();
+            scheduler.shutdownNow();
+        }
+    }
+
+    @Test
+    void should_propagate_context_when_timeout_scheduler_completes_async_future() throws Exception {
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
+        String correlationId = CorrelationContext.begin("embedding-timeout-task");
+        try {
+            EmbeddingServiceImpl timeoutService = new EmbeddingServiceImpl(embeddingModel, embeddingStore,
+                    true, 1024, Duration.ofMillis(200), executor, scheduler);
+            when(embeddingModel.embed("slow-with-context")).thenAnswer(invocation -> {
+                Thread.sleep(1_000);
+                return Response.from(Embedding.from(vector(1024)));
+            });
+            AtomicReference<String> callbackCorrelation = new AtomicReference<>();
+            CountDownLatch completed = new CountDownLatch(1);
+
+            CompletableFuture<float[]> future = timeoutService.embedTextAsync("article-1", "slow-with-context");
+            future.whenComplete((ignored, throwable) -> {
+                callbackCorrelation.set(MDC.get(CorrelationContext.CORRELATION_ID_KEY));
+                completed.countDown();
+            });
+
+            assertThat(future).failsWithin(Duration.ofSeconds(1))
+                    .withThrowableOfType(java.util.concurrent.ExecutionException.class)
+                    .withCauseInstanceOf(RetryableException.class);
+            assertThat(completed.await(1, TimeUnit.SECONDS)).isTrue();
+            assertThat(callbackCorrelation.get()).isEqualTo(correlationId);
+            assertThat(scheduler.submit(MDC::getCopyOfContextMap).get()).isNullOrEmpty();
+        } finally {
+            CorrelationContext.end();
             executor.shutdownNow();
             scheduler.shutdownNow();
         }
