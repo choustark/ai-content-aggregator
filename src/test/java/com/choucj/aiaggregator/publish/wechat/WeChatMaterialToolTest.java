@@ -3,6 +3,7 @@ package com.choucj.aiaggregator.publish.wechat;
 import com.choucj.aiaggregator.common.exception.AggregatorException;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.observability.TestSlowOperationRecorder;
 import me.chanjar.weixin.common.error.WxError;
 import me.chanjar.weixin.common.error.WxErrorException;
 import me.chanjar.weixin.mp.api.WxMpMaterialService;
@@ -44,7 +45,7 @@ class WeChatMaterialToolTest {
 
     @BeforeEach
     void setUp() {
-        tool = new WeChatMaterialTool(wxMpService);
+        tool = new WeChatMaterialTool(wxMpService, TestSlowOperationRecorder.create());
     }
 
     @Test

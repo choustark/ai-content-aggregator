@@ -3,6 +3,7 @@ package com.choucj.aiaggregator.source.github.client;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.observability.TestSlowOperationRecorder;
 import com.choucj.aiaggregator.source.github.config.GitHubProperties;
 import com.choucj.aiaggregator.source.github.model.GitHubRepo;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -68,7 +69,7 @@ class GitHubClientImplTest {
         properties.getTrending().setLanguage("java");
         properties.getTrending().setLookbackDays(7);
         properties.getTrending().setTopN(10);
-        client = new GitHubClientImpl(properties, restClient, objectMapper);
+        client = new GitHubClientImpl(properties, restClient, objectMapper, TestSlowOperationRecorder.create());
     }
 
     // ============ AC-3: happy path ============

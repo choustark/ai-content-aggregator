@@ -1,5 +1,7 @@
 package com.choucj.aiaggregator.source.twitter.media;
 
+import com.choucj.aiaggregator.common.observability.TestSlowOperationRecorder;
+
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import org.junit.jupiter.api.BeforeEach;
@@ -9,6 +11,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
+
+import java.time.Duration;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -32,7 +36,8 @@ class MediaDownloadClientTest {
     void setUp() {
         RestClient.Builder builder = RestClient.builder();
         server = MockRestServiceServer.bindTo(builder).build();
-        downloadClient = new MediaDownloadClient(builder.build(), 10);
+        downloadClient = new MediaDownloadClient(builder.build(), 10, Duration.ZERO,
+                TestSlowOperationRecorder.create());
     }
 
     @Test

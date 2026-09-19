@@ -295,7 +295,7 @@ tests:
   - name: controlled-downstream-and-valid-cost-series
     interval: 1m
     input_series:
-      - series: aiaggregator_external_dependency_consecutive_failures{dependency="x-api"}
+      - series: aiaggregator_external_dependency_consecutive_failures{dependency="github"}
         values: 3x7 0x8
       - series: aiaggregator_cost_monthly_usage_percent
         values: 80x7 100x4 10x4
@@ -307,11 +307,11 @@ tests:
       - eval_time: 6m
         alertname: AiAggregatorExternalDependencyConsecutiveFailures
         exp_alerts:
-          - exp_labels: {dependency: x-api, severity: warning, signal_owner: story-10.3}
+          - exp_labels: {dependency: github, severity: warning, signal_owner: story-10.3}
             exp_annotations:
               summary: 外部依赖连续失败至少 3 次（生产信号由 Story 10.3 提供）
               runbook: ops/observability/README.md#告警处置
-              recovery: 连续失败计数恢复到 3 以下
+              recovery: 连续失败计数恢复到 3 以下，或依赖停止调用后序列陈旧自动解除
       - eval_time: 9m
         alertname: AiAggregatorExternalDependencyConsecutiveFailures
         exp_alerts: []

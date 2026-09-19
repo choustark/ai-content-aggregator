@@ -1,9 +1,14 @@
 package com.choucj.aiaggregator.publish.wechat;
 
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
+import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.Article;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.observability.SlowOperationRecorder;
 import com.choucj.aiaggregator.content.rewriter.SingleModelRewriter;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Dependency;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Kind;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Operation;
 import com.choucj.aiaggregator.publish.status.ArticleStatusService;
 import com.choucj.aiaggregator.publish.wechat.client.WxJavaWeChatClient;
 import com.choucj.aiaggregator.publish.wechat.converter.ArticleToWxArticleConverter;
@@ -71,6 +76,7 @@ public class WeChatPublisher {
     private final ArticleToWxArticleConverter converter;
     private final WeChatThumbMediaIdResolver thumbMediaIdResolver;
     private final ArticleStatusService articleStatusService;
+    private final SlowOperationRecorder slowOperationRecorder;
     private final boolean reviewReminderEnabled;
 
     /**
@@ -87,11 +93,13 @@ public class WeChatPublisher {
                            ArticleToWxArticleConverter converter,
                            WeChatThumbMediaIdResolver thumbMediaIdResolver,
                            ArticleStatusService articleStatusService,
+                           SlowOperationRecorder slowOperationRecorder,
                            @Value("${wechat.mp.review-reminder-enabled:true}") boolean reviewReminderEnabled) {
         this.wxMpService = wxMpService;
         this.converter = converter;
         this.thumbMediaIdResolver = thumbMediaIdResolver;
         this.articleStatusService = articleStatusService;
+        this.slowOperationRecorder = slowOperationRecorder;
         this.reviewReminderEnabled = reviewReminderEnabled;
     }
 
@@ -122,18 +130,23 @@ public class WeChatPublisher {
             // Story 3.5 AC-2: 只有真正进入微信草稿创建路径时才写 PROCESSING; 批量入队路径保持 PENDING.
             articleStatusService.markProcessing(articleId);
             // M1 verify: WxMpDraftService.addDraft(WxMpAddDraft) + WxMpAddDraft(List<WxMpDraftArticles>)
-            mediaId = wxMpService.getDraftService().addDraft(new WxMpAddDraft(java.util.List.of(wxArticle)));
-        } catch (WxErrorException e) {
-            // AC-3 / AC-6: 经 mapWxErrorException 映射 errcode → Retryable/NonRetryable
-            int errcode = (e.getError() == null) ? -1 : e.getError().getErrorCode();
-            String errmsg = (e.getError() == null) ? "unknown" : e.getError().getErrorMsg();
-            // P2: log.error 含截断 rootMessage 字段 (AC-6 cause message 要求)
-            String truncatedErrmsg = SingleModelRewriter.truncateForLog(errmsg, LOG_ERROR_MSG_MAX_CODEPOINTS);
-            String truncatedCause = SingleModelRewriter.truncateForLog(
-                    SingleModelRewriter.getRootMessage(e), LOG_ERROR_MSG_MAX_CODEPOINTS);
+            mediaId = slowOperationRecorder.observe(Kind.SDK, Dependency.WECHAT, Operation.PUBLISH, () -> {
+                try {
+                    return wxMpService.getDraftService().addDraft(new WxMpAddDraft(java.util.List.of(wxArticle)));
+                } catch (WxErrorException e) {
+                    throw WxJavaWeChatClient.mapWxErrorException(e, "addDraft");
+                }
+            });
+        } catch (RetryableException | NonRetryableException e) {
+            WxErrorException wxError = e.getCause() instanceof WxErrorException cause ? cause : null;
+            int errcode = wxError == null || wxError.getError() == null ? -1 : wxError.getError().getErrorCode();
+            String errmsg = wxError == null || wxError.getError() == null ? "unknown" : wxError.getError().getErrorMsg();
             log.error("微信 addDraft 失败: articleId={}, operation=addDraft, errcode={}, errmsg={}, rootMessage={}",
-                    articleId, errcode, truncatedErrmsg, truncatedCause, e);
-            throw WxJavaWeChatClient.mapWxErrorException(e, "addDraft");
+                    articleId, errcode,
+                    SingleModelRewriter.truncateForLog(errmsg, LOG_ERROR_MSG_MAX_CODEPOINTS),
+                    SingleModelRewriter.truncateForLog(SingleModelRewriter.getRootMessage(e), LOG_ERROR_MSG_MAX_CODEPOINTS),
+                    e);
+            throw e;
         } catch (RuntimeException e) {
             // AC-7: W1+W2 兜底, 防 SDK 内部异常逃逸到 Pipeline 顶层.
             // P1: message 复用截断后的 rootMessage, 防止超长 SDK 异常泄漏到上层日志 (N4 防泄漏)

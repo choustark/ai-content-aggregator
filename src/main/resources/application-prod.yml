@@ -32,6 +32,12 @@ management:
       access: none
       show-values: NEVER
 
+observability:
+  slow-operations:
+    redis-threshold: ${OBSERVABILITY_SLOW_OPERATIONS_REDIS_THRESHOLD:100ms}
+    http-threshold: ${OBSERVABILITY_SLOW_OPERATIONS_HTTP_THRESHOLD:2s}
+    sdk-threshold: ${OBSERVABILITY_SLOW_OPERATIONS_SDK_THRESHOLD:10s}
+
 logging:
   file:
     # 容器生产环境只写 stdout ECS；持久化由部署层日志采集负责。

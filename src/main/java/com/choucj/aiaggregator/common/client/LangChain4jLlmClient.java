@@ -3,6 +3,10 @@ package com.choucj.aiaggregator.common.client;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.common.observability.LogSanitizer;
+import com.choucj.aiaggregator.common.observability.SlowOperationRecorder;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Dependency;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Kind;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Operation;
 import dev.langchain4j.data.message.SystemMessage;
 import dev.langchain4j.data.message.UserMessage;
 import dev.langchain4j.model.chat.ChatModel;
@@ -12,6 +16,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 import java.util.Objects;
+import java.util.function.Supplier;
 
 /**
  * LangChain4j 实现 {@link LlmClient} — DeepSeek 主路径 + GLM 备用降级.
@@ -47,6 +52,7 @@ public class LangChain4jLlmClient implements LlmClient {
     private static final String MODEL_GLM = "glm";
     private final ChatModel deepSeekChatModel;
     private final ChatModel glmChatModel;
+    private final SlowOperationRecorder slowOperationRecorder;
 
     /**
      * 构造器注入两个 ChatModel Bean.
@@ -55,24 +61,26 @@ public class LangChain4jLlmClient implements LlmClient {
      * @param glmChatModel      备用路径 GLM 模型
      */
     public LangChain4jLlmClient(@Qualifier("deepSeekChatModel") ChatModel deepSeekChatModel,
-                                @Qualifier("glmChatModel") ChatModel glmChatModel) {
+                                @Qualifier("glmChatModel") ChatModel glmChatModel,
+                                SlowOperationRecorder slowOperationRecorder) {
         this.deepSeekChatModel = deepSeekChatModel;
         this.glmChatModel = glmChatModel;
+        this.slowOperationRecorder = slowOperationRecorder;
     }
 
     @Override
     public String chat(String prompt) {
         requireNonBlank(prompt);
         log.debug("LLM chat (default deepseek): promptLength={}", prompt.length());
-        long start = System.currentTimeMillis();
         try {
-            String response = deepSeekChatModel.chat(prompt);
-            log.info("LLM 调用成功: model=deepseek, 耗时={}ms, 响应长度={}",
-                    System.currentTimeMillis() - start, response == null ? 0 : response.length());
+            long started = System.nanoTime();
+            String response = observeChat(Dependency.LLM_DEEPSEEK, () -> deepSeekChatModel.chat(prompt));
+            log.info("LLM 调用成功: model=deepseek, 响应长度={}, 耗时={}ms",
+                    response == null ? 0 : response.length(), elapsedMillis(started));
             return response;
         } catch (RuntimeException e) {
             log.warn("DeepSeek 调用失败, 降级 GLM: errorType={}", e.getClass().getSimpleName());
-            return fallbackChat(prompt, start, e);
+            return fallbackChat(prompt, e);
         }
     }
 
@@ -87,17 +95,17 @@ public class LangChain4jLlmClient implements LlmClient {
         requireNonBlank(userPrompt);
         log.debug("LLM chat (default deepseek): systemLength={}, userLength={}",
                 systemPrompt.length(), userPrompt.length());
-        long start = System.currentTimeMillis();
         try {
-            String response = extractText(deepSeekChatModel.chat(
+            long started = System.nanoTime();
+            String response = observeChat(Dependency.LLM_DEEPSEEK, () -> extractText(deepSeekChatModel.chat(
                     SystemMessage.from(systemPrompt),
-                    UserMessage.from(userPrompt)));
-            log.info("LLM 调用成功: model=deepseek, 耗时={}ms, 响应长度={}",
-                    System.currentTimeMillis() - start, response == null ? 0 : response.length());
+                    UserMessage.from(userPrompt))));
+            log.info("LLM 调用成功: model=deepseek, 响应长度={}, 耗时={}ms",
+                    response == null ? 0 : response.length(), elapsedMillis(started));
             return new ChatResult(MODEL_DEEPSEEK, response);
         } catch (RuntimeException e) {
             log.warn("DeepSeek 调用失败, 降级 GLM: errorType={}", e.getClass().getSimpleName());
-            return fallbackChatResult(systemPrompt, userPrompt, start, e);
+            return fallbackChatResult(systemPrompt, userPrompt, e);
         }
     }
 
@@ -106,12 +114,12 @@ public class LangChain4jLlmClient implements LlmClient {
         Objects.requireNonNull(model, "model");
         requireNonBlank(prompt);
         log.debug("LLM chatWithModel model={}, promptLength={}", model, prompt.length());
-        long start = System.currentTimeMillis();
         ChatModel target = resolveModel(model);
         try {
-            String response = target.chat(prompt);
-            log.info("LLM 调用成功: model={}, 耗时={}ms, 响应长度={}",
-                    model, System.currentTimeMillis() - start, response == null ? 0 : response.length());
+            long started = System.nanoTime();
+            String response = observeChat(dependencyFor(model), () -> target.chat(prompt));
+            log.info("LLM 调用成功: model={}, 响应长度={}, 耗时={}ms",
+                    model, response == null ? 0 : response.length(), elapsedMillis(started));
             return response;
         } catch (RuntimeException e) {
             log.error("LLM 调用失败 (model={}, 不降级): errorType={}, upstream={}",
@@ -134,14 +142,14 @@ public class LangChain4jLlmClient implements LlmClient {
         requireNonBlank(userPrompt);
         log.debug("LLM chatWithModel model={}, systemLength={}, userLength={}",
                 model, systemPrompt.length(), userPrompt.length());
-        long start = System.currentTimeMillis();
         ChatModel target = resolveModel(model);
         try {
-            String response = extractText(target.chat(
+            long started = System.nanoTime();
+            String response = observeChat(dependencyFor(model), () -> extractText(target.chat(
                     SystemMessage.from(systemPrompt),
-                    UserMessage.from(userPrompt)));
-            log.info("LLM 调用成功: model={}, 耗时={}ms, 响应长度={}",
-                    model, System.currentTimeMillis() - start, response == null ? 0 : response.length());
+                    UserMessage.from(userPrompt))));
+            log.info("LLM 调用成功: model={}, 响应长度={}, 耗时={}ms",
+                    model, response == null ? 0 : response.length(), elapsedMillis(started));
             return new ChatResult(model, response);
         } catch (RuntimeException e) {
             log.error("LLM 调用失败 (model={}, 不降级): errorType={}, upstream={}",
@@ -152,14 +160,11 @@ public class LangChain4jLlmClient implements LlmClient {
         }
     }
 
-    private String fallbackChat(String prompt, long startMs, Throwable primaryCause) {
-        long fallbackStart = System.currentTimeMillis();
+    private String fallbackChat(String prompt, Throwable primaryCause) {
         try {
-            String response = glmChatModel.chat(prompt);
-            log.info("LLM 调用成功 (降级 GLM): 耗时={}ms (主路径失败前 {}ms), 响应长度={}",
-                    System.currentTimeMillis() - fallbackStart,
-                    fallbackStart - startMs,
-                    response == null ? 0 : response.length());
+            long started = System.nanoTime();
+            String response = observeChat(Dependency.LLM_GLM, () -> glmChatModel.chat(prompt));
+            log.info("LLM 调用成功 (降级 GLM): 响应长度={}, 耗时={}ms", response == null ? 0 : response.length(), elapsedMillis(started));
             return response;
         } catch (RuntimeException e) {
             log.error("LLM 调用失败 (deepseek + glm 均失败): primaryType={}, fallbackType={}",
@@ -172,20 +177,17 @@ public class LangChain4jLlmClient implements LlmClient {
         }
     }
 
-    private String fallbackChat(String systemPrompt, String userPrompt, long startMs, Throwable primaryCause) {
-        return fallbackChatResult(systemPrompt, userPrompt, startMs, primaryCause).text();
+    private String fallbackChat(String systemPrompt, String userPrompt, Throwable primaryCause) {
+        return fallbackChatResult(systemPrompt, userPrompt, primaryCause).text();
     }
 
-    private ChatResult fallbackChatResult(String systemPrompt, String userPrompt, long startMs, Throwable primaryCause) {
-        long fallbackStart = System.currentTimeMillis();
+    private ChatResult fallbackChatResult(String systemPrompt, String userPrompt, Throwable primaryCause) {
         try {
-            String response = extractText(glmChatModel.chat(
+            long started = System.nanoTime();
+            String response = observeChat(Dependency.LLM_GLM, () -> extractText(glmChatModel.chat(
                     SystemMessage.from(systemPrompt),
-                    UserMessage.from(userPrompt)));
-            log.info("LLM 调用成功 (降级 GLM): 耗时={}ms (主路径失败前 {}ms), 响应长度={}",
-                    System.currentTimeMillis() - fallbackStart,
-                    fallbackStart - startMs,
-                    response == null ? 0 : response.length());
+                    UserMessage.from(userPrompt))));
+            log.info("LLM 调用成功 (降级 GLM): 响应长度={}, 耗时={}ms", response == null ? 0 : response.length(), elapsedMillis(started));
             return new ChatResult(MODEL_GLM, response);
         } catch (RuntimeException e) {
             log.error("LLM 调用失败 (deepseek + glm 均失败): primaryType={}, fallbackType={}",
@@ -197,6 +199,18 @@ public class LangChain4jLlmClient implements LlmClient {
                             + ", fallbackType=" + e.getClass().getSimpleName() + ")");
         }
     }
+
+    private <T> T observeChat(Dependency dependency, Supplier<T> action) {
+        return slowOperationRecorder.observe(
+                Kind.SDK, dependency, Operation.CHAT,
+                action);
+    }
+
+    private static Dependency dependencyFor(String model) {
+        return MODEL_GLM.equals(model) ? Dependency.LLM_GLM : Dependency.LLM_DEEPSEEK;
+    }
+
+    private static long elapsedMillis(long started) { return (System.nanoTime() - started) / 1_000_000; }
 
     private ChatModel resolveModel(String model) {
         return switch (model) {

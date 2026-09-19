@@ -5,7 +5,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
 
 @SpringBootApplication
-@ConfigurationPropertiesScan(basePackages = "com.choucj.aiaggregator.common.config")
+@ConfigurationPropertiesScan(basePackages = "com.choucj.aiaggregator.common")
 public class AiContentAggregatorApplication {
 
 	public static void main(String[] args) {

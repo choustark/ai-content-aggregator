@@ -4,6 +4,10 @@ import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.common.observability.MdcPropagation;
+import com.choucj.aiaggregator.common.observability.SlowOperationRecorder;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Dependency;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Kind;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Operation;
 import dev.langchain4j.community.store.embedding.redis.RedisRequestFailedException;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
@@ -14,6 +18,7 @@ import dev.langchain4j.exception.InvalidRequestException;
 import dev.langchain4j.exception.ModelNotFoundException;
 import dev.langchain4j.exception.RateLimitException;
 import dev.langchain4j.model.embedding.EmbeddingModel;
+import dev.langchain4j.model.output.Response;
 import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
 import dev.langchain4j.store.embedding.EmbeddingSearchResult;
 import dev.langchain4j.store.embedding.EmbeddingStore;
@@ -70,6 +75,7 @@ public class EmbeddingServiceImpl implements EmbeddingService {
     private final Duration asyncTimeout;
     private final ExecutorService embeddingExecutor;
     private final ScheduledExecutorService timeoutScheduler;
+    private final SlowOperationRecorder slowOperationRecorder;
 
     /**
      * 构造 EmbeddingServiceImpl.
@@ -87,9 +93,11 @@ public class EmbeddingServiceImpl implements EmbeddingService {
                                 @Qualifier("embeddingTimeoutScheduler") ScheduledExecutorService timeoutScheduler,
                                 @Value("${feature-flags.rag.batch-async-enabled:false}") boolean batchAsyncEnabled,
                                 @Value("${langchain4j.open-ai.embedding-model.dimensions:1024}") int expectedDimension,
-                                @Value("${features.rag.async-timeout:120s}") String asyncTimeout) {
+                                @Value("${features.rag.async-timeout:120s}") String asyncTimeout,
+                                SlowOperationRecorder slowOperationRecorder) {
         this(embeddingModel, embeddingStore.getIfAvailable(), batchAsyncEnabled, expectedDimension,
-                parseDuration(asyncTimeout, Duration.ofSeconds(120)), embeddingExecutor, timeoutScheduler);
+                parseDuration(asyncTimeout, Duration.ofSeconds(120)), embeddingExecutor, timeoutScheduler,
+                slowOperationRecorder);
     }
 
     EmbeddingServiceImpl(EmbeddingModel embeddingModel,
@@ -98,7 +106,8 @@ public class EmbeddingServiceImpl implements EmbeddingService {
                          int expectedDimension,
                          Duration asyncTimeout,
                          ExecutorService embeddingExecutor,
-                         ScheduledExecutorService timeoutScheduler) {
+                         ScheduledExecutorService timeoutScheduler,
+                         SlowOperationRecorder slowOperationRecorder) {
         this.embeddingModel = embeddingModel;
         this.embeddingStore = embeddingStore;
         this.batchAsyncEnabled = batchAsyncEnabled;
@@ -106,6 +115,7 @@ public class EmbeddingServiceImpl implements EmbeddingService {
         this.asyncTimeout = asyncTimeout;
         this.embeddingExecutor = embeddingExecutor;
         this.timeoutScheduler = timeoutScheduler;
+        this.slowOperationRecorder = slowOperationRecorder;
     }
 
     @Override
@@ -119,10 +129,15 @@ public class EmbeddingServiceImpl implements EmbeddingService {
         requireNonBlank(text, "text");
         long start = System.currentTimeMillis();
         try {
-            float[] vector = Optional.ofNullable(embeddingModel.embed(text).content())
-                    .map(Embedding::vector)
-                    .orElseThrow(() -> new RetryableException(ErrorCode.EXTERNAL_API_ERROR,
-                            "GLM embedding 响应为空: articleId=" + articleId));
+            float[] vector = slowOperationRecorder.observe(
+                            Kind.SDK,
+                            Dependency.EMBEDDING,
+                            Operation.EMBED,
+                            () -> Optional.ofNullable(embeddingModel.embed(text)).map(Response::content)
+                                    .map(Embedding::vector)
+                                    .orElseThrow(() -> new RetryableException(ErrorCode.EXTERNAL_API_ERROR,
+                                            "GLM embedding 响应为空: articleId=" + articleId)))
+                    ;
             validateModelVector(articleId, vector);
             log.info("EmbeddingService 调用成功: articleId={}, 文本长度={}, 向量维度={}, 耗时={}ms",
                     articleId, text.codePointCount(0, text.length()), vector.length,
@@ -221,7 +236,12 @@ public class EmbeddingServiceImpl implements EmbeddingService {
         validateCallerVector(articleId, vector);
         long start = System.currentTimeMillis();
         try {
-            embeddingStore.addAll(List.of(articleId), List.of(Embedding.from(vector)), List.of(TextSegment.from(text)));
+            slowOperationRecorder.observe(
+                    Kind.SDK,
+                    Dependency.EMBEDDING,
+                    Operation.STORE,
+                    () -> embeddingStore.addAll(List.of(articleId), List.of(Embedding.from(vector)),
+                            List.of(TextSegment.from(text))));
             log.info("EmbeddingService 向量写入成功: articleId={}, 文本长度={}, 向量维度={}, 耗时={}ms",
                     articleId, text.codePointCount(0, text.length()), vector.length,
                     System.currentTimeMillis() - start);
@@ -244,11 +264,15 @@ public class EmbeddingServiceImpl implements EmbeddingService {
         }
         long start = System.currentTimeMillis();
         try {
-            EmbeddingSearchResult<TextSegment> result = embeddingStore.search(EmbeddingSearchRequest.builder()
-                    .queryEmbedding(Embedding.from(vector))
-                    .maxResults(maxResults)
-                    .minScore(minScore)
-                    .build());
+            EmbeddingSearchResult<TextSegment> result = slowOperationRecorder.observe(
+                    Kind.SDK,
+                    Dependency.EMBEDDING,
+                    Operation.SEARCH,
+                    () -> embeddingStore.search(EmbeddingSearchRequest.builder()
+                            .queryEmbedding(Embedding.from(vector))
+                            .maxResults(maxResults)
+                            .minScore(minScore)
+                            .build()));
             log.info("EmbeddingService 向量检索成功: maxResults={}, minScore={}, 返回数量={}, 耗时={}ms",
                     maxResults, minScore, result.matches().size(), System.currentTimeMillis() - start);
             return result;

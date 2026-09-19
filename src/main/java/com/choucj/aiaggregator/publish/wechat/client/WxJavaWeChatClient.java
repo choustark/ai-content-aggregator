@@ -4,7 +4,11 @@ import com.choucj.aiaggregator.common.model.Article;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.observability.SlowOperationRecorder;
 import com.choucj.aiaggregator.content.rewriter.SingleModelRewriter;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Dependency;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Kind;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Operation;
 import com.choucj.aiaggregator.publish.wechat.config.WeChatProperties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -30,15 +34,27 @@ public class WxJavaWeChatClient implements WeChatClient {
 
     private final WxMpService wxMpService;
     private final WeChatProperties weChatProperties;
+    private final SlowOperationRecorder slowOperationRecorder;
 
     @Override
     public String getAccessToken() {
         String token;
         try {
-            token = wxMpService.getAccessToken();
-        } catch (WxErrorException e) {
-            throw mapWxErrorException(e, "getAccessToken");
+            token = slowOperationRecorder.observe(
+                    Kind.SDK,
+                    Dependency.WECHAT,
+                    Operation.AUTHENTICATE,
+                    () -> {
+                        try {
+                            return wxMpService.getAccessToken();
+                        } catch (WxErrorException exception) {
+                            throw mapWxErrorException(exception, "getAccessToken");
+                        }
+                    });
         } catch (RuntimeException e) {
+            if (e instanceof RetryableException || e instanceof NonRetryableException) {
+                throw e;
+            }
             // W1+W2: 防 SDK / 框架异常逃逸到调度器顶层.
             throw new NonRetryableException(
                     ErrorCode.WECHAT_API_ERROR,
@@ -83,4 +99,5 @@ public class WxJavaWeChatClient implements WeChatClient {
             default -> new NonRetryableException(ErrorCode.WECHAT_API_ERROR, base, e);
         };
     }
+
 }

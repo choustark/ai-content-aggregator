@@ -1,5 +1,7 @@
 package com.choucj.aiaggregator.source.twitter.client;
 
+import com.choucj.aiaggregator.common.observability.TestSlowOperationRecorder;
+
 import com.choucj.aiaggregator.source.twitter.config.FxTwitterProperties;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -42,7 +44,7 @@ class FxTwitterIntegrationTest {
         properties.setInstance(INSTANCE);
 
         RestClient restClient = RestClient.builder().build();
-        FxTwitterClient client = new FxTwitterClient(properties, restClient, new ObjectMapper());
+        FxTwitterClient client = new FxTwitterClient(properties, restClient, new ObjectMapper(), TestSlowOperationRecorder.create());
 
         Tweet tweet = client.fetchTweetDetail(SAMPLE_TWEET_ID);
 

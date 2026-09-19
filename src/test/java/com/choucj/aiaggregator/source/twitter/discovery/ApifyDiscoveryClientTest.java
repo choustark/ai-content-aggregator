@@ -3,6 +3,7 @@ package com.choucj.aiaggregator.source.twitter.discovery;
 import com.choucj.aiaggregator.common.exception.DegradationException;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
+import com.choucj.aiaggregator.common.observability.TestSlowOperationRecorder;
 import com.choucj.aiaggregator.source.twitter.config.ApifyTwitterProperties;
 import com.choucj.aiaggregator.source.twitter.config.TwitterTargetProperties;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
@@ -38,7 +39,8 @@ class ApifyDiscoveryClientTest {
         properties = new ApifyTwitterProperties();
         properties.setToken("test-token");
         targetProperties = new TwitterTargetProperties();
-        client = new ApifyDiscoveryClient(properties, mock(RestClient.class), new ObjectMapper(), targetProperties);
+        client = new ApifyDiscoveryClient(properties, mock(RestClient.class), new ObjectMapper(), targetProperties,
+                TestSlowOperationRecorder.create());
     }
 
     @Test
@@ -132,7 +134,8 @@ class ApifyDiscoveryClientTest {
         RestClient.RequestBodyUriSpec uriSpec = mock(RestClient.RequestBodyUriSpec.class);
         RestClient.RequestBodySpec bodySpec = mock(RestClient.RequestBodySpec.class);
         RestClient.ResponseSpec responseSpec = mock(RestClient.ResponseSpec.class);
-        client = new ApifyDiscoveryClient(properties, restClient, new ObjectMapper(), targetProperties);
+        client = new ApifyDiscoveryClient(properties, restClient, new ObjectMapper(), targetProperties,
+                TestSlowOperationRecorder.create());
 
         when(restClient.post()).thenReturn(uriSpec);
         when(uriSpec.uri(org.mockito.ArgumentMatchers.anyString())).thenReturn(bodySpec);
@@ -428,7 +431,8 @@ class ApifyDiscoveryClientTest {
         targetProperties.setEnabled(false);
         RestClient restClient = mock(RestClient.class);
         // 必须用同一个 restClient 构造 client, verifyNoInteractions 才有意义 (CR patch: 原断言对未注入 mock 必然通过)
-        client = new ApifyDiscoveryClient(properties, restClient, new ObjectMapper(), targetProperties);
+        client = new ApifyDiscoveryClient(properties, restClient, new ObjectMapper(), targetProperties,
+                TestSlowOperationRecorder.create());
 
         List<Tweet> result = client.discoverSpecifiedTweets(List.of("https://x.com/OpenAI/status/111"));
 
@@ -450,7 +454,8 @@ class ApifyDiscoveryClientTest {
         targetProperties.setEnabled(true);
         // CR patch: blank 与无法识别的非空 garbage 都本地跳过, 不调 Apify
         RestClient restClient = mock(RestClient.class);
-        client = new ApifyDiscoveryClient(properties, restClient, new ObjectMapper(), targetProperties);
+        client = new ApifyDiscoveryClient(properties, restClient, new ObjectMapper(), targetProperties,
+                TestSlowOperationRecorder.create());
 
         List<Tweet> result = client.discoverSpecifiedTweets(List.of("  ", "not-a-url", "hello world"));
 
@@ -471,7 +476,8 @@ class ApifyDiscoveryClientTest {
                   }
                 ]
                 """;
-        client = new ApifyDiscoveryClient(properties, buildPostStub(body), new ObjectMapper(), targetProperties);
+        client = new ApifyDiscoveryClient(properties, buildPostStub(body), new ObjectMapper(), targetProperties,
+                TestSlowOperationRecorder.create());
 
         List<Tweet> tweets = client.discoverSpecifiedTweets(List.of("1940000000000000001"));
 
@@ -492,7 +498,8 @@ class ApifyDiscoveryClientTest {
         HttpClientErrorException ex = HttpClientErrorException.create(
                 HttpStatusCode.valueOf(403), "Forbidden", new HttpHeaders(),
                 fullBody.getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8);
-        client = new ApifyDiscoveryClient(properties, buildPostStub(ex), new ObjectMapper(), targetProperties);
+        client = new ApifyDiscoveryClient(properties, buildPostStub(ex), new ObjectMapper(), targetProperties,
+                TestSlowOperationRecorder.create());
 
         assertThatThrownBy(() -> client.discoverSpecifiedTweets(List.of("111")))
                 .isInstanceOf(DegradationException.class)
@@ -510,7 +517,8 @@ class ApifyDiscoveryClientTest {
         HttpClientErrorException ex = HttpClientErrorException.create(
                 HttpStatusCode.valueOf(401), "Unauthorized", new HttpHeaders(),
                 body.getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8);
-        client = new ApifyDiscoveryClient(properties, buildPostStub(ex), new ObjectMapper(), targetProperties);
+        client = new ApifyDiscoveryClient(properties, buildPostStub(ex), new ObjectMapper(), targetProperties,
+                TestSlowOperationRecorder.create());
 
         assertThatThrownBy(() -> client.discoverSpecifiedTweets(List.of("111")))
                 .isInstanceOf(NonRetryableException.class)
@@ -527,7 +535,8 @@ class ApifyDiscoveryClientTest {
         HttpClientErrorException ex = HttpClientErrorException.create(
                 HttpStatusCode.valueOf(403), "Forbidden", new HttpHeaders(),
                 body.getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8);
-        client = new ApifyDiscoveryClient(properties, buildPostStub(ex), new ObjectMapper(), targetProperties);
+        client = new ApifyDiscoveryClient(properties, buildPostStub(ex), new ObjectMapper(), targetProperties,
+                TestSlowOperationRecorder.create());
 
         assertThatThrownBy(() -> client.discoverSpecifiedTweets(List.of("111")))
                 .isInstanceOf(NonRetryableException.class)
@@ -544,7 +553,8 @@ class ApifyDiscoveryClientTest {
         HttpClientErrorException ex = HttpClientErrorException.create(
                 HttpStatusCode.valueOf(418), "I'm a teapot", new HttpHeaders(),
                 body.getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8);
-        client = new ApifyDiscoveryClient(properties, buildPostStub(ex), new ObjectMapper(), targetProperties);
+        client = new ApifyDiscoveryClient(properties, buildPostStub(ex), new ObjectMapper(), targetProperties,
+                TestSlowOperationRecorder.create());
 
         assertThatThrownBy(() -> client.discoverSpecifiedTweets(List.of("111")))
                 .isInstanceOf(NonRetryableException.class)
@@ -560,7 +570,8 @@ class ApifyDiscoveryClientTest {
         HttpClientErrorException ex = HttpClientErrorException.create(
                 HttpStatusCode.valueOf(400), "Bad Request", new HttpHeaders(),
                 body.getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8);
-        client = new ApifyDiscoveryClient(properties, buildPostStub(ex), new ObjectMapper(), targetProperties);
+        client = new ApifyDiscoveryClient(properties, buildPostStub(ex), new ObjectMapper(), targetProperties,
+                TestSlowOperationRecorder.create());
 
         // 用合法 target (numeric ID) 才能触达 Apify 调用并拿到 mock 的 invalid-input 响应;
         // garbage target 现在本地跳过 (Task 3.3), 不会触达 Apify.
@@ -578,7 +589,8 @@ class ApifyDiscoveryClientTest {
         HttpClientErrorException ex = HttpClientErrorException.create(
                 HttpStatusCode.valueOf(400), "Bad Request", new HttpHeaders(),
                 body.getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8);
-        client = new ApifyDiscoveryClient(properties, buildPostStub(ex), new ObjectMapper(), targetProperties);
+        client = new ApifyDiscoveryClient(properties, buildPostStub(ex), new ObjectMapper(), targetProperties,
+                TestSlowOperationRecorder.create());
 
         assertThatThrownBy(() -> client.discoverSpecifiedTweets(List.of("111")))
                 .isInstanceOf(NonRetryableException.class)
@@ -594,7 +606,8 @@ class ApifyDiscoveryClientTest {
         HttpClientErrorException ex = HttpClientErrorException.create(
                 HttpStatusCode.valueOf(429), "Too Many Requests", new HttpHeaders(),
                 body.getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8);
-        client = new ApifyDiscoveryClient(properties, buildPostStub(ex), new ObjectMapper(), targetProperties);
+        client = new ApifyDiscoveryClient(properties, buildPostStub(ex), new ObjectMapper(), targetProperties,
+                TestSlowOperationRecorder.create());
 
         assertThatThrownBy(() -> client.discoverSpecifiedTweets(List.of("111")))
                 .isInstanceOf(RetryableException.class)
@@ -610,7 +623,8 @@ class ApifyDiscoveryClientTest {
         HttpServerErrorException ex = HttpServerErrorException.create(
                 HttpStatusCode.valueOf(500), "Internal Server Error", new HttpHeaders(),
                 body.getBytes(StandardCharsets.UTF_8), StandardCharsets.UTF_8);
-        client = new ApifyDiscoveryClient(properties, buildPostStub(ex), new ObjectMapper(), targetProperties);
+        client = new ApifyDiscoveryClient(properties, buildPostStub(ex), new ObjectMapper(), targetProperties,
+                TestSlowOperationRecorder.create());
 
         assertThatThrownBy(() -> client.discoverSpecifiedTweets(List.of("111")))
                 .isInstanceOf(RetryableException.class)

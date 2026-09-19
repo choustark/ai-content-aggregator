@@ -107,7 +107,10 @@ groups:
           recovery: CPU throttling 比率恢复到 25% 及以下
 
       - alert: AiAggregatorExternalDependencyConsecutiveFailures
-        expr: aiaggregator_external_dependency_consecutive_failures >= 3
+        # staleness 守卫: gauge 是进程内计数器, 依赖被 feature flag 关闭后不会再有调用
+        # 触发复位, 若不加时间窗过滤告警会永久 firing 直到重启 — 仅当序列最近 5 分钟内
+        # 仍有新样本(依赖仍在被调用且持续失败)时告警。
+        expr: (aiaggregator_external_dependency_consecutive_failures >= 3) and (timestamp(aiaggregator_external_dependency_consecutive_failures) > (time() - 300))
         for: 5m
         labels:
           severity: warning
@@ -115,7 +118,7 @@ groups:
         annotations:
           summary: 外部依赖连续失败至少 3 次（生产信号由 Story 10.3 提供）
           runbook: ops/observability/README.md#告警处置
-          recovery: 连续失败计数恢复到 3 以下
+          recovery: 连续失败计数恢复到 3 以下，或依赖停止调用后序列陈旧自动解除
 
   - name: aiaggregator-cost
     rules:

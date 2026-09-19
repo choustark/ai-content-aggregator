@@ -71,6 +71,12 @@ cost:
   monitor:
     daily-cron: "-"
 
+observability:
+  slow-operations:
+    redis-threshold: 100ms
+    http-threshold: 2s
+    sdk-threshold: 10s
+
 wechat:
   mp:
     enabled: false

@@ -4,6 +4,7 @@ import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.common.observability.CorrelationContext;
+import com.choucj.aiaggregator.common.observability.TestSlowOperationRecorder;
 import dev.langchain4j.community.store.embedding.redis.RedisRequestFailedException;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.exception.InvalidRequestException;
@@ -63,7 +64,7 @@ class EmbeddingServiceTest {
         embeddingExecutor = Executors.newSingleThreadExecutor();
         timeoutScheduler = Executors.newSingleThreadScheduledExecutor();
         service = new EmbeddingServiceImpl(embeddingModel, embeddingStore, true, 1024,
-                Duration.ofSeconds(120), embeddingExecutor, timeoutScheduler);
+                Duration.ofSeconds(120), embeddingExecutor, timeoutScheduler, TestSlowOperationRecorder.create());
     }
 
     @AfterEach
@@ -342,7 +343,7 @@ class EmbeddingServiceTest {
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
         try {
             EmbeddingServiceImpl timeoutService = new EmbeddingServiceImpl(embeddingModel, embeddingStore,
-                    true, 1024, Duration.ofMillis(10), executor, scheduler);
+                    true, 1024, Duration.ofMillis(10), executor, scheduler, TestSlowOperationRecorder.create());
             when(embeddingModel.embed("slow")).thenAnswer(invocation -> {
                 Thread.sleep(1000);
                 return Response.from(Embedding.from(vector(1024)));
@@ -366,7 +367,7 @@ class EmbeddingServiceTest {
         String correlationId = CorrelationContext.begin("embedding-timeout-task");
         try {
             EmbeddingServiceImpl timeoutService = new EmbeddingServiceImpl(embeddingModel, embeddingStore,
-                    true, 1024, Duration.ofMillis(200), executor, scheduler);
+                    true, 1024, Duration.ofMillis(200), executor, scheduler, TestSlowOperationRecorder.create());
             when(embeddingModel.embed("slow-with-context")).thenAnswer(invocation -> {
                 Thread.sleep(1_000);
                 return Response.from(Embedding.from(vector(1024)));
@@ -405,7 +406,7 @@ class EmbeddingServiceTest {
             });
             saturatedExecutor.submit(() -> null);
             EmbeddingServiceImpl saturatedService = new EmbeddingServiceImpl(embeddingModel, embeddingStore,
-                    true, 1024, Duration.ofSeconds(120), saturatedExecutor, scheduler);
+                    true, 1024, Duration.ofSeconds(120), saturatedExecutor, scheduler, TestSlowOperationRecorder.create());
 
             CompletableFuture<float[]> future = saturatedService.embedTextAsync("article-1", "queued");
 
@@ -429,7 +430,7 @@ class EmbeddingServiceTest {
                 return Response.from(Embedding.from(vector(1024)));
             });
             EmbeddingServiceImpl schedulerDownService = new EmbeddingServiceImpl(embeddingModel, embeddingStore,
-                    true, 1024, Duration.ofSeconds(120), executor, scheduler);
+                    true, 1024, Duration.ofSeconds(120), executor, scheduler, TestSlowOperationRecorder.create());
 
             CompletableFuture<float[]> future = schedulerDownService.embedTextAsync("article-1", "scheduler-down");
 
@@ -447,7 +448,7 @@ class EmbeddingServiceTest {
         ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
         try {
             EmbeddingServiceImpl cancelService = new EmbeddingServiceImpl(embeddingModel, embeddingStore,
-                    true, 1024, Duration.ofSeconds(120), executor, scheduler);
+                    true, 1024, Duration.ofSeconds(120), executor, scheduler, TestSlowOperationRecorder.create());
             when(embeddingModel.embed("cancel")).thenAnswer(invocation -> {
                 Thread.sleep(5_000);
                 return Response.from(Embedding.from(vector(1024)));

@@ -1,5 +1,7 @@
 package com.choucj.aiaggregator.publish.wechat;
 
+import com.choucj.aiaggregator.common.observability.TestSlowOperationRecorder;
+
 import com.choucj.aiaggregator.common.exception.AggregatorException;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
@@ -37,7 +39,7 @@ class WxJavaWeChatClientTest {
     void setUp() {
         weChatProperties = new WeChatProperties();
         weChatProperties.getClient().setStableAccessToken(true);
-        client = new WxJavaWeChatClient(wxMpService, weChatProperties);
+        client = new WxJavaWeChatClient(wxMpService, weChatProperties, TestSlowOperationRecorder.create());
     }
 
     @Test

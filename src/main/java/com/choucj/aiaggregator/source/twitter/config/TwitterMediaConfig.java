@@ -1,6 +1,7 @@
 package com.choucj.aiaggregator.source.twitter.config;
 
 import com.choucj.aiaggregator.source.twitter.media.MediaDownloadClient;
+import com.choucj.aiaggregator.common.observability.SlowOperationRecorder;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
@@ -61,8 +62,10 @@ public class TwitterMediaConfig {
     @Bean
     public MediaDownloadClient mediaDownloadClient(
             @org.springframework.beans.factory.annotation.Qualifier("mediaDownloadRestClient") RestClient mediaDownloadRestClient,
-            TwitterMediaProperties properties) {
+            TwitterMediaProperties properties,
+            SlowOperationRecorder slowOperationRecorder) {
         long maxFileSizeBytes = (long) properties.getMaxFileSizeMb() * 1024 * 1024;
-        return new MediaDownloadClient(mediaDownloadRestClient, maxFileSizeBytes);
+        return new MediaDownloadClient(mediaDownloadRestClient, maxFileSizeBytes,
+                Duration.ofSeconds(properties.getDownloadTimeoutSeconds()), slowOperationRecorder);
     }
 }

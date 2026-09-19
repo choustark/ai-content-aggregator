@@ -1,5 +1,7 @@
 package com.choucj.aiaggregator.source.twitter.client;
 
+import com.choucj.aiaggregator.common.observability.TestSlowOperationRecorder;
+
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
@@ -47,7 +49,7 @@ class FxTwitterClientTest {
         properties.setEnabled(true);
         properties.setTimeoutSeconds(15);
         properties.setInstance("https://api.fxtwitter.com");
-        client = new FxTwitterClient(properties, restClient, objectMapper);
+        client = new FxTwitterClient(properties, restClient, objectMapper, TestSlowOperationRecorder.create());
     }
 
     @Test

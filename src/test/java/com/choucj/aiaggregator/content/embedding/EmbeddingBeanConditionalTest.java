@@ -2,6 +2,9 @@ package com.choucj.aiaggregator.content.embedding;
 
 import com.choucj.aiaggregator.common.config.EmbeddingConfig;
 import com.choucj.aiaggregator.common.config.LlmProperties;
+import com.choucj.aiaggregator.common.observability.SlowOperationProperties;
+import com.choucj.aiaggregator.common.observability.SlowOperationRecorder;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics;
 import dev.langchain4j.community.store.embedding.redis.RedisEmbeddingStore;
 import dev.langchain4j.community.store.embedding.redis.spring.RedisEmbeddingStoreAutoConfiguration;
 import dev.langchain4j.model.embedding.EmbeddingModel;
@@ -11,8 +14,11 @@ import org.mockito.Mockito;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.context.annotation.Bean;
 import org.springframework.core.env.MapPropertySource;
 import redis.clients.jedis.UnifiedJedis;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
 import java.util.Map;
 import java.util.Set;
@@ -27,6 +33,20 @@ class EmbeddingBeanConditionalTest {
 
     @EnableConfigurationProperties(LlmProperties.class)
     static class TestConfig {
+        @Bean
+        MeterRegistry meterRegistry() {
+            return new SimpleMeterRegistry();
+        }
+
+        @Bean
+        DependencyMetrics dependencyMetrics(MeterRegistry meterRegistry) {
+            return new DependencyMetrics(meterRegistry);
+        }
+
+        @Bean
+        SlowOperationRecorder slowOperationRecorder(DependencyMetrics dependencyMetrics) {
+            return new SlowOperationRecorder(dependencyMetrics, new SlowOperationProperties());
+        }
     }
 
     @Test

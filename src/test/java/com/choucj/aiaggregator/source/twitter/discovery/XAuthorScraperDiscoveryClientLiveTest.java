@@ -1,5 +1,7 @@
 package com.choucj.aiaggregator.source.twitter.discovery;
 
+import com.choucj.aiaggregator.common.observability.TestSlowOperationRecorder;
+
 import com.choucj.aiaggregator.source.twitter.config.ScraperProperties;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
@@ -68,7 +70,7 @@ class XAuthorScraperDiscoveryClientLiveTest {
     void shouldDiscoverRealTweetsViaLocalActor() {
         ScraperProperties properties = newScraperProperties();
         XAuthorScraperDiscoveryClient client =
-                new XAuthorScraperDiscoveryClient(properties, restClient, objectMapper);
+                new XAuthorScraperDiscoveryClient(properties, restClient, objectMapper, TestSlowOperationRecorder.create());
 
         List<Tweet> tweets = client.discoverTweets(targetUsername);
 
@@ -89,7 +91,7 @@ class XAuthorScraperDiscoveryClientLiveTest {
         // readiness 全量扫描复现: zhongying14 时间线至少包含 media (photo/video) 或 quotedTweetUrl.
         ScraperProperties properties = newScraperProperties();
         XAuthorScraperDiscoveryClient client =
-                new XAuthorScraperDiscoveryClient(properties, restClient, objectMapper);
+                new XAuthorScraperDiscoveryClient(properties, restClient, objectMapper, TestSlowOperationRecorder.create());
 
         List<Tweet> tweets = client.discoverTweets(targetUsername);
 
@@ -113,7 +115,7 @@ class XAuthorScraperDiscoveryClientLiveTest {
     void shouldPreserveVideoOrGifMediaFromLocalActor() {
         ScraperProperties properties = newScraperProperties();
         XAuthorScraperDiscoveryClient client =
-                new XAuthorScraperDiscoveryClient(properties, restClient, objectMapper);
+                new XAuthorScraperDiscoveryClient(properties, restClient, objectMapper, TestSlowOperationRecorder.create());
 
         List<Tweet> tweets = client.discoverTweets(targetUsername);
         assertThat(tweets).isNotEmpty();

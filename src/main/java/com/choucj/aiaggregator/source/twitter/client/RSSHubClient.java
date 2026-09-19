@@ -3,6 +3,10 @@ package com.choucj.aiaggregator.source.twitter.client;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.observability.SlowOperationRecorder;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Dependency;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Kind;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Operation;
 import com.choucj.aiaggregator.source.twitter.config.RSSHubProperties;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -69,6 +73,7 @@ public class RSSHubClient {
     private final RSSHubProperties properties;
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
+    private final SlowOperationRecorder slowOperationRecorder;
 
     /**
      * 构造器注入 — 显式而非 {@code @RequiredArgsConstructor}, 因为 {@code @Qualifier} 需要直接标注在
@@ -80,10 +85,12 @@ public class RSSHubClient {
      */
     public RSSHubClient(RSSHubProperties properties,
                         @Qualifier("rsshubRestClient") RestClient restClient,
-                        ObjectMapper objectMapper) {
+                        ObjectMapper objectMapper,
+                        SlowOperationRecorder slowOperationRecorder) {
         this.properties = properties;
         this.restClient = restClient;
         this.objectMapper = objectMapper;
+        this.slowOperationRecorder = slowOperationRecorder;
     }
 
     /**
@@ -149,10 +156,11 @@ public class RSSHubClient {
         String url = buildUrl(instance, encodedUsername);
         String body;
         try {
-            body = restClient.get()
-                    .uri(url)
-                    .retrieve()
-                    .body(String.class);
+            body = slowOperationRecorder.observe(
+                    Kind.HTTP,
+                    Dependency.RSSHUB,
+                    Operation.DISCOVER,
+                    () -> restClient.get().uri(url).retrieve().body(String.class));
         } catch (HttpClientErrorException.TooManyRequests e) {
             throw new RetryableException(ErrorCode.EXTERNAL_API_ERROR,
                     "RSSHub 限流(429): instance=" + instance + ", username=" + rawUsername, e);

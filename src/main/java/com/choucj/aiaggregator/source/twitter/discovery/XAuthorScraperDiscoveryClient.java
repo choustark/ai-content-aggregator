@@ -3,6 +3,10 @@ package com.choucj.aiaggregator.source.twitter.discovery;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.observability.SlowOperationRecorder;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Dependency;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Kind;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Operation;
 import com.choucj.aiaggregator.source.twitter.config.ScraperProperties;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
 import com.choucj.aiaggregator.source.twitter.model.TweetAccessStatus;
@@ -57,13 +61,16 @@ public class XAuthorScraperDiscoveryClient implements NamedTwitterDiscoveryProvi
     private final ScraperProperties properties;
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
+    private final SlowOperationRecorder slowOperationRecorder;
 
     public XAuthorScraperDiscoveryClient(ScraperProperties properties,
                                          @Qualifier("xAuthorScraperRestClient") RestClient restClient,
-                                         ObjectMapper objectMapper) {
+                                         ObjectMapper objectMapper,
+                                         SlowOperationRecorder slowOperationRecorder) {
         this.properties = properties;
         this.restClient = restClient;
         this.objectMapper = objectMapper;
+        this.slowOperationRecorder = slowOperationRecorder;
     }
 
     @Override
@@ -110,11 +117,12 @@ public class XAuthorScraperDiscoveryClient implements NamedTwitterDiscoveryProvi
     private String submitJob(Map<String, Object> input, String username) {
         String body;
         try {
-            body = restClient.post()
-                    .uri(buildUrl("/v1/jobs"))
-                    .body(input)
-                    .retrieve()
-                    .body(String.class);
+            body = slowOperationRecorder.observe(
+                    Kind.HTTP,
+                    Dependency.LOCAL_SCRAPER,
+                    Operation.CREATE_JOB,
+                    () -> restClient.post().uri(buildUrl("/v1/jobs"))
+                            .body(input).retrieve().body(String.class));
         } catch (HttpClientErrorException e) {
             throw mapClientError(e, "submit", null, username);
         } catch (HttpServerErrorException e) {
@@ -159,10 +167,12 @@ public class XAuthorScraperDiscoveryClient implements NamedTwitterDiscoveryProvi
     private JsonNode getJob(String jobId, String username) {
         String body;
         try {
-            body = restClient.get()
-                    .uri(buildUrl("/v1/jobs/" + jobId))
-                    .retrieve()
-                    .body(String.class);
+            body = slowOperationRecorder.observe(
+                    Kind.HTTP,
+                    Dependency.LOCAL_SCRAPER,
+                    Operation.POLL_JOB,
+                    () -> restClient.get().uri(buildUrl("/v1/jobs/" + jobId))
+                            .retrieve().body(String.class));
         } catch (HttpClientErrorException e) {
             throw mapClientError(e, "poll", jobId, username);
         } catch (HttpServerErrorException e) {
@@ -187,10 +197,13 @@ public class XAuthorScraperDiscoveryClient implements NamedTwitterDiscoveryProvi
     private List<Tweet> fetchResults(String jobId, String fallbackAuthor) {
         String body;
         try {
-            body = restClient.get()
-                    .uri(buildUrl("/v1/jobs/" + jobId + "/results?limit=" + resultLimit()))
-                    .retrieve()
-                    .body(String.class);
+            body = slowOperationRecorder.observe(
+                    Kind.HTTP,
+                    Dependency.LOCAL_SCRAPER,
+                    Operation.FETCH,
+                    () -> restClient.get()
+                            .uri(buildUrl("/v1/jobs/" + jobId + "/results?limit=" + resultLimit()))
+                            .retrieve().body(String.class));
         } catch (HttpClientErrorException e) {
             throw mapClientError(e, "results", jobId, fallbackAuthor);
         } catch (HttpServerErrorException e) {

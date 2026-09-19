@@ -3,11 +3,13 @@ package com.choucj.aiaggregator.common.repository;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.observability.SlowOperationRecorder;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
+import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.dao.InvalidDataAccessApiUsageException;
 import org.springframework.dao.QueryTimeoutException;
@@ -24,6 +26,7 @@ import java.time.Duration;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -61,6 +64,9 @@ class RedisExceptionMappingTest {
     @Mock
     private ListOperations<String, String> stringListOps;
 
+    @Mock
+    private SlowOperationRecorder slowOperationRecorder;
+
     private RedisRepositoryImpl repository;
 
     /**
@@ -69,8 +75,12 @@ class RedisExceptionMappingTest {
      * 间因类型擦除产生二义性注入导致 objectRedisTemplate 字段为 null.
      */
     @BeforeEach
+    @SuppressWarnings("unchecked")
     void setUp() {
-        repository = new RedisRepositoryImpl(stringRedisTemplate, objectRedisTemplate, new ObjectMapper());
+        when(slowOperationRecorder.observe(any(), any(), any(), any(Supplier.class)))
+                .thenAnswer(invocation -> ((Supplier<?>) invocation.getArgument(3)).get());
+        repository = new RedisRepositoryImpl(stringRedisTemplate, objectRedisTemplate,
+                new ObjectMapper(), slowOperationRecorder);
     }
 
     // ============ AC-5: Retryable 映射(RedisConnectionFailure / QueryTimeout / ClusterStateFailure) ============
@@ -86,6 +96,25 @@ class RedisExceptionMappingTest {
                 .hasMessageContaining("get 失败")
                 .hasMessageContaining("Redis 连接异常")
                 .hasCauseInstanceOf(RedisConnectionFailureException.class)
+                .extracting(e -> ((RetryableException) e).getErrorCode())
+                .isEqualTo(ErrorCode.REDIS_CONNECTION_ERROR);
+    }
+
+    /**
+     * incrementBy 契约变更护栏 (Story 10.3 recheck): 计数脚本路径 (TokenUsageTracker
+     * 成本累计调用方) 的连接失败也必须映射为 RetryableException — 裸 Redis 异常时代
+     * 该方法会直接抛框架异常, 映射回归会让成本累计错误地进入不可重试分支。
+     */
+    @Test
+    void shouldMapIncrementByConnectionFailureToRetryableException() {
+        when(stringRedisTemplate.execute(any(DefaultRedisScript.class), any(List.class),
+                any(Object[].class)))
+                .thenThrow(new RedisConnectionFailureException("conn refused"));
+
+        assertThatThrownBy(() -> repository.incrementBy("cost:daily:2026-09-19", 2L, Duration.ofDays(7)))
+                .isInstanceOf(RetryableException.class)
+                .hasMessageContaining("incrementBy 失败")
+                .hasMessageContaining("Redis 连接异常")
                 .extracting(e -> ((RetryableException) e).getErrorCode())
                 .isEqualTo(ErrorCode.REDIS_CONNECTION_ERROR);
     }

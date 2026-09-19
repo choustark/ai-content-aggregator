@@ -1,6 +1,7 @@
 package com.choucj.aiaggregator.publish.wechat;
 
 import com.choucj.aiaggregator.common.exception.AggregatorException;
+import com.choucj.aiaggregator.common.observability.TestSlowOperationRecorder;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.Article;
@@ -62,7 +63,7 @@ class WeChatPublisherTest {
     void setUp() {
         lenient().when(thumbMediaIdResolver.resolve()).thenReturn("test-thumb-media-id");
         publisher = new WeChatPublisher(wxMpService, converter, thumbMediaIdResolver,
-                articleStatusService, true);
+                articleStatusService, TestSlowOperationRecorder.create(), true);
     }
 
     // ===== Task 1: AC-1 Bean 注册 =====
@@ -448,7 +449,7 @@ class WeChatPublisherTest {
     void shouldSkipReminderLogWhenReviewReminderDisabled(CapturedOutput output) throws WxErrorException {
         // reviewReminderEnabled=false 时提醒日志跳过, 但 markDraftCreated 仍调用
         publisher = new WeChatPublisher(wxMpService, converter, thumbMediaIdResolver,
-                articleStatusService, false);
+                articleStatusService, TestSlowOperationRecorder.create(), false);
         Article article = sampleArticle();
         when(converter.convert(article)).thenReturn(sampleWxArticle("html"));
         when(wxMpService.getDraftService()).thenReturn(wxMpDraftService);

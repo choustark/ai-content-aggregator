@@ -83,6 +83,13 @@ management:
       show-details: when-authorized
   endpoint.env.show-values: when-authorized
 
+# 外部依赖慢操作观测阈值；生产环境通过对应环境变量覆盖。
+observability:
+  slow-operations:
+    redis-threshold: 100ms
+    http-threshold: 2s
+    sdk-threshold: 10s
+
 # 内容处理调度器配置
 schedule:
   # 调度器总开关 — 关闭时 ContentScheduler Bean 不注册, @Scheduled 不触发.

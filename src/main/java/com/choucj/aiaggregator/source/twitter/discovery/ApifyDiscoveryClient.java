@@ -4,6 +4,10 @@ import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.exception.DegradationException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.observability.SlowOperationRecorder;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Dependency;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Kind;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Operation;
 import com.choucj.aiaggregator.source.twitter.config.ApifyTwitterProperties;
 import com.choucj.aiaggregator.source.twitter.config.TwitterTargetProperties;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
@@ -28,6 +32,7 @@ import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -50,15 +55,18 @@ public class ApifyDiscoveryClient implements NamedTwitterDiscoveryProvider {
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
     private final TwitterTargetProperties targetProperties;
+    private final SlowOperationRecorder slowOperationRecorder;
 
     public ApifyDiscoveryClient(ApifyTwitterProperties properties,
                                 @Qualifier("apifyTwitterRestClient") RestClient restClient,
                                 ObjectMapper objectMapper,
-                                TwitterTargetProperties targetProperties) {
+                                TwitterTargetProperties targetProperties,
+                                SlowOperationRecorder slowOperationRecorder) {
         this.properties = properties;
         this.restClient = restClient;
         this.objectMapper = objectMapper;
         this.targetProperties = targetProperties;
+        this.slowOperationRecorder = slowOperationRecorder;
     }
 
     @Override
@@ -73,11 +81,12 @@ public class ApifyDiscoveryClient implements NamedTwitterDiscoveryProvider {
         String url = buildRunUrl();
         String body;
         try {
-            body = restClient.post()
-                    .uri(url)
-                    .body(input)
-                    .retrieve()
-                    .body(String.class);
+            body = slowOperationRecorder.observe(
+                    Kind.HTTP,
+                    Dependency.APIFY,
+                    Operation.DISCOVER,
+                    Duration.ofSeconds(properties.getTimeoutSeconds()),
+                    () -> restClient.post().uri(url).body(input).retrieve().body(String.class));
         } catch (HttpClientErrorException.TooManyRequests e) {
             throw new RetryableException(ErrorCode.EXTERNAL_API_ERROR,
                     "Apify 限流(429): username=" + username, e);
@@ -152,11 +161,12 @@ public class ApifyDiscoveryClient implements NamedTwitterDiscoveryProvider {
         long startNanos = System.nanoTime();
         String body;
         try {
-            body = restClient.post()
-                    .uri(url)
-                    .body(input)
-                    .retrieve()
-                    .body(String.class);
+            body = slowOperationRecorder.observe(
+                    Kind.HTTP,
+                    Dependency.APIFY,
+                    Operation.DISCOVER,
+                    Duration.ofSeconds(properties.getTimeoutSeconds()),
+                    () -> restClient.post().uri(url).body(input).retrieve().body(String.class));
         } catch (HttpClientErrorException.TooManyRequests e) {
             throw new RetryableException(ErrorCode.EXTERNAL_API_ERROR,
                     "Apify 指定内容限流(429): targets=" + targets.size()

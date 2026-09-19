@@ -1,5 +1,9 @@
 package com.choucj.aiaggregator.source.twitter.media;
 
+import com.choucj.aiaggregator.common.observability.SlowOperationRecorder;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Dependency;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Kind;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Operation;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.util.TextTruncateUtil;
@@ -18,6 +22,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.time.Duration;
 import java.util.Locale;
 
 /**
@@ -55,14 +60,21 @@ public class MediaDownloadClient {
 
     private final RestClient restClient;
     private final long maxFileSizeBytes;
+    private final Duration downloadTimeout;
+    private final SlowOperationRecorder slowOperationRecorder;
 
     /**
      * @param restClient 专用下载 RestClient Bean (超时由 TwitterMediaProperties.downloadTimeoutSeconds 控制)
      * @param maxFileSizeBytes 单文件大小上限 (bytes), 超过则拒绝下载
+     * @param downloadTimeout 下载读超时, 作为慢操作观测的 expectedWait 补偿 —
+     *                        媒体下载设计内即可能耗时数十秒, 不补偿会让每次成功下载都刷 slow_operation WARN
      */
-    public MediaDownloadClient(RestClient restClient, long maxFileSizeBytes) {
+    public MediaDownloadClient(RestClient restClient, long maxFileSizeBytes, Duration downloadTimeout,
+                               SlowOperationRecorder slowOperationRecorder) {
         this.restClient = restClient;
         this.maxFileSizeBytes = maxFileSizeBytes;
+        this.downloadTimeout = downloadTimeout == null ? Duration.ZERO : downloadTimeout;
+        this.slowOperationRecorder = slowOperationRecorder;
     }
 
     /**
@@ -79,9 +91,12 @@ public class MediaDownloadClient {
         long startNanos = System.nanoTime();
         try {
             URI uri = validateHttpUrl(url, tweetId, mediaId);
-            DownloadResult result = restClient.get()
-                    .uri(uri)
-                    .exchange((request, response) -> {
+            DownloadResult result = slowOperationRecorder.observe(
+                    Kind.HTTP,
+                    Dependency.TWITTER_MEDIA,
+                    Operation.DOWNLOAD,
+                    downloadTimeout,
+                    () -> restClient.get().uri(uri).exchange((request, response) -> {
                         HttpStatusCode status = response.getStatusCode();
                         if (status.is4xxClientError()) {
                             byte[] safeBody = readErrorBody(response.getBody());
@@ -111,16 +126,13 @@ public class MediaDownloadClient {
                         String contentType = response.getHeaders().getContentType() != null
                                 ? response.getHeaders().getContentType().toString()
                                 : "application/octet-stream";
+                        if (body.length == 0) {
+                            throw new NonRetryableException("媒体下载返回空内容: tweetId=" + tweetId
+                                    + " mediaId=" + mediaId, null);
+                        }
                         return new DownloadResult(body, contentType);
-                    });
+                    }));
             long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
-
-            if (result == null || result.bytes() == null || result.bytes().length == 0) {
-                log.warn("媒体下载返回空内容: tweetId={}, mediaId={}",
-                        tweetId, mediaId);
-                throw new NonRetryableException("媒体下载返回空内容: tweetId=" + tweetId
-                        + " mediaId=" + mediaId, null);
-            }
 
             log.info("媒体下载成功: tweetId={}, mediaId={}, url={}, size={}bytes, 耗时={}ms",
                     tweetId, mediaId,

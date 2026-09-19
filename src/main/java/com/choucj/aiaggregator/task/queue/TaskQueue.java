@@ -3,7 +3,11 @@ package com.choucj.aiaggregator.task.queue;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.observability.SlowOperationRecorder;
 import com.choucj.aiaggregator.common.util.RedisKeys;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Operation;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Dependency;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Kind;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.InvalidDataAccessApiUsageException;
@@ -16,6 +20,7 @@ import org.springframework.data.redis.serializer.SerializationException;
 import org.springframework.stereotype.Component;
 
 import java.util.Collections;
+import java.time.Duration;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
@@ -51,6 +56,7 @@ import java.util.function.Supplier;
 public class TaskQueue {
 
     private final StringRedisTemplate stringRedisTemplate;
+    private final SlowOperationRecorder slowOperationRecorder;
 
     /**
      * 添加任务到队列右端(FIFO 入队).
@@ -64,7 +70,7 @@ public class TaskQueue {
             throw new NonRetryableException(ErrorCode.REDIS_DATA_ERROR,
                     "push 失败: taskId 不能为 null");
         }
-        supplyWithMapping("push", RedisKeys.taskQueue(), () ->
+        supplyWithMapping("push", RedisKeys.taskQueue(), Operation.ENQUEUE, () ->
                 stringRedisTemplate.opsForList().rightPush(RedisKeys.taskQueue(), taskId));
         log.debug("任务 {} 加入队列", taskId);
     }
@@ -81,7 +87,9 @@ public class TaskQueue {
      * @throws RetryableException Redis 连接异常
      */
     public String poll(long timeout, TimeUnit unit) {
-        String task = supplyWithMapping("poll", RedisKeys.taskQueue(), () -> {
+        Duration expectedWait = timeout > 0
+                ? Duration.ofNanos(unit.toNanos(timeout)) : Duration.ZERO;
+        String task = supplyWithMapping("poll", RedisKeys.taskQueue(), Operation.POLL, expectedWait, () -> {
             if (timeout <= 0) {
                 return stringRedisTemplate.opsForList().leftPop(RedisKeys.taskQueue());
             }
@@ -89,7 +97,7 @@ public class TaskQueue {
         });
         if (task != null) {
             String finalTask = task;
-            supplyWithMapping("poll-add-processing", RedisKeys.taskProcessing(), () ->
+            supplyWithMapping("poll-add-processing", RedisKeys.taskProcessing(), Operation.ADD, () ->
                     stringRedisTemplate.opsForSet().add(RedisKeys.taskProcessing(), finalTask));
             log.debug("任务 {} 开始处理", task);
         }
@@ -105,7 +113,7 @@ public class TaskQueue {
      * @throws RetryableException Redis 连接异常
      */
     public void complete(String taskId) {
-        supplyWithMapping("complete", RedisKeys.taskProcessing(), () ->
+        supplyWithMapping("complete", RedisKeys.taskProcessing(), Operation.REMOVE, () ->
                 stringRedisTemplate.opsForSet().remove(RedisKeys.taskProcessing(), taskId));
         log.debug("任务 {} 处理完成", taskId);
     }
@@ -117,7 +125,7 @@ public class TaskQueue {
      * @throws RetryableException Redis 连接异常
      */
     public Set<String> getProcessingTasks() {
-        Set<String> tasks = supplyWithMapping("getProcessingTasks", RedisKeys.taskProcessing(), () ->
+        Set<String> tasks = supplyWithMapping("getProcessingTasks", RedisKeys.taskProcessing(), Operation.GET, () ->
                 stringRedisTemplate.opsForSet().members(RedisKeys.taskProcessing()));
         return tasks != null ? tasks : Collections.emptySet();
     }
@@ -135,21 +143,21 @@ public class TaskQueue {
             throw new NonRetryableException(ErrorCode.REDIS_DATA_ERROR,
                     "isQueued 失败: taskId 不能为 null");
         }
-        java.util.List<String> tasks = supplyWithMapping("isQueued", RedisKeys.taskQueue(), () ->
+        java.util.List<String> tasks = supplyWithMapping("isQueued", RedisKeys.taskQueue(), Operation.GET, () ->
                 stringRedisTemplate.opsForList().range(RedisKeys.taskQueue(), 0, -1));
         return tasks != null && tasks.contains(taskId);
     }
 
     /** 返回当前待处理队列长度，供监控等只读调用方使用。 */
     public long pendingCount() {
-        Long count = supplyWithMapping("pendingCount", RedisKeys.taskQueue(), () ->
+        Long count = supplyWithMapping("pendingCount", RedisKeys.taskQueue(), Operation.GET, () ->
                 stringRedisTemplate.opsForList().size(RedisKeys.taskQueue()));
         return count != null ? count : 0L;
     }
 
     /** 返回当前 processing 集合大小，供监控等只读调用方使用。 */
     public long processingCount() {
-        Long count = supplyWithMapping("processingCount", RedisKeys.taskProcessing(), () ->
+        Long count = supplyWithMapping("processingCount", RedisKeys.taskProcessing(), Operation.GET, () ->
                 stringRedisTemplate.opsForSet().size(RedisKeys.taskProcessing()));
         return count != null ? count : 0L;
     }
@@ -161,9 +169,18 @@ public class TaskQueue {
      * 不强行共用. 未来若引入更多 Redis 数据结构操作(Pub/Sub / Sorted Set), 可考虑抽到
      * {@code common.repository.RedisOperationTemplate} 工具类.
      */
-    private <T> T supplyWithMapping(String operation, String key, Supplier<T> supplier) {
+    private <T> T supplyWithMapping(String operation, String key, Operation metricOperation,
+                                    Supplier<T> supplier) {
+        return supplyWithMapping(operation, key, metricOperation, Duration.ZERO, supplier);
+    }
+
+    private <T> T supplyWithMapping(String operation, String key, Operation metricOperation,
+                                    Duration expectedWait, Supplier<T> supplier) {
         try {
-            return supplier.get();
+            return slowOperationRecorder.observe(
+                    Kind.REDIS,
+                    Dependency.REDIS,
+                    metricOperation, expectedWait, supplier);
         } catch (RedisConnectionFailureException | QueryTimeoutException
                  | ClusterStateFailureException e) {
             log.warn("Redis {} 异常映射为 RetryableException: key={}", operation, key, e);

@@ -3,6 +3,8 @@ package com.choucj.aiaggregator.task.queue;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.observability.SlowOperationRecorder;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Kind;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -22,7 +24,11 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.time.Duration;
+import java.util.function.Supplier;
 
+import static com.choucj.aiaggregator.monitoring.DependencyMetrics.Dependency.REDIS;
+import static com.choucj.aiaggregator.monitoring.DependencyMetrics.Operation.POLL;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
@@ -53,11 +59,17 @@ class TaskQueueTest {
     @Mock
     private SetOperations<String, String> setOps;
 
+    @Mock
+    private SlowOperationRecorder slowOperationRecorder;
+
     private TaskQueue taskQueue;
 
     @BeforeEach
     void setUp() {
-        taskQueue = new TaskQueue(stringRedisTemplate);
+        org.mockito.Mockito.lenient().when(slowOperationRecorder.observe(
+                        any(), any(), any(), any(Duration.class), any(Supplier.class)))
+                .thenAnswer(invocation -> ((Supplier<?>) invocation.getArgument(4)).get());
+        taskQueue = new TaskQueue(stringRedisTemplate, slowOperationRecorder);
     }
 
     // ============ AC-1: push ============
@@ -132,6 +144,9 @@ class TaskQueueTest {
 
         assertThat(result).isNull();
         verifyNoInteractions(setOps);
+        verify(slowOperationRecorder).observe(
+                eq(Kind.REDIS), eq(REDIS), eq(POLL),
+                eq(Duration.ofSeconds(1)), any(Supplier.class));
     }
 
     @Test

@@ -3,7 +3,11 @@ package com.choucj.aiaggregator.source.github.client;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.observability.SlowOperationRecorder;
 import com.choucj.aiaggregator.common.util.TextTruncateUtil;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Dependency;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Kind;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Operation;
 import com.choucj.aiaggregator.source.github.config.GitHubProperties;
 import com.choucj.aiaggregator.source.github.config.GitHubProperties.Trending;
 import com.choucj.aiaggregator.source.github.model.GitHubRepo;
@@ -85,6 +89,7 @@ public class GitHubClientImpl implements GitHubClient {
     private final GitHubProperties properties;
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
+    private final SlowOperationRecorder slowOperationRecorder;
     private final AtomicBoolean unauthenticatedWarningLogged = new AtomicBoolean(false);
 
     /**
@@ -98,10 +103,12 @@ public class GitHubClientImpl implements GitHubClient {
      */
     public GitHubClientImpl(GitHubProperties properties,
                             @Qualifier("githubRestClient") RestClient restClient,
-                            ObjectMapper objectMapper) {
+                            ObjectMapper objectMapper,
+                            SlowOperationRecorder slowOperationRecorder) {
         this.properties = properties;
         this.restClient = restClient;
         this.objectMapper = objectMapper;
+        this.slowOperationRecorder = slowOperationRecorder;
     }
 
     @Override
@@ -121,11 +128,12 @@ public class GitHubClientImpl implements GitHubClient {
 
         String body;
         try {
-            body = restClient.get()
-                    .uri(uri)
-                    .headers(this::applyCommonHeaders)
-                    .retrieve()
-                    .body(String.class);
+            body = slowOperationRecorder.observe(
+                    Kind.HTTP,
+                    Dependency.GITHUB,
+                    Operation.DISCOVER,
+                    () -> restClient.get().uri(uri).headers(this::applyCommonHeaders)
+                            .retrieve().body(String.class));
         } catch (HttpClientErrorException.TooManyRequests e) {
             log.warn("GitHub 限流 (429): endpoint={}, query={}", SEARCH_PATH, query);
             throw new RetryableException(ErrorCode.EXTERNAL_API_ERROR,
@@ -169,16 +177,24 @@ public class GitHubClientImpl implements GitHubClient {
         URI uri = buildReadmeUri(owner, repo);
         String endpoint = "/repos/" + owner + "/" + repo + "/readme";
 
-        String body;
+        ReadmeFetch fetch;
         try {
-            body = restClient.get()
-                    .uri(uri)
-                    .headers(this::applyCommonHeaders)
-                    .retrieve()
-                    .body(String.class);
-        } catch (HttpClientErrorException.NotFound e) {
-            log.debug("GitHub README 不存在 (404): owner={}, repo={}", owner, repo);
-            return null;
+            fetch = slowOperationRecorder.observe(
+                    Kind.HTTP,
+                    Dependency.GITHUB,
+                    Operation.FETCH,
+                    () -> {
+                        try {
+                            return new ReadmeFetch(restClient.get().uri(uri)
+                                    .headers(this::applyCommonHeaders)
+                                    .retrieve().body(String.class), false);
+                        } catch (HttpClientErrorException.NotFound e) {
+                            // README 不存在是仓库的正常业务状态，不能累加依赖失败 gauge。
+                            // 用结果载体标记 404, 不向数据通道注入哨兵字符串做控制流。
+                            log.debug("GitHub README 不存在 (404): owner={}, repo={}", owner, repo);
+                            return new ReadmeFetch(null, true);
+                        }
+                    });
         } catch (HttpClientErrorException.TooManyRequests e) {
             log.warn("GitHub 限流 (429): endpoint={}", endpoint);
             throw new RetryableException(ErrorCode.EXTERNAL_API_ERROR,
@@ -206,7 +222,10 @@ public class GitHubClientImpl implements GitHubClient {
                     "GitHub README 调用异常: endpoint=" + endpoint, e);
         }
 
-        String readme = decodeReadme(body, owner, repo);
+        if (fetch.notFound()) {
+            return null;
+        }
+        String readme = decodeReadme(fetch.body(), owner, repo);
         if (readme == null) {
             return null;
         }
@@ -448,5 +467,9 @@ public class GitHubClientImpl implements GitHubClient {
             return String.valueOf(child.asLong());
         }
         return "0";
+    }
+
+    /** 单次 README 抓取结果载体: 区分"HTTP 404 README 不存在"与真实响应体. */
+    private record ReadmeFetch(String body, boolean notFound) {
     }
 }

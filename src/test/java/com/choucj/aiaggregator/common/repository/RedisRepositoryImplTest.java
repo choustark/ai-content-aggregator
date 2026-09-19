@@ -1,8 +1,11 @@
 package com.choucj.aiaggregator.common.repository;
 
+import com.choucj.aiaggregator.common.observability.SlowOperationRecorder;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Kind;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.redis.core.RedisCallback;
@@ -11,7 +14,10 @@ import org.springframework.data.redis.core.ValueOperations;
 import org.springframework.data.redis.core.script.DefaultRedisScript;
 
 import java.time.Duration;
+import java.util.function.Supplier;
 
+import static com.choucj.aiaggregator.monitoring.DependencyMetrics.Dependency.REDIS;
+import static com.choucj.aiaggregator.monitoring.DependencyMetrics.Operation.INCREMENT;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -49,8 +55,22 @@ class RedisRepositoryImplTest {
     @Mock
     private ValueOperations<String, String> valueOps;
 
-    @InjectMocks
     private RedisRepositoryImpl repository;
+
+    @Mock
+    private org.springframework.data.redis.core.RedisTemplate<String, Object> objectRedisTemplate;
+
+    @Mock
+    private SlowOperationRecorder slowOperationRecorder;
+
+    @BeforeEach
+    @SuppressWarnings("unchecked")
+    void setUp() {
+        when(slowOperationRecorder.observe(any(), any(), any(), any(Supplier.class)))
+                .thenAnswer(invocation -> ((Supplier<?>) invocation.getArgument(3)).get());
+        repository = new RedisRepositoryImpl(redisTemplate, objectRedisTemplate,
+                new ObjectMapper(), slowOperationRecorder);
+    }
 
     @Test
     void shouldSetKeyValueWithoutTtl() {
@@ -166,6 +186,8 @@ class RedisRepositoryImplTest {
                 eq("2"), eq(String.valueOf(ttl.toMillis())));
         verify(valueOps, never()).get(any());
         verify(valueOps, never()).set(any(), any());
+        verify(slowOperationRecorder).observe(eq(Kind.REDIS),
+                eq(REDIS), eq(INCREMENT), any(Supplier.class));
     }
 
     /**

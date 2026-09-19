@@ -3,6 +3,10 @@ package com.choucj.aiaggregator.source.twitter.client;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.observability.SlowOperationRecorder;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Dependency;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Kind;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Operation;
 import com.choucj.aiaggregator.source.twitter.config.FxTwitterProperties;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
@@ -59,6 +63,7 @@ public class FxTwitterClient {
     private final FxTwitterProperties properties;
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
+    private final SlowOperationRecorder slowOperationRecorder;
 
     /**
      * 构造器注入 — 显式而非 {@code @RequiredArgsConstructor}, 因为 {@code @Qualifier} 需要直接标注在
@@ -70,10 +75,12 @@ public class FxTwitterClient {
      */
     public FxTwitterClient(FxTwitterProperties properties,
                            @Qualifier("fxtwitterRestClient") RestClient restClient,
-                           ObjectMapper objectMapper) {
+                           ObjectMapper objectMapper,
+                           SlowOperationRecorder slowOperationRecorder) {
         this.properties = properties;
         this.restClient = restClient;
         this.objectMapper = objectMapper;
+        this.slowOperationRecorder = slowOperationRecorder;
     }
 
     /**
@@ -91,16 +98,23 @@ public class FxTwitterClient {
         }
         log.debug("调用 FxTwitter 补全: tweetId={}", tweetId);
 
-        String body;
+        TweetFetch fetch;
         try {
             String url = properties.getInstance() + TWEET_PATH_PREFIX + tweetId + TWEET_PATH_SUFFIX;
-            body = restClient.get()
-                    .uri(url)
-                    .retrieve()
-                    .body(String.class);
-        } catch (HttpClientErrorException.NotFound e) {
-            throw new NonRetryableException(ErrorCode.EXTERNAL_API_ERROR,
-                    "FxTwitter 404 推文不存在: tweetId=" + tweetId, e);
+            fetch = slowOperationRecorder.observe(
+                    Kind.HTTP,
+                    Dependency.FXTWITTER,
+                    Operation.FETCH,
+                    () -> {
+                        try {
+                            return new TweetFetch(
+                                    restClient.get().uri(url).retrieve().body(String.class), false);
+                        } catch (HttpClientErrorException.NotFound e) {
+                            // 推文缺失是查询结果，不代表 FxTwitter 依赖自身不可用。
+                            // 用结果载体标记 404, 与"200 + 空 body"区分, 不丢上游异常上下文。
+                            return new TweetFetch(null, true);
+                        }
+                    });
         } catch (HttpClientErrorException.TooManyRequests e) {
             throw new RetryableException(ErrorCode.EXTERNAL_API_ERROR,
                     "FxTwitter 限流(429): tweetId=" + tweetId, e);
@@ -114,7 +128,15 @@ public class FxTwitterClient {
             throw new RetryableException(ErrorCode.EXTERNAL_API_ERROR,
                     "FxTwitter 连接失败: tweetId=" + tweetId, e);
         }
-        return parseResponse(body, tweetId);
+        if (fetch.notFound()) {
+            throw new NonRetryableException(ErrorCode.EXTERNAL_API_ERROR,
+                    "FxTwitter 404 推文不存在: tweetId=" + tweetId);
+        }
+        return parseResponse(fetch.body(), tweetId);
+    }
+
+    /** 单次抓取结果载体: 区分"HTTP 404 推文不存在"与"非 404 的空响应体". */
+    private record TweetFetch(String body, boolean notFound) {
     }
 
     /**

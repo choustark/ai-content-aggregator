@@ -3,6 +3,10 @@ package com.choucj.aiaggregator.common.repository;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.common.observability.SlowOperationRecorder;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Operation;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Dependency;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Kind;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -79,6 +83,7 @@ public class RedisRepositoryImpl implements RedisRepository {
     private final StringRedisTemplate stringRedisTemplate;
     private final RedisTemplate<String, Object> objectRedisTemplate;
     private final ObjectMapper objectMapper;
+    private final SlowOperationRecorder slowOperationRecorder;
 
     /**
      * INCRBY+PEXPIRE 原子脚本. resultType 必须为 {@code Long} (ReturnType.INTEGER):
@@ -94,12 +99,12 @@ public class RedisRepositoryImpl implements RedisRepository {
 
     @Override
     public void set(String key, String value) {
-        runWithMapping(() -> stringRedisTemplate.opsForValue().set(key, value), key, "set");
+        runWithMapping(() -> stringRedisTemplate.opsForValue().set(key, value), key, "set", Operation.SET);
     }
 
     @Override
     public void set(String key, String value, Duration ttl) {
-        runWithMapping(() -> stringRedisTemplate.opsForValue().set(key, value, ttl), key, "set(ttl)");
+        runWithMapping(() -> stringRedisTemplate.opsForValue().set(key, value, ttl), key, "set(ttl)", Operation.SET);
     }
 
     @Override
@@ -109,37 +114,40 @@ public class RedisRepositoryImpl implements RedisRepository {
                         key.getBytes(java.nio.charset.StandardCharsets.UTF_8),
                         value.getBytes(java.nio.charset.StandardCharsets.UTF_8),
                         Expiration.keepTtl(),
-                        RedisStringCommands.SetOption.UPSERT)), key, "set(keepTtl)");
+                        RedisStringCommands.SetOption.UPSERT)), key, "set(keepTtl)", Operation.SET);
     }
 
     @Override
     public String get(String key) {
-        return supplyWithMapping(() -> stringRedisTemplate.opsForValue().get(key), key, "get");
+        return supplyWithMapping(() -> stringRedisTemplate.opsForValue().get(key), key, "get", Operation.GET);
     }
 
     @Override
     public void delete(String key) {
-        runWithMapping(() -> stringRedisTemplate.delete(key), key, "delete");
+        runWithMapping(() -> stringRedisTemplate.delete(key), key, "delete", Operation.DELETE);
     }
 
     @Override
     public boolean exists(String key) {
-        Boolean result = supplyWithMapping(() -> stringRedisTemplate.hasKey(key), key, "exists");
+        Boolean result = supplyWithMapping(() -> stringRedisTemplate.hasKey(key), key, "exists", Operation.EXISTS);
         return Boolean.TRUE.equals(result);
     }
 
     @Override
     public void expire(String key, Duration ttl) {
-        runWithMapping(() -> stringRedisTemplate.expire(key, ttl), key, "expire");
+        runWithMapping(() -> stringRedisTemplate.expire(key, ttl), key, "expire", Operation.EXPIRE);
     }
 
     @Override
+    /** 以与其余 Redis 方法一致的领域异常映射执行原子增量，调用方无需处理客户端异常。 */
     public long incrementBy(String key, long delta, Duration ttl) {
         // args 必须传 String: StringRedisTemplate 的 valueSerializer 是 StringRedisSerializer,
         // 其 serialize(Object) 内部强转 (String) — 传 Long 每次调用必抛 ClassCastException
         // (2026-08-30 真实环境缺陷修复, TokenUsageTracker 成本累计因此从未成功).
-        Long result = stringRedisTemplate.execute(
-                INCREMENT_WITH_TTL_SCRIPT, List.of(key), String.valueOf(delta), String.valueOf(ttl.toMillis()));
+        Long result = supplyWithMapping(() -> stringRedisTemplate.execute(
+                        INCREMENT_WITH_TTL_SCRIPT, List.of(key), String.valueOf(delta),
+                        String.valueOf(ttl.toMillis())),
+                key, "incrementBy", Operation.INCREMENT);
         if (result == null) {
             return delta;
         }
@@ -148,13 +156,14 @@ public class RedisRepositoryImpl implements RedisRepository {
 
     @Override
     public <T> void setObject(String key, T value, Duration ttl) {
-        runWithMapping(() -> objectRedisTemplate.opsForValue().set(key, value, ttl), key, "setObject");
+        runWithMapping(() -> objectRedisTemplate.opsForValue().set(key, value, ttl),
+                key, "setObject", Operation.SET);
     }
 
     @Override
     public <T> T getObject(String key, Class<T> type) {
         Object raw = supplyWithMapping(
-                () -> objectRedisTemplate.opsForValue().get(key), key, "getObject");
+                () -> objectRedisTemplate.opsForValue().get(key), key, "getObject", Operation.GET);
         if (raw == null) {
             return null;
         }
@@ -177,24 +186,28 @@ public class RedisRepositoryImpl implements RedisRepository {
 
     @Override
     public void rPush(String key, String value) {
-        runWithMapping(() -> stringRedisTemplate.opsForList().rightPush(key, value), key, "rPush");
+        runWithMapping(() -> stringRedisTemplate.opsForList().rightPush(key, value),
+                key, "rPush", Operation.ENQUEUE);
     }
 
     @Override
     public String lPop(String key) {
-        return supplyWithMapping(() -> stringRedisTemplate.opsForList().leftPop(key), key, "lPop");
+        return supplyWithMapping(() -> stringRedisTemplate.opsForList().leftPop(key),
+                key, "lPop", Operation.POLL);
     }
 
     @Override
     public long listLength(String key) {
-        Long size = supplyWithMapping(() -> stringRedisTemplate.opsForList().size(key), key, "listLength");
+        Long size = supplyWithMapping(() -> stringRedisTemplate.opsForList().size(key),
+                key, "listLength", Operation.GET);
         return size == null ? 0L : size;
     }
 
     @Override
     public <T> List<T> lRange(String key, long start, long end, Class<T> type) {
         List<String> values = supplyWithMapping(
-                () -> stringRedisTemplate.opsForList().range(key, start, end), key, "lRange");
+                () -> stringRedisTemplate.opsForList().range(key, start, end),
+                key, "lRange", Operation.GET);
         if (values == null || values.isEmpty()) {
             return List.of();
         }
@@ -219,11 +232,12 @@ public class RedisRepositoryImpl implements RedisRepository {
     /**
      * 包装无返回值的 Redis 操作,统一异常映射(委托给 {@link #supplyWithMapping}).
      */
-    private void runWithMapping(Runnable action, String key, String operation) {
+    private void runWithMapping(Runnable action, String key, String operation,
+                                Operation metricOperation) {
         supplyWithMapping(() -> {
             action.run();
             return null;
-        }, key, operation);
+        }, key, operation, metricOperation);
     }
 
     /**
@@ -239,9 +253,13 @@ public class RedisRepositoryImpl implements RedisRepository {
      * <p>注: catch 顺序很重要,具体子类必须先于父类 {@link RedisSystemException} 捕获,
      * 否则会被兜底吞掉(Java 多态 catch 不区分父子,只看声明类型).
      */
-    private <T> T supplyWithMapping(Supplier<T> action, String key, String operation) {
+    private <T> T supplyWithMapping(Supplier<T> action, String key, String operation,
+                                    Operation metricOperation) {
         try {
-            return action.get();
+            return slowOperationRecorder.observe(
+                    Kind.REDIS,
+                    Dependency.REDIS,
+                    metricOperation, action);
         } catch (RedisConnectionFailureException | QueryTimeoutException
                 | ClusterStateFailureException e) {
             log.warn("Redis {} 异常映射为 RetryableException: key={}", operation, key, e);

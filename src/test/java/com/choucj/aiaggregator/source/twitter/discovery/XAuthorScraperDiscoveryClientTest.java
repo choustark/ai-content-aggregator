@@ -1,5 +1,7 @@
 package com.choucj.aiaggregator.source.twitter.discovery;
 
+import com.choucj.aiaggregator.common.observability.TestSlowOperationRecorder;
+
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.source.twitter.config.ScraperProperties;
@@ -40,7 +42,7 @@ class XAuthorScraperDiscoveryClientTest {
         properties.setMaxWaitSeconds(1);
         RestClient.Builder builder = RestClient.builder();
         server = MockRestServiceServer.bindTo(builder).build();
-        client = new XAuthorScraperDiscoveryClient(properties, builder.build(), new ObjectMapper());
+        client = new XAuthorScraperDiscoveryClient(properties, builder.build(), new ObjectMapper(), TestSlowOperationRecorder.create());
     }
 
     @Test

@@ -1,5 +1,7 @@
 package com.choucj.aiaggregator.source.twitter.client;
 
+import com.choucj.aiaggregator.common.observability.TestSlowOperationRecorder;
+
 import com.choucj.aiaggregator.source.twitter.config.RSSHubProperties;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -47,7 +49,7 @@ class RSSHubIntegrationTest {
         properties.setInstances(List.of(INSTANCE));
 
         RestClient restClient = RestClient.builder().build();
-        RSSHubClient client = new RSSHubClient(properties, restClient, new ObjectMapper());
+        RSSHubClient client = new RSSHubClient(properties, restClient, new ObjectMapper(), TestSlowOperationRecorder.create());
 
         List<Tweet> tweets = client.discoverTweets(TARGET_USER);
 

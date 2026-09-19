@@ -1,5 +1,7 @@
 package com.choucj.aiaggregator.source.twitter.client;
 
+import com.choucj.aiaggregator.common.observability.TestSlowOperationRecorder;
+
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
@@ -59,7 +61,7 @@ class RSSHubClientTest {
         properties.setEnabled(true);
         properties.setTimeoutSeconds(30);
         properties.setInstances(List.of("https://rsshub.app"));
-        client = new RSSHubClient(properties, restClient, objectMapper);
+        client = new RSSHubClient(properties, restClient, objectMapper, TestSlowOperationRecorder.create());
     }
 
     // ============ AC-4 / AC-7: happy path ============

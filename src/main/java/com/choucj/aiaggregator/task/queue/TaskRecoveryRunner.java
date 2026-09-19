@@ -1,6 +1,10 @@
 package com.choucj.aiaggregator.task.queue;
 
 import com.choucj.aiaggregator.common.util.RedisKeys;
+import com.choucj.aiaggregator.common.observability.SlowOperationRecorder;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Dependency;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Kind;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics.Operation;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -34,6 +38,7 @@ public class TaskRecoveryRunner {
 
     private final TaskQueue taskQueue;
     private final StringRedisTemplate stringRedisTemplate;
+    private final SlowOperationRecorder slowOperationRecorder;
 
     /**
      * 断点恢复核心逻辑 — 把 {@code task:processing} 中的任务重新入队, 然后清空集合.
@@ -59,7 +64,9 @@ public class TaskRecoveryRunner {
             taskQueue.push(taskId);
             log.debug("任务 {} 重新入队", taskId);
         }
-        stringRedisTemplate.delete(RedisKeys.taskProcessing());
+        slowOperationRecorder.observe(Kind.REDIS, Dependency.REDIS,
+                Operation.RECOVERY,
+                () -> stringRedisTemplate.delete(RedisKeys.taskProcessing()));
         log.info("断点恢复完成, task:processing 已清空");
     }
 }

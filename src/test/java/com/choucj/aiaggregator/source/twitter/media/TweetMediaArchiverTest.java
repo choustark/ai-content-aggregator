@@ -2,6 +2,9 @@ package com.choucj.aiaggregator.source.twitter.media;
 
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
+import com.choucj.aiaggregator.common.observability.SlowOperationProperties;
+import com.choucj.aiaggregator.common.observability.SlowOperationRecorder;
+import com.choucj.aiaggregator.monitoring.DependencyMetrics;
 import com.choucj.aiaggregator.publish.storage.MediaArchiveRecord;
 import com.choucj.aiaggregator.publish.storage.TweetMediaArchiveWriter;
 import com.choucj.aiaggregator.publish.storage.config.ArchiverProperties;
@@ -21,6 +24,9 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Bean;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -388,6 +394,20 @@ class TweetMediaArchiverTest {
 
     @Import(TweetMediaArchiver.class)
     static class TweetMediaArchiverTestConfig {
+        @Bean
+        MeterRegistry meterRegistry() {
+            return new SimpleMeterRegistry();
+        }
+
+        @Bean
+        DependencyMetrics dependencyMetrics(MeterRegistry meterRegistry) {
+            return new DependencyMetrics(meterRegistry);
+        }
+
+        @Bean
+        SlowOperationRecorder slowOperationRecorder(DependencyMetrics dependencyMetrics) {
+            return new SlowOperationRecorder(dependencyMetrics, new SlowOperationProperties());
+        }
     }
 
     private static TweetMedia photo(String id, String sourceUrl) {

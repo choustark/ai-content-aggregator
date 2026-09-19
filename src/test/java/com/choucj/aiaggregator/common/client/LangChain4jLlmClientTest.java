@@ -1,5 +1,7 @@
 package com.choucj.aiaggregator.common.client;
 
+import com.choucj.aiaggregator.common.observability.TestSlowOperationRecorder;
+
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import ch.qos.logback.classic.Logger;
@@ -56,7 +58,7 @@ class LangChain4jLlmClientTest {
 
     @BeforeEach
     void setUp() {
-        client = new LangChain4jLlmClient(deepSeekChatModel, glmChatModel);
+        client = new LangChain4jLlmClient(deepSeekChatModel, glmChatModel, TestSlowOperationRecorder.create());
     }
 
     @Test
