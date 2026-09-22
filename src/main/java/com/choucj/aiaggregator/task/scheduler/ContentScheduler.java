@@ -198,12 +198,13 @@ public class ContentScheduler {
      *
      * <p>MVP 实现: 单线程顺序处理. 多线程/并发处理留 Story 1.7 Feature Flags 控制.
      *
-     * <p>异常策略:
+     * <p>异常策略(Story 10.4 起):
      * <ul>
      *   <li>{@link RetryableException} — 任务失败可重试, <b>不调用 complete</b>,
-     *       任务留在 {@code task:processing} 集合中, 下次启动时由 {@link TaskRecoveryRunner} 重入队</li>
-     *   <li>{@link NonRetryableException} — 任务不可重试, 调用 complete 移除避免阻塞队列
-     *       (任务终态 FAILED, 由业务侧记录死信)</li>
+     *       任务留在 {@code task:{queue}:processing} 集合中,
+     *       下次启动时由 {@link TaskRecoveryRunner} 原子重排回 pending 队列</li>
+     *   <li>{@link NonRetryableException} — 任务不可重试, 经 {@code TaskQueue.markDeadLetter}
+     *       原子移入死信终态(DEAD_LETTER), 不再误写 COMPLETED</li>
      * </ul>
      */
     private void processQueueOnce() {
@@ -225,8 +226,8 @@ public class ContentScheduler {
                 log.warn("任务 {} 失败(可重试), 留在 processing 集合中待启动时重入队", taskId, e);
             } catch (NonRetryableException e) {
                 recordProcessed(route.source(), TaskMetrics.Outcome.NON_RETRYABLE_FAILURE);
-                log.error("任务 {} 失败(不可重试), 标记 complete 以避免阻塞队列", taskId, e);
-                taskQueue.complete(taskId);
+                log.error("任务 {} 失败(不可重试), 移入死信终态 DEAD_LETTER(Story 10.4)", taskId, e);
+                taskQueue.markDeadLetter(taskId, e.getMessage());
             } catch (RuntimeException e) {
                 recordProcessed(route.source(), TaskMetrics.Outcome.UNEXPECTED_FAILURE);
                 throw e;
@@ -264,7 +265,7 @@ public class ContentScheduler {
      * <p><b>Story 4.4 github: 前缀硬编码决策 (Task 4.4):</b> GitHubProcessor 暂不实现
      * 独立的 {@code processor.github.task-id-prefix} 配置 — github: 前缀硬编码于本方法,
      * 与 TwitterProcessor 的配置驱动 prefix 解耦. 触发 github 处理仅通过手动
-     * {@code redis-cli RPUSH task:queue "github:run"} 或测试用例, 不实现自动 enqueue
+     * {@code redis-cli RPUSH task:{queue}:pending "github:run"} 或测试用例, 不实现自动 enqueue
      * (避免与 TwitterProcessor 共享 cron 时段冲突, 留 Epic 5 按需扩展).
      *
      * <p><b>Epic 5+ 扩展点:</b>

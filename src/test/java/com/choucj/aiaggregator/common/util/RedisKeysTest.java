@@ -25,16 +25,67 @@ class RedisKeysTest {
                 .isEqualTo("task:default");
     }
 
+    /**
+     * Story 10.4: 旧任务键访问器已改名 legacy*, 键字面值不变, 仅供迁移器读取.
+     */
     @Test
-    void shouldReturnTaskQueueKeyForStory16() {
-        assertThat(RedisKeys.taskQueue())
+    void shouldReturnLegacyTaskQueueKeyForMigrator() {
+        assertThat(RedisKeys.legacyTaskQueue())
                 .isEqualTo("task:queue");
     }
 
     @Test
-    void shouldReturnTaskProcessingKeyForStory16() {
-        assertThat(RedisKeys.taskProcessing())
+    void shouldReturnLegacyTaskProcessingKeyForMigrator() {
+        assertThat(RedisKeys.legacyTaskProcessing())
                 .isEqualTo("task:processing");
+    }
+
+    /**
+     * Story 10.4: 同槽键族 — 5 个 task 新键 + 迁移账本键共享同一固定 hash tag {@code queue}.
+     */
+    @Test
+    void shouldShareSingleHashTableAcrossAllTaskQueueKeys() {
+        java.util.List<String> taggedKeys = java.util.List.of(
+                RedisKeys.taskPending(),
+                RedisKeys.taskProcessing(),
+                RedisKeys.taskRetry(),
+                RedisKeys.taskDeadLetter(),
+                RedisKeys.taskState("task-1"),
+                RedisKeys.taskLegacyMigrated());
+
+        for (String key : taggedKeys) {
+            int open = key.indexOf('{');
+            int close = key.indexOf('}', open);
+            assertThat(open).as("键 %s 必须含 hash tag 开括号", key).isGreaterThan(0);
+            assertThat(close).as("键 %s 必须含 hash tag 闭括号", key).isGreaterThan(open);
+            assertThat(key.substring(open + 1, close))
+                    .as("键 %s 的 hash tag 必须全等", key)
+                    .isEqualTo("queue");
+        }
+    }
+
+    /**
+     * Story 10.4: 同槽键族字面值契约 + taskState 含 taskId.
+     */
+    @Test
+    void shouldFormatTaskQueueSameSlotKeys() {
+        assertThat(RedisKeys.taskPending()).isEqualTo("task:{queue}:pending");
+        assertThat(RedisKeys.taskProcessing()).isEqualTo("task:{queue}:processing");
+        assertThat(RedisKeys.taskRetry()).isEqualTo("task:{queue}:retry");
+        assertThat(RedisKeys.taskDeadLetter()).isEqualTo("task:{queue}:dead-letter");
+        assertThat(RedisKeys.taskState("twitter:run"))
+                .isEqualTo("task:{queue}:state:twitter:run");
+        assertThat(RedisKeys.taskLegacyMigrated()).isEqualTo("task:{queue}:legacy-migrated");
+    }
+
+    @Test
+    void shouldRejectBlankTaskIdForTaskStateKey() {
+        assertThatThrownBy(() -> RedisKeys.taskState(" "))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("taskId");
+        assertThatThrownBy(() -> RedisKeys.taskState(null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("taskId");
     }
 
     @Test
@@ -45,9 +96,14 @@ class RedisKeysTest {
 
     @Test
     void shouldBeLowercaseColonSeparated() {
-        // 合规元测试: 所有键应仅包含小写字母 / 冒号 / 数字 / 标点(URL)
-        assertThat(RedisKeys.taskQueue()).matches("^[a-z][a-z:]*$");
-        assertThat(RedisKeys.taskProcessing()).matches("^[a-z][a-z:]*$");
+        // 合规元测试: 非 task 键应仅包含小写字母 / 冒号 / 数字 / 连字符 / 标点(URL)
+        assertThat(RedisKeys.cache("rsshub", "a")).matches("^[a-z][a-z0-9:./-]*$");
+        assertThat(RedisKeys.lock("rss:url1")).matches("^[a-z][a-z0-9:./-]*$");
+        assertThat(RedisKeys.articleStatus("tw-123")).matches("^[a-z][a-z0-9:./-]*$");
+        // Story 10.4: task 新键含 hash tag 花括号, 打破旧正则, 单独由
+        // shouldShareSingleHashTableAcrossAllTaskQueueKeys 分类断言 — 此处确认旧键(legacy*)仍合规
+        assertThat(RedisKeys.legacyTaskQueue()).matches("^[a-z][a-z:]*$");
+        assertThat(RedisKeys.legacyTaskProcessing()).matches("^[a-z][a-z:]*$");
     }
 
     /**

@@ -62,8 +62,8 @@ import java.util.regex.Pattern;
  * 不在 per-article 级别 push/complete — ContentScheduler 已在 {@code twitter:run} 级别
  * (外层任务) 做 push/poll/complete 跟踪, 重启时由 {@code TaskRecoveryRunner} 恢复.
  * 早期实现曾尝试 {@code push("twitter:tweet:{id}")} 跟踪单条, 但这些 taskId 从未经过
- * {@code poll()}, 不会进入 {@code task:processing} 集合, {@code complete()} 对它们是 no-op,
- * 结果残留在 {@code task:queue} List 中, 后续被 {@code ContentScheduler} 重新 poll 出来
+ * {@code poll()}, 不会进入 {@code task:{queue}:processing} 集合, {@code complete()} 对它们是 no-op,
+ * 结果残留在 {@code task:{queue}:pending} List 中, 后续被 {@code ContentScheduler} 重新 poll 出来
  * 触发整批重跑 (违反 AC-2 断点恢复意图).
  *
  * <p><b>Spring 责任链顺序保证:</b>
@@ -206,7 +206,7 @@ public class TwitterProcessor {
 
         // Stage 3+4+5: per-article rewrite + publish (AC-3)
         // Patch-1 修复: 不在 per-article 级别 push/complete TaskQueue — ContentScheduler 已在
-        // twitter:run 级别跟踪外层任务; per-article push 会让 twitter:tweet:* 残留 task:queue
+        // twitter:run 级别跟踪外层任务; per-article push 会让 twitter:tweet:* 残留 task:{queue}:pending
         // 触发后续 poll 重新路由到 process() 整批重跑.
         // Patch-2 修复: faultIsolationEnabled=false 时 per-article 异常透传到 ContentScheduler
         // 顶层 (调试用, 由调度器按 Retryable/NonRetryable 分类处理).

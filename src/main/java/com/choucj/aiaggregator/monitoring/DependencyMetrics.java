@@ -125,6 +125,7 @@ public class DependencyMetrics {
         REMOVE("remove"),
         POLL("poll"),
         RECOVERY("recovery"),
+        MIGRATE("migrate"),
         DISCOVER("discover"),
         FETCH("fetch"),
         CREATE_JOB("create_job"),

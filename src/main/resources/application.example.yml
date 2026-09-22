@@ -102,6 +102,15 @@ schedule:
   # 需要排查或补抓时可手动调用 POST /api/tasks/trigger.
   run-on-startup: false
 
+# 一次性任务键迁移入口(Story 10.4) — 旧 task:queue/task:processing 迁入同槽新键族.
+# 仅维护窗口使用: 默认关闭; 开启必须同时经环境变量注入令牌(TASK_MIGRATION_TOKEN),
+# 并携带 X-Migration-Token 请求头调用 POST /api/tasks/migration.
+# 令牌未配置时入口拒绝一切请求. 操作完成后关闭开关并清除令牌.
+# task:
+#   migration:
+#     enabled: true
+#     token: ${TASK_MIGRATION_TOKEN}
+
 # RSSHub 实例配置 — Twitter 推文发现层的数据源入口.
 # 公网 rsshub.app 经常被限流, 建议配置至少 1 个备用实例(自部署 docker / 第三方镜像).
 # 调用方按列表顺序依次尝试, 主失败切备, 全部失败抛 RetryableException.

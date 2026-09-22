@@ -500,6 +500,10 @@ class ContentSchedulerTest {
         verify(taskMetrics).recordProcessed(TaskMetrics.Source.TWITTER, TaskMetrics.Outcome.RETRYABLE_FAILURE);
         verify(taskMetrics).recordProcessed(TaskMetrics.Source.TWITTER, TaskMetrics.Outcome.NON_RETRYABLE_FAILURE);
         verify(taskMetrics).recordProcessed(TaskMetrics.Source.TWITTER, TaskMetrics.Outcome.UNEXPECTED_FAILURE);
+        // Story 10.4: 不可重试失败走死信终态而非误写 COMPLETED; 可重试失败留在 processing 集合
+        verify(taskQueue).markDeadLetter(eq("twitter:non-retryable"), eq("permanent"));
+        verify(taskQueue, never()).complete(eq("twitter:non-retryable"));
+        verify(taskQueue, never()).complete(eq("twitter:retryable"));
     }
 
     @Test

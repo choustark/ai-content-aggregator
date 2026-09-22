@@ -41,26 +41,114 @@ public final class RedisKeys {
     }
 
     /**
-     * Story 1.6: 默认任务队列键(Redis List).
+     * Story 1.6(legacy): 旧默认任务队列键(Redis List), Story 10.4 起仅供 {@code TaskKeyMigrator} 读取.
      *
-     * <p>FIFO 队列,业务侧 {@code push} 入队右端, {@code poll} 从左端取出.
+     * <p>新键族见 {@link #taskPending()} 等同槽键族; 本键与新键 hash tag 不同(Cluster 下不同 slot),
+     * <b>禁止</b>在同一个 Lua 脚本中同时访问旧键与新键(必然 CROSSSLOT).
      *
      * @return {@code "task:queue"}
+     * @deprecated 仅 TaskKeyMigrator 可用, 10.5 后随旧键删除一并移除.
      */
-    public static String taskQueue() {
+    @Deprecated(since = "10.4", forRemoval = true)
+    public static String legacyTaskQueue() {
         return "task:queue";
     }
 
     /**
-     * Story 1.6: 正在处理的任务集合键(Redis Set).
+     * Story 1.6(legacy): 旧正在处理的任务集合键(Redis Set), Story 10.4 起仅供 {@code TaskKeyMigrator} 读取.
      *
-     * <p>断点恢复依据: 进程崩溃后启动时 {@link com.choucj.aiaggregator.task.queue.TaskRecoveryRunner}
-     * 检查此集合,把任务重新入队到 {@link #taskQueue()}.
+     * <p>断点恢复已改由新键族 {@link #taskProcessing()} 承担.
      *
      * @return {@code "task:processing"}
+     * @deprecated 仅 TaskKeyMigrator 可用, 10.5 后随旧键删除一并移除.
+     */
+    @Deprecated(since = "10.4", forRemoval = true)
+    public static String legacyTaskProcessing() {
+        return "task:processing";
+    }
+
+    /**
+     * Story 10.4: 任务队列同槽键族固定 hash tag 前缀.
+     *
+     * <p>Redis Cluster 按<b>键中第一个 {@code {} 到其后第一个 {@code }}</b>之间的子串计算 slot
+     * (官方 cluster-spec hash tag 规则). 全部任务键共享 {@code {queue}} tag → 同一 slot,
+     * Lua 多键操作不会 {@code CROSSSLOT}. <b>同节点不够, 必须同 slot.</b>
+     */
+    private static final String TASK_QUEUE_TAGGED_PREFIX = "task:{queue}:";
+
+    /**
+     * Story 10.4: 待处理任务队列键(Redis List, FIFO).
+     *
+     * <p>业务侧 {@code push} 入队右端, {@code poll} 经 Lua CLAIM 脚本从左端原子领取.
+     *
+     * @return {@code "task:{queue}:pending"}
+     */
+    public static String taskPending() {
+        return TASK_QUEUE_TAGGED_PREFIX + "pending";
+    }
+
+    /**
+     * Story 10.4: 正在处理的任务集合键(Redis Set).
+     *
+     * <p>断点恢复依据: 进程崩溃后启动时由 {@link com.choucj.aiaggregator.task.queue.TaskRecoveryRunner}
+     * 经 {@code TaskQueue.recoverProcessingTasks()} 原子重排回 {@link #taskPending()}.
+     *
+     * @return {@code "task:{queue}:processing"}
      */
     public static String taskProcessing() {
-        return "task:processing";
+        return TASK_QUEUE_TAGGED_PREFIX + "processing";
+    }
+
+    /**
+     * Story 10.4: 重试调度键(Redis ZSET, 按 dueAt 排序).
+     *
+     * <p>本 Story 只建键占位, 重试调度语义由 Story 10.5 实现.
+     *
+     * @return {@code "task:{queue}:retry"}
+     */
+    public static String taskRetry() {
+        return TASK_QUEUE_TAGGED_PREFIX + "retry";
+    }
+
+    /**
+     * Story 10.4: 死信任务集合键(Redis Set).
+     *
+     * <p>只存 taskId, 审计详情(状态/原因/时间)放在对应 {@link #taskState(String)} Hash, 供 10.5 扩展.
+     *
+     * @return {@code "task:{queue}:dead-letter"}
+     */
+    public static String taskDeadLetter() {
+        return TASK_QUEUE_TAGGED_PREFIX + "dead-letter";
+    }
+
+    /**
+     * Story 10.4: 单任务状态记录键(Redis Hash).
+     *
+     * <p>字段(AD-9, 本 Story 至少写 {@code taskId/status/updatedAt}): {@code taskId/status/attempt/
+     * dueAt/lastErrorCode/lastErrorSummary/updatedAt/deadLetteredAt}; 状态机
+     * {@code QUEUED -> PROCESSING -> RETRY_SCHEDULED -> COMPLETED | DEAD_LETTER}.
+     * 状态记录不设 TTL(过期策略由后续设计决定). 动态键但共享 {@code {queue}} tag, 与队列键同 slot.
+     *
+     * @param taskId 任务 ID, 不为 null/blank
+     * @return {@code "task:{queue}:state:<taskId>"}
+     */
+    public static String taskState(String taskId) {
+        if (taskId == null || taskId.isBlank()) {
+            throw new IllegalArgumentException("taskId must not be blank");
+        }
+        return TASK_QUEUE_TAGGED_PREFIX + "state:" + taskId;
+    }
+
+    /**
+     * Story 10.4: 一次性迁移幂等账本键(Redis Set).
+     *
+     * <p>只记录已迁移的旧 taskId; 正常队列路径<b>不读</b>此键. 旧键确认删除前不得清空该账本
+     * (否则任务消费完成后重跑迁移会把已完成的任务复活入队).
+     *
+     * @return {@code "task:{queue}:legacy-migrated"}
+     */
+    public static String taskLegacyMigrated() {
+        return TASK_QUEUE_TAGGED_PREFIX + "legacy-migrated";
     }
 
     /**
