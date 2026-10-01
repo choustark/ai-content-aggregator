@@ -39,6 +39,12 @@ import java.util.function.LongSupplier;
  *       {@code outcome=scheduled|dispatched|exhausted|dead_lettered|replayed}（Story 10.5）。
  *       记录点：{@code ContentScheduler} 可重试失败推进边界、
  *       {@code RetryDispatchScheduler} 到期重投边界、{@code TaskReplayController} 补跑边界。</li>
+ *   <li>{@code aiaggregator.task.idempotent}（Prometheus:
+ *       {@code aiaggregator_task_idempotent_total}），Counter/跳过次数，唯一标签
+ *       {@code kind=archive|draft}（Story 10.6）。记录点：归档侧快照幂等命中跳过
+ *       （{@code MarkdownArchiver}）与草稿侧 {@code DRAFT_CREATED} 幂等命中跳过
+ *       （{@code ArticlePublicationWorkflow}）。taskId/articleId/correlationId 只进日志，
+ *       不进标签（低基数纪律）。</li>
  *   <li>{@code aiaggregator.schedule.last.success}（Prometheus:
  *       {@code aiaggregator_schedule_last_success_seconds}），Gauge/Unix 秒，唯一标签
  *       {@code operation=content_fetch|batch_publish}；进程启动后尚未成功执行时为 NaN，
@@ -74,6 +80,7 @@ public class TaskMetrics {
     private final Map<Operation, AtomicReference<Double>> lastSuccessEpochSeconds = new EnumMap<>(Operation.class);
     private final Map<BatchArticleOutcome, Counter> batchArticleCounters = new EnumMap<>(BatchArticleOutcome.class);
     private final Map<RetryMetricOutcome, Counter> retryCounters = new EnumMap<>(RetryMetricOutcome.class);
+    private final Map<IdempotentKind, Counter> idempotentCounters = new EnumMap<>(IdempotentKind.class);
 
     @Autowired
     public TaskMetrics(TaskQueue taskQueue, MeterRegistry registry) {
@@ -88,6 +95,7 @@ public class TaskMetrics {
         registerScheduleGauges(registry);
         registerBatchArticleCounters(registry);
         registerRetryCounters(registry);
+        registerIdempotentCounters(registry);
     }
 
     /** 记录一个队列任务在调度器边界的终态；调用方不得在 processor 或 queue 内重复记录。 */
@@ -118,6 +126,17 @@ public class TaskMetrics {
     /** 同 {@link #recordRetry(RetryMetricOutcome)}, 供批量推进(如到期重投一批)按数量累计。 */
     public void recordRetry(RetryMetricOutcome outcome, long amount) {
         retryCounters.get(outcome).increment(Math.max(amount, 0L));
+    }
+
+    /**
+     * 记录一次幂等命中跳过(Story 10.6) — 归档或草稿重复投递命中持久化业务标识
+     * (归档快照 / {@code DRAFT_CREATED} + mediaId)而未产生副作用。
+     *
+     * <p>调用方仅允许传入 {@link IdempotentKind} 封闭枚举——articleId/taskId 只进审计日志,
+     * 不得进入标签(低基数纪律); 调用方须自行 try/catch 隔离(观测是旁路, 不得影响发布结果)。
+     */
+    public void recordIdempotent(IdempotentKind kind) {
+        idempotentCounters.get(kind).increment();
     }
 
     private void registerQueueGauges(MeterRegistry registry) {
@@ -191,6 +210,15 @@ public class TaskMetrics {
             retryCounters.put(outcome, Counter.builder("aiaggregator.task.retry")
                     .description("Delayed-retry/dead-letter/replay state-machine transitions")
                     .tag("outcome", outcome.tagValue())
+                    .register(registry));
+        }
+    }
+
+    private void registerIdempotentCounters(MeterRegistry registry) {
+        for (IdempotentKind kind : IdempotentKind.values()) {
+            idempotentCounters.put(kind, Counter.builder("aiaggregator.task.idempotent")
+                    .description("Idempotent skips backed by persisted business identity (Story 10.6)")
+                    .tag("kind", kind.tagValue())
                     .register(registry));
         }
     }
@@ -313,6 +341,30 @@ public class TaskMetrics {
         }
 
         String tagValue() {
+            return tagValue;
+        }
+    }
+
+    /**
+     * 幂等命中跳过分类(Story 10.6) — 封闭枚举, 防止 articleId/taskId 等高基数标签入库。
+     *
+     * <ul>
+     *   <li>{@code archive} — 归档重复投递命中归档快照(跨日/同日)而未追加 Markdown</li>
+     *   <li>{@code draft} — 草稿重复投递命中 {@code DRAFT_CREATED + wechatDraftMediaId}
+     *       而未调用微信 {@code addDraft}</li>
+     * </ul>
+     */
+    public enum IdempotentKind {
+        ARCHIVE("archive"),
+        DRAFT("draft");
+
+        private final String tagValue;
+
+        IdempotentKind(String tagValue) {
+            this.tagValue = tagValue;
+        }
+
+        public String tagValue() {
             return tagValue;
         }
     }

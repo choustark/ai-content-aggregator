@@ -195,14 +195,52 @@ class TaskMetricsTest {
         assertMeterIdsUseClosedLowCardinalityContract();
     }
 
+    // ============ Story 10.6: 幂等命中跳过指标 ============
+
+    @Test
+    void should_count_each_idempotent_kind_once_when_recorded() {
+        for (TaskMetrics.IdempotentKind kind : TaskMetrics.IdempotentKind.values()) {
+            metrics.recordIdempotent(kind);
+            assertThat(registry.get("aiaggregator.task.idempotent")
+                    .tag("kind", kind.tagValue()).counter().count()).isEqualTo(1);
+        }
+
+        assertMeterIdsUseClosedLowCardinalityContract();
+    }
+
+    @Test
+    void should_accumulate_idempotent_skips_per_kind() {
+        metrics.recordIdempotent(TaskMetrics.IdempotentKind.ARCHIVE);
+        metrics.recordIdempotent(TaskMetrics.IdempotentKind.ARCHIVE);
+        metrics.recordIdempotent(TaskMetrics.IdempotentKind.DRAFT);
+
+        assertThat(registry.get("aiaggregator.task.idempotent")
+                .tag("kind", "archive").counter().count()).isEqualTo(2);
+        assertThat(registry.get("aiaggregator.task.idempotent")
+                .tag("kind", "draft").counter().count()).isEqualTo(1);
+    }
+
+    @Test
+    void should_not_leak_identity_values_into_idempotent_meter_ids() {
+        // 幂等命中只允许 kind 封闭标签; articleId/taskId/correlationId 只进日志不入 meter
+        metrics.recordIdempotent(TaskMetrics.IdempotentKind.ARCHIVE);
+
+        String exportedIds = registry.getMeters().stream()
+                .map(meter -> meter.getId().toString())
+                .reduce("", (left, right) -> left + "\n" + right);
+        assertThat(exportedIds).doesNotContain("tw-123", "task-", "correlation");
+        assertMeterIdsUseClosedLowCardinalityContract();
+    }
+
     private void assertMeterIdsUseClosedLowCardinalityContract() {
-        Set<String> allowedKeys = Set.of("state", "source", "outcome", "operation");
+        Set<String> allowedKeys = Set.of("state", "source", "outcome", "operation", "kind");
         Set<String> allowedValues = Set.of(
                 "pending", "processing", "retry", "dead-letter",
                 "twitter", "github", "unknown",
                 "success", "failure", "retryable_failure", "non_retryable_failure", "unexpected_failure", "skipped",
                 "content_fetch", "batch_publish",
-                "scheduled", "dispatched", "exhausted", "dead_lettered", "replayed");
+                "scheduled", "dispatched", "exhausted", "dead_lettered", "replayed",
+                "archive", "draft");
         registry.getMeters().forEach(meter -> {
             assertThat(meter.getId().getName()).startsWith("aiaggregator.");
             assertThat(meter.getId().getTags())

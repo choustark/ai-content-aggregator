@@ -5,6 +5,7 @@ import com.choucj.aiaggregator.common.model.Article;
 import com.choucj.aiaggregator.common.model.ContentGenerationMode;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.common.util.TextTruncateUtil;
+import com.choucj.aiaggregator.monitoring.TaskMetrics;
 import com.choucj.aiaggregator.publish.ContentPublisher;
 import com.choucj.aiaggregator.publish.status.ArticleStatus;
 import com.choucj.aiaggregator.publish.storage.config.ArchiverProperties;
@@ -26,6 +27,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * Story 2.5: Markdown 归档器 — 文件系统侧持久化实现.
@@ -41,7 +43,12 @@ import java.util.Objects;
  *       重试无意义; 临时锁场景在单线程调度下不发生 (Story 1.6 ContentScheduler 默认单线程).
  *       见 Story 1.4 异常分类法</li>
  *   <li><b>幂等性实现: {@code <!-- article-id: {id} -->} HTML 注释</b> — 每个文章块首行加隐藏注释,
- *       {@link #isAlreadyArchived} 读取当日文件检测重复. Pipeline 2.6 重试场景下避免重复写入</li>
+ *       {@link #isAlreadyArchived} 读取当日文件检测重复. Pipeline 2.6 重试场景下避免重复写入.
+ *       <b>Story 10.6 起升级为第二道防线</b>: 第一道防线改为 {@link ArticleArchiveRepository}
+ *       归档快照按 {@code Article.id} 查重 — 覆盖同日 marker 检测不到的<b>跨日重复投递</b>
+ *       (快照存在 ⇒ 已归档, 不追加新日期文件); 快照命中/当日 marker 命中的 skip 分支均补落缺失快照,
+ *       快照读取失败 fail-closed 抛 {@link NonRetryableException}(由上游 L2.5 故障隔离捕获),
+ *       绝不 fail-open 追加</li>
  *   <li><b>路径解析用 {@code createdAt} 而非 {@code LocalDate.now()}</b> — 保证 Pipeline 跨日重试时
  *       归档到原日期, 不污染新日期文件</li>
  *   <li><b>AR8 合规自动追加</b> — {@link Article#isAiGenerated()} 默认 {@code true} (via
@@ -85,6 +92,7 @@ public class MarkdownArchiver implements ContentPublisher {
 
     private final ArchiverProperties properties;
     private final ArticleArchiveRepository articleArchiveRepository;
+    private final Optional<TaskMetrics> taskMetricsOptional;
 
     /** 缓存日期格式器 (从 properties.datePattern 构造, @PostConstruct 初始化防重复创建开销). */
     private DateTimeFormatter fileNameDateFormatter;
@@ -93,10 +101,17 @@ public class MarkdownArchiver implements ContentPublisher {
         this(properties, null);
     }
 
-    @Autowired
     public MarkdownArchiver(ArchiverProperties properties, ArticleArchiveRepository articleArchiveRepository) {
+        this(properties, articleArchiveRepository, Optional.empty());
+    }
+
+    @Autowired
+    public MarkdownArchiver(ArchiverProperties properties,
+                            ArticleArchiveRepository articleArchiveRepository,
+                            Optional<TaskMetrics> taskMetricsOptional) {
         this.properties = properties;
         this.articleArchiveRepository = articleArchiveRepository;
+        this.taskMetricsOptional = taskMetricsOptional;
     }
 
     @PostConstruct
@@ -117,11 +132,25 @@ public class MarkdownArchiver implements ContentPublisher {
         Objects.requireNonNull(article.getId(), "article.id 不能为 null");
         Objects.requireNonNull(article.getCreatedAt(), "article.createdAt 不能为 null");
 
+        // Story 10.6 跨日幂等第一道防线: 归档快照按 Article.id 查重 — 快照存在 ⇒ 已归档发生过,
+        // 不追加新日期文件. findByArticleId 读取失败抛 NonRetryableException(fail-closed,
+        // 由上游 L2.5 故障隔离捕获计 failure), 绝不 fail-open 追加造成重复内容.
+        Optional<ArchivedArticle> archivedSnapshot = findSnapshotForIdempotency(article.getId());
+        if (archivedSnapshot.isPresent()) {
+            ArchivedArticle snapshot = archivedSnapshot.get();
+            log.warn("跨日/重复投递命中归档快照, 跳过重复归档: articleId={}, snapshotStatus={}, archiveFile={}",
+                    article.getId(), snapshot.getStatus(), snapshot.getArchiveFile());
+            recordIdempotentSkipSafely(article.getId());
+            return;
+        }
+
         Path archiveFile = resolveArchiveFile(article.getCreatedAt());
         ensureDirectoryExists(archiveFile.getParent(), article.getId());
 
         if (isAlreadyArchived(archiveFile, article.getId())) {
             log.warn("文章已归档, 跳过: articleId={}, 文件={}", article.getId(), archiveFile);
+            backfillMissingSnapshot(article, archiveFile);
+            recordIdempotentSkipSafely(article.getId());
             return;
         }
 
@@ -134,6 +163,54 @@ public class MarkdownArchiver implements ContentPublisher {
         log.info("归档成功: articleId={}, 标题={}, 文件={}, 大小={}bytes",
                 article.getId(), truncateForLog(article.getTitle(), LOG_TITLE_MAX_LENGTH),
                 archiveFile, bytes);
+    }
+
+    /**
+     * Story 10.6 幂等查重入口 — 按 {@code Article.id} 读取归档快照
+     * (复用 {@link ArticleArchiveRepository#findByArticleId}, 不新增第二权威存储).
+     *
+     * <p><b>fail-closed 契约</b>: 快照读取失败(IO/JSON 损坏)时 {@code findByArticleId}
+     * 抛 {@link NonRetryableException} 并原样传播 — 宁可让该文章进入上游 L2.5 故障隔离
+     * 计 failure, 也不得在无法判断是否已归档时盲目追加. {@code articleArchiveRepository}
+     * 为 null 仅出现在测试/旧构造器路径, 此时退回当日 marker 单道防线(既有行为).
+     */
+    private Optional<ArchivedArticle> findSnapshotForIdempotency(String articleId) {
+        if (articleArchiveRepository == null) {
+            return Optional.empty();
+        }
+        return articleArchiveRepository.findByArticleId(articleId);
+    }
+
+    /**
+     * Story 10.6: 当日 marker 命中但快照缺失时的补落 — 复用
+     * {@link ArticleArchiveRepository#saveSnapshot} merge 语义按 {@code Article.id} 重建快照.
+     *
+     * <p>补落失败(写快照 IO 异常)抛 {@link NonRetryableException} 原样传播, 按归档失败
+     * 经 L2.5 隔离计 failure — 不静默吞掉, 否则每次重复投递都会重复补落.
+     */
+    private void backfillMissingSnapshot(Article article, Path archiveFile) {
+        if (articleArchiveRepository == null) {
+            return;
+        }
+        articleArchiveRepository.saveSnapshot(article, ArticleStatus.CREATED, article.getCreatedAt(), archiveFile);
+        log.info("已补落缺失归档快照: articleId={}, archiveFile={}", article.getId(), archiveFile);
+    }
+
+    /**
+     * 幂等 skip 指标隔离记录(Story 10.6, F-R3 safe-wrapper 模式) —
+     * {@code aiaggregator.task.idempotent{kind=archive}}; 指标组件故障只降级告警,
+     * 不改变 skip 结果(观测是旁路).
+     */
+    private void recordIdempotentSkipSafely(String articleId) {
+        if (taskMetricsOptional.isEmpty()) {
+            return;
+        }
+        try {
+            taskMetricsOptional.get().recordIdempotent(TaskMetrics.IdempotentKind.ARCHIVE);
+        } catch (RuntimeException e) {
+            log.warn("幂等跳过指标记录失败(已降级, 不影响归档结果): articleId={}, reason={}",
+                    articleId, e.getMessage());
+        }
     }
 
     /**

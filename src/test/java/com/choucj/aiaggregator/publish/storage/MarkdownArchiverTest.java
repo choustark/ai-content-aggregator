@@ -3,7 +3,10 @@ package com.choucj.aiaggregator.publish.storage;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.model.Article;
 import com.choucj.aiaggregator.common.model.ContentGenerationMode;
+import com.choucj.aiaggregator.monitoring.TaskMetrics;
+import com.choucj.aiaggregator.publish.status.ArticleStatus;
 import com.choucj.aiaggregator.publish.storage.config.ArchiverProperties;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -15,9 +18,15 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
+import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatCode;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 /**
  * Story 2.5 {@link MarkdownArchiver} 单测.
@@ -26,6 +35,10 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * 自动创建目录 / 幂等查重 / 配置开关 / 日志规范 (W11).
  *
  * <p>使用 {@link TempDir} 注入临时目录, 每 test 独立目录避免相互污染.
+ *
+ * <p>Story 10.6 增量: 跨日幂等(快照命中不追加新日期文件)/快照缺失补落/快照读取失败
+ * fail-closed 不追加/幂等指标旁路化. 注意: 经 {@link ArticleArchiveRepository} 的用例
+ * 必须使用 {@code tw-}/{@code gh-} 前缀 articleId(仓库侧 {@code validateArticleId} 校验).
  */
 @ExtendWith(OutputCaptureExtension.class)
 class MarkdownArchiverTest {
@@ -532,5 +545,139 @@ class MarkdownArchiverTest {
                 .generationMode(ContentGenerationMode.PRESERVE_ORIGINAL)
                 .mediaAuditMarkdown(mediaAuditMarkdown)
                 .build();
+    }
+
+    // ===== Story 10.6: 跨日幂等(快照权威判定)/补落/fail-closed/指标旁路 =====
+
+    /** 带真实 {@link ArticleArchiveRepository} 的归档器(共享同 baseDirectory). */
+    private record RepoBackedArchiver(MarkdownArchiver archiver, ArticleArchiveRepository repository) {
+    }
+
+    private RepoBackedArchiver repoBackedArchiver() {
+        ArticleArchiveRepository repository = new ArticleArchiveRepository(
+                properties, new ObjectMapper().findAndRegisterModules());
+        MarkdownArchiver archiver = new MarkdownArchiver(properties, repository);
+        archiver.initFormatter();
+        return new RepoBackedArchiver(archiver, repository);
+    }
+
+    private Path dayFile(String date) {
+        return tempDir.resolve("archive").resolve(date + ".md");
+    }
+
+    private Path snapshotFile(String articleId) {
+        return tempDir.resolve("archive").resolve("articles").resolve(articleId + ".json");
+    }
+
+    private int markerCount(String articleId) throws IOException {
+        return readAll(dayFile("2026-06-28"))
+                .split("<!-- article-id: " + articleId + " -->").length - 1;
+    }
+
+    @Test
+    void should_skip_cross_day_duplicate_and_not_append_new_date_file(CapturedOutput output) throws IOException {
+        RepoBackedArchiver backed = repoBackedArchiver();
+        backed.archiver().publish(sampleArticle("tw-dup-1", "首日文章",
+                LocalDateTime.of(2026, 6, 28, 10, 0)));
+        assertThat(snapshotFile("tw-dup-1")).exists();
+
+        // 次日重复投递同一 articleId — 快照命中, 不得追加新日期文件
+        backed.archiver().publish(sampleArticle("tw-dup-1", "首日文章",
+                LocalDateTime.of(2026, 6, 29, 10, 0)));
+
+        assertThat(dayFile("2026-06-29")).doesNotExist();
+        assertThat(markerCount("tw-dup-1")).isEqualTo(1);
+        // 快照未被次日投递改写(archiveFile 仍指向首日文件)
+        ArchivedArticle snapshot = backed.repository().findByArticleId("tw-dup-1").orElseThrow();
+        assertThat(snapshot.getArchiveFile()).endsWith("2026-06-28.md");
+        // 结构化审计日志含 articleId
+        assertThat(output.getOut()).contains("跨日/重复投递命中归档快照");
+        assertThat(output.getOut()).contains("tw-dup-1");
+    }
+
+    @Test
+    void should_skip_same_day_duplicate_via_snapshot_without_append(CapturedOutput output) throws IOException {
+        RepoBackedArchiver backed = repoBackedArchiver();
+        Article article = sampleArticle("tw-dup-2", "同日重复",
+                LocalDateTime.of(2026, 6, 28, 10, 0));
+
+        backed.archiver().publish(article);
+        backed.archiver().publish(article);
+
+        assertThat(markerCount("tw-dup-2")).isEqualTo(1);
+        assertThat(output.getOut()).contains("跨日/重复投递命中归档快照");
+    }
+
+    @Test
+    void should_rebuild_missing_snapshot_when_same_day_already_archived(CapturedOutput output) throws IOException {
+        RepoBackedArchiver backed = repoBackedArchiver();
+        TaskMetrics metrics = mock(TaskMetrics.class);
+        MarkdownArchiver archiver = new MarkdownArchiver(properties, backed.repository(),
+                Optional.of(metrics));
+        archiver.initFormatter();
+        Article article = sampleArticle("tw-dup-3", "快照被删",
+                LocalDateTime.of(2026, 6, 28, 10, 0));
+        archiver.publish(article);
+        Files.delete(snapshotFile("tw-dup-3"));
+
+        // 快照缺失但当日 marker 命中 — 跳过追加 + saveSnapshot 补落(补落路径同样计幂等指标)
+        archiver.publish(article);
+
+        assertThat(markerCount("tw-dup-3")).isEqualTo(1);
+        ArchivedArticle rebuilt = backed.repository().findByArticleId("tw-dup-3").orElseThrow();
+        assertThat(rebuilt.getStatus()).isEqualTo(ArticleStatus.CREATED);
+        assertThat(rebuilt.getArchiveFile()).endsWith("2026-06-28.md");
+        assertThat(output.getOut()).contains("已补落缺失归档快照");
+        verify(metrics).recordIdempotent(TaskMetrics.IdempotentKind.ARCHIVE);
+    }
+
+    @Test
+    void should_fail_closed_and_not_append_when_snapshot_read_fails() throws IOException {
+        RepoBackedArchiver backed = repoBackedArchiver();
+        Files.createDirectories(snapshotFile("tw-dup-4").getParent());
+        Files.writeString(snapshotFile("tw-dup-4"), "{corrupted json");
+
+        // fail-closed: 快照读取失败抛 NonRetryableException(fail-closed, 由 L2.5 隔离计 failure),
+        // 绝不 fail-open 追加
+        assertThatThrownBy(() -> backed.archiver().publish(sampleArticle("tw-dup-4", "损坏快照",
+                LocalDateTime.of(2026, 6, 28, 10, 0))))
+                .isInstanceOf(NonRetryableException.class)
+                .hasMessageContaining("读取文章归档快照失败");
+        assertThat(dayFile("2026-06-28")).doesNotExist();
+    }
+
+    @Test
+    void should_record_idempotent_metric_on_snapshot_hit_skip() {
+        RepoBackedArchiver backed = repoBackedArchiver();
+        TaskMetrics metrics = mock(TaskMetrics.class);
+        MarkdownArchiver archiver = new MarkdownArchiver(properties, backed.repository(),
+                Optional.of(metrics));
+        archiver.initFormatter();
+        archiver.publish(sampleArticle("tw-dup-5", "指标验证",
+                LocalDateTime.of(2026, 6, 28, 10, 0)));
+
+        archiver.publish(sampleArticle("tw-dup-5", "指标验证",
+                LocalDateTime.of(2026, 6, 29, 10, 0)));
+
+        verify(metrics).recordIdempotent(TaskMetrics.IdempotentKind.ARCHIVE);
+    }
+
+    @Test
+    void should_keep_skip_result_when_metric_recording_fails(CapturedOutput output) {
+        RepoBackedArchiver backed = repoBackedArchiver();
+        TaskMetrics metrics = mock(TaskMetrics.class);
+        doThrow(new IllegalStateException("registry down")).when(metrics)
+                .recordIdempotent(any());
+        MarkdownArchiver archiver = new MarkdownArchiver(properties, backed.repository(),
+                Optional.of(metrics));
+        archiver.initFormatter();
+        archiver.publish(sampleArticle("tw-dup-6", "指标故障",
+                LocalDateTime.of(2026, 6, 28, 10, 0)));
+
+        // 指标旁路化: 观测故障只降级告警, 不改变幂等 skip 结果
+        assertThatCode(() -> archiver.publish(sampleArticle("tw-dup-6", "指标故障",
+                LocalDateTime.of(2026, 6, 29, 10, 0)))).doesNotThrowAnyException();
+        assertThat(dayFile("2026-06-29")).doesNotExist();
+        assertThat(output.getOut()).contains("幂等跳过指标记录失败");
     }
 }

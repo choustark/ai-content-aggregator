@@ -2,6 +2,8 @@ package com.choucj.aiaggregator.publish.wechat;
 
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.model.Article;
+import com.choucj.aiaggregator.common.model.ErrorCode;
+import com.choucj.aiaggregator.monitoring.TaskMetrics;
 import com.choucj.aiaggregator.publish.status.ArticleStatus;
 import com.choucj.aiaggregator.publish.status.ArticleStatusService;
 import com.choucj.aiaggregator.publish.storage.ArchivedArticle;
@@ -12,6 +14,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -22,11 +26,14 @@ import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-@ExtendWith(MockitoExtension.class)
+@ExtendWith({MockitoExtension.class, OutputCaptureExtension.class})
 class ArticlePublicationWorkflowTest {
 
     @Mock
@@ -35,6 +42,8 @@ class ArticlePublicationWorkflowTest {
     private ArticleArchiveRepository archiveRepository;
     @Mock
     private ArticleStatusService articleStatusService;
+    @Mock
+    private TaskMetrics taskMetrics;
 
     private PublishingProperties publishingProperties;
     private ArticlePublicationWorkflow workflow;
@@ -45,7 +54,13 @@ class ArticlePublicationWorkflowTest {
     void setUp() {
         publishingProperties = new PublishingProperties();
         workflow = new ArticlePublicationWorkflow(weChatPublisher, archiveRepository,
-                articleStatusService, publishingProperties, clock);
+                articleStatusService, publishingProperties, Optional.empty(), clock);
+    }
+
+    /** 注入指标 mock 的工作流(Story 10.6 幂等指标用例). */
+    private ArticlePublicationWorkflow workflowWithMetrics() {
+        return new ArticlePublicationWorkflow(weChatPublisher, archiveRepository,
+                articleStatusService, publishingProperties, Optional.of(taskMetrics), clock);
     }
 
     @Test
@@ -83,6 +98,8 @@ class ArticlePublicationWorkflowTest {
                 .thenReturn(List.of(
                         snapshot(success, ArticleStatus.PENDING_PUBLISH),
                         snapshot(failed, ArticleStatus.PENDING_PUBLISH)));
+        when(archiveRepository.findByArticleId("tw-ok")).thenReturn(Optional.empty());
+        when(archiveRepository.findByArticleId("tw-fail")).thenReturn(Optional.empty());
         when(weChatPublisher.publishDraft(success)).thenReturn("media-ok");
         doThrow(new IllegalStateException("wechat down")).when(weChatPublisher).publishDraft(failed);
 
@@ -100,11 +117,126 @@ class ArticlePublicationWorkflowTest {
     @Test
     void shouldRejectAlreadyDraftCreatedArticleOnManualPublish() {
         when(archiveRepository.findByArticleId("tw-123"))
-                .thenReturn(Optional.of(snapshot(article("tw-123"), ArticleStatus.DRAFT_CREATED)));
+                .thenReturn(Optional.of(draftCreatedSnapshot(article("tw-123"), "media-old")));
 
         assertThatThrownBy(() -> workflow.publishNow("tw-123"))
                 .isInstanceOf(NonRetryableException.class)
                 .hasMessageContaining("当前状态不允许发布");
+        // 人工入口既有防护: DRAFT_CREATED 拒绝, 不触 addDraft(Story 10.6 保持不变)
+        verify(weChatPublisher, never()).publishDraft(any());
+    }
+
+    // ============ Story 10.6: 草稿跨日/重复投递幂等(实时/批量/人工三入口) ============
+
+    @Test
+    void should_skip_draft_creation_when_realtime_snapshot_already_draft_created(CapturedOutput output) {
+        Article article = article("tw-realtime-dup");
+        when(archiveRepository.findByArticleId("tw-realtime-dup"))
+                .thenReturn(Optional.of(draftCreatedSnapshot(article, "media-existing")));
+
+        String mediaId = workflow.publishRealtime(article);
+
+        assertThat(mediaId).isEqualTo("media-existing");
+        // 幂等命中: 不重写快照、不进 PROCESSING、不触 addDraft
+        verify(archiveRepository, never()).saveSnapshot(any(), any(), any(), any());
+        verify(archiveRepository, never()).markStatus(anyString(), any());
+        verify(weChatPublisher, never()).publishDraft(any());
+        verify(articleStatusService, never()).markDraftCreated(anyString());
+        // 审计字段: articleId + 既有 mediaId 均落日志(correlationId 由 MDC 携带)
+        assertThat(output.getOut()).contains("跳过重复 addDraft");
+        assertThat(output.getOut()).contains("tw-realtime-dup");
+        assertThat(output.getOut()).contains("media-existing");
+    }
+
+    @Test
+    void should_skip_draft_creation_when_due_article_snapshot_already_draft_created() {
+        Article article = article("tw-batch-dup");
+        when(archiveRepository.findDueForPublish(LocalDateTime.of(2026, 9, 1, 20, 0)))
+                .thenReturn(List.of(snapshot(article, ArticleStatus.PENDING_PUBLISH)));
+        // 批量入口竞态形态: 扫描时 PENDING_PUBLISH, 处理前快照已推进为 DRAFT_CREATED(如并发人工发布)
+        when(archiveRepository.findByArticleId("tw-batch-dup"))
+                .thenReturn(Optional.of(draftCreatedSnapshot(article, "media-batch")));
+
+        ArticlePublicationWorkflow.PublishDueResult result = workflow.publishDueArticles();
+
+        assertThat(result.success()).isEqualTo(1);
+        assertThat(result.failure()).isZero();
+        verify(weChatPublisher, never()).publishDraft(any());
+        verify(archiveRepository, never()).markStatus(anyString(), any());
+    }
+
+    @Test
+    void should_create_draft_normally_when_snapshot_has_no_prior_draft() {
+        Article article = article("tw-first-draft");
+        when(archiveRepository.findByArticleId("tw-first-draft")).thenReturn(Optional.empty());
+        when(weChatPublisher.publishDraft(article)).thenReturn("media-new");
+
+        String mediaId = workflow.publishRealtime(article);
+
+        assertThat(mediaId).isEqualTo("media-new");
+        verify(archiveRepository).saveSnapshot(article, ArticleStatus.PENDING_PUBLISH,
+                LocalDateTime.of(2026, 9, 1, 20, 0), null);
+        verify(archiveRepository).markStatus("tw-first-draft", ArticleStatus.PROCESSING);
+        verify(archiveRepository).markDraftCreated("tw-first-draft", "media-new",
+                LocalDateTime.of(2026, 9, 1, 20, 0));
+        verify(articleStatusService).markDraftCreated("tw-first-draft");
+    }
+
+    // fail-closed: 快照读取失败时异常原样传播, 绝不在幂等状态未知时冒险创建草稿
+    // (仿 MarkdownArchiverTest.should_fail_closed_and_not_append_when_snapshot_read_fails)
+
+    @Test
+    void should_propagate_snapshot_read_failure_and_never_create_draft_on_realtime_publish() {
+        Article article = article("tw-read-fail");
+        when(archiveRepository.findByArticleId("tw-read-fail"))
+                .thenThrow(new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR, "读取文章归档快照失败"));
+
+        assertThatThrownBy(() -> workflow.publishRealtime(article))
+                .isInstanceOf(NonRetryableException.class)
+                .hasMessageContaining("读取文章归档快照失败");
+        verify(weChatPublisher, never()).publishDraft(any());
+        verify(archiveRepository, never()).saveSnapshot(any(), any(), any(), any());
+    }
+
+    @Test
+    void should_count_snapshot_read_failure_as_batch_failure_and_never_create_draft() {
+        Article article = article("tw-batch-read-fail");
+        when(archiveRepository.findDueForPublish(LocalDateTime.of(2026, 9, 1, 20, 0)))
+                .thenReturn(List.of(snapshot(article, ArticleStatus.PENDING_PUBLISH)));
+        when(archiveRepository.findByArticleId("tw-batch-read-fail"))
+                .thenThrow(new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR, "读取文章归档快照失败"));
+
+        ArticlePublicationWorkflow.PublishDueResult result = workflow.publishDueArticles();
+
+        assertThat(result.success()).isZero();
+        assertThat(result.failure()).isEqualTo(1);
+        verify(weChatPublisher, never()).publishDraft(any());
+    }
+
+    @Test
+    void should_record_idempotent_metric_on_draft_skip() {
+        Article article = article("tw-metric-dup");
+        when(archiveRepository.findByArticleId("tw-metric-dup"))
+                .thenReturn(Optional.of(draftCreatedSnapshot(article, "media-metric")));
+
+        workflowWithMetrics().publishRealtime(article);
+
+        verify(taskMetrics).recordIdempotent(TaskMetrics.IdempotentKind.DRAFT);
+    }
+
+    @Test
+    void should_keep_idempotent_skip_result_when_metric_recording_fails(CapturedOutput output) {
+        Article article = article("tw-metric-fail");
+        when(archiveRepository.findByArticleId("tw-metric-fail"))
+                .thenReturn(Optional.of(draftCreatedSnapshot(article, "media-fail")));
+        doThrow(new IllegalStateException("registry down")).when(taskMetrics).recordIdempotent(any());
+
+        String mediaId = workflowWithMetrics().publishRealtime(article);
+
+        // 指标旁路化: 观测故障只降级告警, 不改变"跳过创建、返回既有 mediaId"的幂等结果
+        assertThat(mediaId).isEqualTo("media-fail");
+        verify(weChatPublisher, never()).publishDraft(any());
+        assertThat(output.getOut()).contains("幂等跳过指标记录失败");
     }
 
     private static ArchivedArticle snapshot(Article article, ArticleStatus status) {
@@ -114,6 +246,18 @@ class ArticlePublicationWorkflowTest {
                 .status(status)
                 .scheduledPublishAt(LocalDateTime.of(2026, 9, 1, 8, 0))
                 .createdAt(article.getCreatedAt())
+                .build();
+    }
+
+    private static ArchivedArticle draftCreatedSnapshot(Article article, String mediaId) {
+        return ArchivedArticle.builder()
+                .articleId(article.getId())
+                .article(article)
+                .status(ArticleStatus.DRAFT_CREATED)
+                .scheduledPublishAt(LocalDateTime.of(2026, 9, 1, 8, 0))
+                .createdAt(article.getCreatedAt())
+                .wechatDraftMediaId(mediaId)
+                .draftCreatedAt(LocalDateTime.of(2026, 9, 1, 9, 0))
                 .build();
     }
 

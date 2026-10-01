@@ -745,4 +745,55 @@ class ContentSchedulerTest {
         verify(taskQueue).push(RUN_ID);
         verify(taskQueue, never()).poll(eq(0L), eq(TimeUnit.SECONDS));
     }
+
+    // ============ Story 10.6: 终态编排(调度器层 mock 编排, 非脚本守卫) ============
+    // 注意: 本节 taskQueue 为 mock, Lua push/RECOVER 脚本并不实际执行;
+    // push 脚本终态守卫(COMPLETED 返回 5 幂等跳过)的真实覆盖位置是
+    // TaskQueueTest.should_skip_push_when_task_state_is_already_completed 及 external 集成套件.
+
+    @Test
+    void should_not_reprocess_when_completed_run_task_is_reenqueued_same_day(CapturedOutput output) {
+        // 调度器层编排: 同日 push 返回后 poll 为空(mock 模拟 push 脚本终态守卫拦截后的队列视角),
+        // 调度器不得重跑整批(不处理、不 complete); 脚本级拦截行为见 TaskQueueTest 与 external 套件
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
+
+        scheduler().processContent();
+
+        verify(taskQueue).push(RUN_ID);
+        verify(twitterProcessor, never()).process();
+        verify(taskQueue, never()).complete(anyString());
+    }
+
+    @Test
+    void should_process_cross_day_instance_normally_when_previous_day_completed() {
+        // 调度器层编排: 跨日实例 ID 日期化(twitter:run:{d+1}), isQueued=false 时正常入队
+        // 并被完整处理(push+process+complete); 脚本级同 ID 拦截见 TaskQueueTest 与 external 套件
+        Clock day2 = Clock.fixed(Instant.parse("2026-10-02T13:00:00Z"), ZoneOffset.UTC);
+        ContentScheduler nextDay = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
+                Optional.of(githubProcessor), processorProperties, Optional.empty(),
+                Optional.empty(), new RetryPolicyProperties(), true, day2);
+        when(taskQueue.isQueued("twitter:run:2026-10-02")).thenReturn(false);
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter:run:2026-10-02", (String) null);
+
+        nextDay.processContent();
+
+        verify(taskQueue).push("twitter:run:2026-10-02");
+        verify(twitterProcessor).process();
+        verify(taskQueue).complete("twitter:run:2026-10-02");
+    }
+
+    @Test
+    void should_continue_processing_after_recovery_leaves_terminal_states_untouched() {
+        // 调度器层编排: onStartup 触发恢复后, 恢复动作不阻塞当日正常处理流程
+        // (recover+process+complete); RECOVER 脚本仅重排 PROCESSING、终态成员返回 0 跳过的
+        // 脚本级行为由 TaskQueueTest 与 external 集成套件覆盖
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(RUN_ID, (String) null);
+
+        scheduler().onStartup();
+
+        verify(recoveryRunner).recoverPendingTasks();
+        verify(twitterProcessor).process();
+        verify(taskQueue).complete(RUN_ID);
+    }
 }
