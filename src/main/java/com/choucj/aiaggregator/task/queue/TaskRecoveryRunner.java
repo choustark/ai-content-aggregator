@@ -36,7 +36,9 @@ public class TaskRecoveryRunner {
      * 断点恢复核心逻辑 — 委托 {@link TaskQueue} 高层命令原子重排 PROCESSING 任务.
      *
      * <p>与旧实现不同, 不再有"先重排再删集合"的两步操作: 重排与状态翻转在同一 Lua 脚本内原子完成,
-     * 且只重排状态仍为 PROCESSING 的成员(已完成/已死信的成员自动跳过).
+     * 且只重排状态仍为 PROCESSING 的成员(已完成/已死信/已重试排期的成员自动跳过 — Story 10.5:
+     * RETRY_SCHEDULED 任务留在 retry ZSET 由调度器按 dueAt 重投, DEAD_LETTER 只能人工补跑,
+     * 恢复均不触碰).
      */
     public void recoverPendingTasks() {
         int recovered = taskQueue.recoverProcessingTasks();

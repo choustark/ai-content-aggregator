@@ -13,7 +13,7 @@ import org.springframework.validation.annotation.Validated;
  *   <li>{@link #faultIsolationEnabled} — 故障隔离总开关 (true: per-article 异常隔离不阻塞整批,
  *       false: 调试用, 异常透传到顶层 ContentScheduler)</li>
  *   <li>{@link #taskIdPrefix} — taskId 前缀, 用于 {@code ContentScheduler.processTask} 路由
- *       (默认 {@code "twitter"}, 对应批量触发 {@code twitter:run} /
+ *       (默认 {@code "twitter"}, 对应批量触发 {@code twitter:run:{yyyy-MM-dd}} /
  *       单文章跟踪 {@code twitter:tweet:{tweetId}})</li>
  * </ul>
  *
@@ -55,7 +55,7 @@ public class ProcessorProperties {
      *
      * <p>用于 {@code ContentScheduler.processTask(taskId)} 按 taskId 前缀路由到具体 Processor:
      * <ul>
-     *   <li>{@code twitter:run} / {@code twitter:tweet:{id}} → TwitterProcessor.process()</li>
+     *   <li>{@code twitter:run:{yyyy-MM-dd}} / {@code twitter:tweet:{id}} → TwitterProcessor.process()</li>
      *   <li>{@code github:...} → GitHubProcessor (Epic 4 待扩展)</li>
      * </ul>
      *

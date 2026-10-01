@@ -105,10 +105,11 @@ class TaskQueueTest {
         ArgumentCaptor<Object[]> argsCaptor = ArgumentCaptor.forClass(Object[].class);
         verify(stringRedisTemplate).execute(any(RedisScript.class), keysCaptor.capture(),
                 argsCaptor.capture());
-        // PUSH 4 键同 slot: pending / processing(在途守卫) / dead-letter(终态守卫) / state
+        // PUSH 5 键同 slot: pending / processing(在途守卫) / dead-letter(终态守卫)
+        // / retry(退避窗口守卫, 10.5 review) / state
         assertThat(keysCaptor.getValue()).containsExactly(
                 RedisKeys.taskPending(), RedisKeys.taskProcessing(),
-                RedisKeys.taskDeadLetter(),
+                RedisKeys.taskDeadLetter(), RedisKeys.taskRetry(),
                 RedisKeys.taskState("task-1"));
         assertThat(argsCaptor.getValue()[0]).isEqualTo("task-1");
         assertThat(argsCaptor.getValue()).hasSize(2);
@@ -126,7 +127,7 @@ class TaskQueueTest {
                 any(Object[].class));
         assertThat(keysCaptor.getValue()).containsExactly(
                 RedisKeys.taskPending(), RedisKeys.taskProcessing(),
-                RedisKeys.taskDeadLetter(),
+                RedisKeys.taskDeadLetter(), RedisKeys.taskRetry(),
                 RedisKeys.taskState("task-in-flight"));
     }
 
@@ -142,7 +143,7 @@ class TaskQueueTest {
                 any(Object[].class));
         assertThat(keysCaptor.getValue()).containsExactly(
                 RedisKeys.taskPending(), RedisKeys.taskProcessing(),
-                RedisKeys.taskDeadLetter(),
+                RedisKeys.taskDeadLetter(), RedisKeys.taskRetry(),
                 RedisKeys.taskState("task-dup"));
     }
 
@@ -161,7 +162,19 @@ class TaskQueueTest {
                 any(Object[].class));
         assertThat(keysCaptor.getValue()).containsExactly(
                 RedisKeys.taskPending(), RedisKeys.taskProcessing(),
-                RedisKeys.taskDeadLetter(), RedisKeys.taskState("task-doomed"));
+                RedisKeys.taskDeadLetter(), RedisKeys.taskRetry(),
+                RedisKeys.taskState("task-doomed"));
+    }
+
+    @Test
+    void should_skip_push_when_task_state_is_already_completed() {
+        // PUSH 脚本返回 5 = 同一逻辑任务已完成, 重复触发不得复活
+        stubExecute(5L);
+
+        taskQueue.push("task-completed");
+
+        verify(stringRedisTemplate).execute(any(RedisScript.class), anyList(),
+                any(Object[].class));
     }
 
     @Test
@@ -394,7 +407,7 @@ class TaskQueueTest {
     void should_move_task_to_dead_letter_with_sanitized_reason_when_in_processing() {
         stubExecute(1L);
 
-        boolean moved = taskQueue.markDeadLetter("task-1", "permanent\nfailure\twith  spaces");
+        boolean moved = taskQueue.markDeadLetter("task-1", "E_TEST", "permanent\nfailure\twith  spaces");
 
         assertThat(moved).isTrue();
         ArgumentCaptor<List<String>> keysCaptor = ArgumentCaptor.forClass((Class) List.class);
@@ -404,15 +417,17 @@ class TaskQueueTest {
         assertThat(keysCaptor.getValue()).containsExactly(
                 RedisKeys.taskProcessing(), RedisKeys.taskDeadLetter(),
                 RedisKeys.taskState("task-1"));
+        // ARGV 顺序: [taskId, now, errorCode, reason]; 错误码与原因分别脱敏入库
+        assertThat(argsCaptor.getValue()[2]).isEqualTo("E_TEST");
         // 原因脱敏: 换行/制表符折叠为空格
-        assertThat(argsCaptor.getValue()[2]).isEqualTo("permanent failure with spaces");
+        assertThat(argsCaptor.getValue()[3]).isEqualTo("permanent failure with spaces");
     }
 
     @Test
     void should_skip_dead_letter_when_task_not_in_processing() {
         stubExecute(0L);
 
-        boolean moved = taskQueue.markDeadLetter("task-1", "permanent");
+        boolean moved = taskQueue.markDeadLetter("task-1", "E_TEST", "permanent");
 
         assertThat(moved).isFalse();
     }
@@ -422,11 +437,11 @@ class TaskQueueTest {
         stubExecute(1L);
         String longReason = "错".repeat(300);
 
-        taskQueue.markDeadLetter("task-1", longReason);
+        taskQueue.markDeadLetter("task-1", "E_TEST", longReason);
 
         ArgumentCaptor<Object[]> argsCaptor = ArgumentCaptor.forClass(Object[].class);
         verify(stringRedisTemplate).execute(any(RedisScript.class), anyList(), argsCaptor.capture());
-        String sanitized = (String) argsCaptor.getValue()[2];
+        String sanitized = (String) argsCaptor.getValue()[3];
         assertThat(sanitized.codePointCount(0, sanitized.length())).isEqualTo(200);
     }
 

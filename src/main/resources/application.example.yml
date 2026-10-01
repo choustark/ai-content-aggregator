@@ -111,6 +111,33 @@ schedule:
 #     enabled: true
 #     token: ${TASK_MIGRATION_TOKEN}
 
+# 重试调度策略(Story 10.5) — 可重试失败的退避节奏与到期重投扫描间隔.
+# 状态机: PROCESSING --可重试失败--> RETRY_SCHEDULED(ZSET 按 dueAt) --到期--> QUEUED;
+# 达到 max-attempts 次或不可重试失败直接落 DEAD_LETTER 终态.
+task:
+  retry:
+    # 重试调度总开关 — 关闭时到期重投调度器 Bean 不注册(retry ZSET 中任务滞留不再重投).
+    enabled: true
+    # 单任务最大尝试次数(含首次) — 第 3 次失败即落死信, 不再自动重试.
+    max-attempts: 3
+    # 首次失败的重试延迟(毫秒) — 之后按指数退避(2x)递增.
+    backoff-initial-ms: 60000
+    # 退避上限(毫秒) — AC 约束"退避时间受配置的上限", 指数递增封顶于此值(默认 10 分钟).
+    backoff-max-ms: 600000
+    # 到期重投扫描间隔(毫秒, fixedDelay) — 唤醒后把 retry ZSET 中 dueAt 已到期任务原子转回 pending.
+    dispatch-interval-ms: 60000
+  # 人工补跑入口(Story 10.5) — 把死信任务复制为可关联的新 pending 任务, 原死信审计记录保留.
+  # 仅运维显式补跑时开启: 默认关闭; 开启必须同时经环境变量注入令牌(TASK_REPLAY_TOKEN),
+  # 并携带 X-Replay-Token 请求头调用 POST /api/tasks/replay/{taskId}.
+  # 幂等请求标识(可选): 请求头 X-Replay-Request-Id 指定补跑标识, 新任务 ID 确定性派生为
+  # <orig>:replay:<requestId>; 同 taskId+同 requestId 的重复补跑(如网络重试)被原子拒绝并
+  # 返回 409(幂等重复信号, 原死信记录不受影响). 标识须匹配 [A-Za-z0-9._-]{1,64}, 非法返回 400;
+  # 缺省时以当日日期派生(同日重复补跑天然幂等). 换新标识即可对同一死信再次补跑.
+  # 令牌未配置时入口拒绝一切请求. 与 task.migration 同风格, 用完关闭开关并清除令牌.
+  # replay:
+  #   enabled: true
+  #   token: ${TASK_REPLAY_TOKEN}
+
 # RSSHub 实例配置 — Twitter 推文发现层的数据源入口.
 # 公网 rsshub.app 经常被限流, 建议配置至少 1 个备用实例(自部署 docker / 第三方镜像).
 # 调用方按列表顺序依次尝试, 主失败切备, 全部失败抛 RetryableException.

@@ -224,14 +224,15 @@ class TwitterProcessorTest {
     }
 
     @Test
-    void shouldCatchFetchRetryableAndContinue(CapturedOutput output) {
-        when(twitterSource.fetch()).thenThrow(
-                new RetryableException(ErrorCode.EXTERNAL_API_ERROR, "fetch 失败"));
+    void shouldPropagateFetchRetryableExceptionToTaskScheduler() {
+        RetryableException failure =
+                new RetryableException(ErrorCode.EXTERNAL_API_ERROR, "fetch 失败");
+        when(twitterSource.fetch()).thenThrow(failure);
 
-        processor.process();
+        assertThatThrownBy(() -> processor.process()).isSameAs(failure);
 
-        assertThat(output.getOut()).contains("Pipeline 完成: 发现=0");
         verify(contentRewriter, never()).rewrite(any(Tweet.class));
+        verify(contentPublisher, never()).publish(any());
     }
 
     @Test

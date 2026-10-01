@@ -412,7 +412,7 @@ class TaskQueueRecoveryIntegrationTest {
         taskQueue.push("task-doomed");
         assertThat(taskQueue.poll(0, TimeUnit.SECONDS)).isEqualTo("task-doomed");
 
-        boolean moved = taskQueue.markDeadLetter("task-doomed", "permanent\nfailure");
+        boolean moved = taskQueue.markDeadLetter("task-doomed", "MANUAL", "permanent\nfailure");
 
         assertThat(moved).as("在 processing 中的任务应能移入死信").isTrue();
         assertThat(redisTemplate.opsForSet().members(RedisKeys.taskDeadLetter()))
@@ -449,7 +449,7 @@ class TaskQueueRecoveryIntegrationTest {
 
     @Test
     void shouldReturnFalseWhenMarkingDeadLetterForUnknownTask() {
-        assertThat(taskQueue.markDeadLetter("task-ghost", "reason")).isFalse();
+        assertThat(taskQueue.markDeadLetter("task-ghost", "MANUAL", "reason")).isFalse();
         assertThat(redisTemplate.opsForSet().members(RedisKeys.taskDeadLetter()))
                 .as("不在 processing 的任务不得入死信")
                 .isNullOrEmpty();

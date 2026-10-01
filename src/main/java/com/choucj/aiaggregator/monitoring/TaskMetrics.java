@@ -22,7 +22,7 @@ import java.util.function.LongSupplier;
  * <ul>
  *   <li>{@code aiaggregator.task.queue.size}（Prometheus:
  *       {@code aiaggregator_task_queue_size}），Gauge/任务数，唯一标签
- *       {@code state=pending|processing}。</li>
+ *       {@code state=pending|processing|retry|dead-letter}（Story 10.5 扩展 retry/dead-letter 两态）。</li>
  *   <li>{@code aiaggregator.task.processed}（Prometheus:
  *       {@code aiaggregator_task_processed_total}），Counter/任务数，标签
  *       {@code source=twitter|github|unknown} 与
@@ -31,8 +31,14 @@ import java.util.function.LongSupplier;
  *       不等价于 processor 内每篇内容的业务成功率。</li>
  *   <li>{@code aiaggregator.task.queue.collection.last.success}（Prometheus:
  *       {@code aiaggregator_task_queue_collection_last_success_seconds}），Gauge/Unix 秒，唯一标签
- *       {@code state=pending|processing}；成功采集对应队列值时刷新，失败时保留最后成功时间，
+ *       {@code state=pending|processing|retry|dead-letter}（10.5 起新增 retry/dead-letter 两个
+ *       延迟重试与死信队列的 last-good 快照）；成功采集对应队列值时刷新，失败时保留最后成功时间，
  *       从而识别已冻结的 last-good 队列快照。</li>
+ *   <li>{@code aiaggregator.task.retry}（Prometheus:
+ *       {@code aiaggregator_task_retry_total}），Counter/任务数，唯一标签
+ *       {@code outcome=scheduled|dispatched|exhausted|dead_lettered|replayed}（Story 10.5）。
+ *       记录点：{@code ContentScheduler} 可重试失败推进边界、
+ *       {@code RetryDispatchScheduler} 到期重投边界、{@code TaskReplayController} 补跑边界。</li>
  *   <li>{@code aiaggregator.schedule.last.success}（Prometheus:
  *       {@code aiaggregator_schedule_last_success_seconds}），Gauge/Unix 秒，唯一标签
  *       {@code operation=content_fetch|batch_publish}；进程启动后尚未成功执行时为 NaN，
@@ -57,12 +63,17 @@ public class TaskMetrics {
     private final Clock clock;
     private final AtomicLong pendingSnapshot = new AtomicLong(UNAVAILABLE);
     private final AtomicLong processingSnapshot = new AtomicLong(UNAVAILABLE);
+    private final AtomicLong retrySnapshot = new AtomicLong(UNAVAILABLE);
+    private final AtomicLong deadLetterSnapshot = new AtomicLong(UNAVAILABLE);
     private final AtomicReference<Double> pendingLastCollectionEpochSeconds = new AtomicReference<>(Double.NaN);
     private final AtomicReference<Double> processingLastCollectionEpochSeconds = new AtomicReference<>(Double.NaN);
+    private final AtomicReference<Double> retryLastCollectionEpochSeconds = new AtomicReference<>(Double.NaN);
+    private final AtomicReference<Double> deadLetterLastCollectionEpochSeconds = new AtomicReference<>(Double.NaN);
     private final AtomicLong lastCollectionLogMillis = new AtomicLong(UNAVAILABLE);
     private final Map<Source, Map<Outcome, Counter>> processedCounters = new EnumMap<>(Source.class);
     private final Map<Operation, AtomicReference<Double>> lastSuccessEpochSeconds = new EnumMap<>(Operation.class);
     private final Map<BatchArticleOutcome, Counter> batchArticleCounters = new EnumMap<>(BatchArticleOutcome.class);
+    private final Map<RetryMetricOutcome, Counter> retryCounters = new EnumMap<>(RetryMetricOutcome.class);
 
     @Autowired
     public TaskMetrics(TaskQueue taskQueue, MeterRegistry registry) {
@@ -76,6 +87,7 @@ public class TaskMetrics {
         registerProcessedCounters(registry);
         registerScheduleGauges(registry);
         registerBatchArticleCounters(registry);
+        registerRetryCounters(registry);
     }
 
     /** 记录一个队列任务在调度器边界的终态；调用方不得在 processor 或 queue 内重复记录。 */
@@ -94,6 +106,20 @@ public class TaskMetrics {
         batchArticleCounters.get(BatchArticleOutcome.FAILURE).increment(Math.max(failure, 0L));
     }
 
+    /**
+     * 记录一次延迟重试/死信/补跑状态机推进(Story 10.5)。
+     *
+     * <p>调用方仅允许传入 {@link RetryMetricOutcome} 封闭枚举——taskId 与异常文本不得入库。
+     */
+    public void recordRetry(RetryMetricOutcome outcome) {
+        recordRetry(outcome, 1L);
+    }
+
+    /** 同 {@link #recordRetry(RetryMetricOutcome)}, 供批量推进(如到期重投一批)按数量累计。 */
+    public void recordRetry(RetryMetricOutcome outcome, long amount) {
+        retryCounters.get(outcome).increment(Math.max(amount, 0L));
+    }
+
     private void registerQueueGauges(MeterRegistry registry) {
         Gauge.builder("aiaggregator.task.queue.size", this,
                         ignored -> safeQueueValue(taskQueue::pendingCount, pendingSnapshot,
@@ -107,8 +133,23 @@ public class TaskMetrics {
                 .description("Current task queue size by state")
                 .tag("state", "processing")
                 .register(registry);
+        // Story 10.5: retry ZSET / dead-letter 集合纳入统一队列观测
+        Gauge.builder("aiaggregator.task.queue.size", this,
+                        ignored -> safeQueueValue(taskQueue::retryCount, retrySnapshot,
+                                retryLastCollectionEpochSeconds))
+                .description("Current task queue size by state")
+                .tag("state", "retry")
+                .register(registry);
+        Gauge.builder("aiaggregator.task.queue.size", this,
+                        ignored -> safeQueueValue(taskQueue::deadLetterCount, deadLetterSnapshot,
+                                deadLetterLastCollectionEpochSeconds))
+                .description("Current task queue size by state")
+                .tag("state", "dead-letter")
+                .register(registry);
         registerQueueCollectionGauge(registry, "pending", pendingLastCollectionEpochSeconds);
         registerQueueCollectionGauge(registry, "processing", processingLastCollectionEpochSeconds);
+        registerQueueCollectionGauge(registry, "retry", retryLastCollectionEpochSeconds);
+        registerQueueCollectionGauge(registry, "dead-letter", deadLetterLastCollectionEpochSeconds);
     }
 
     private void registerQueueCollectionGauge(MeterRegistry registry, String state,
@@ -142,6 +183,15 @@ public class TaskMetrics {
                     .baseUnit("seconds")
                     .tag("operation", operation.tagValue())
                     .register(registry);
+        }
+    }
+
+    private void registerRetryCounters(MeterRegistry registry) {
+        for (RetryMetricOutcome outcome : RetryMetricOutcome.values()) {
+            retryCounters.put(outcome, Counter.builder("aiaggregator.task.retry")
+                    .description("Delayed-retry/dead-letter/replay state-machine transitions")
+                    .tag("outcome", outcome.tagValue())
+                    .register(registry));
         }
     }
 
@@ -216,6 +266,35 @@ public class TaskMetrics {
         private final String tagValue;
 
         Operation(String tagValue) {
+            this.tagValue = tagValue;
+        }
+
+        public String tagValue() {
+            return tagValue;
+        }
+    }
+
+    /**
+     * 延迟重试状态机推进分类(Story 10.5) — 封闭枚举, 防止 taskId/异常文本等高基数标签入库.
+     *
+     * <ul>
+     *   <li>{@code scheduled} — 可重试失败已按退避写入 retry ZSET</li>
+     *   <li>{@code dispatched} — 到期重试已原子转回 pending 队列</li>
+     *   <li>{@code exhausted} — 重试尝试耗尽, 同脚本落死信</li>
+     *   <li>{@code dead_lettered} — 不可重试失败或异常态兜底移入死信</li>
+     *   <li>{@code replayed} — 死信任务经人工补跑创建新 pending 任务</li>
+     * </ul>
+     */
+    public enum RetryMetricOutcome {
+        SCHEDULED("scheduled"),
+        DISPATCHED("dispatched"),
+        EXHAUSTED("exhausted"),
+        DEAD_LETTERED("dead_lettered"),
+        REPLAYED("replayed");
+
+        private final String tagValue;
+
+        RetryMetricOutcome(String tagValue) {
             this.tagValue = tagValue;
         }
 

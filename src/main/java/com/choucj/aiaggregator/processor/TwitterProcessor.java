@@ -1,6 +1,7 @@
 package com.choucj.aiaggregator.processor;
 
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
+import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.Article;
 import com.choucj.aiaggregator.common.model.ContentGenerationMode;
 import com.choucj.aiaggregator.common.model.ErrorCode;
@@ -28,11 +29,11 @@ import java.util.regex.Pattern;
  * <p>编排端到端 Pipeline, 将 Epic 2 各子模块串联为完整自动化流程:
  * <pre>
  *   ContentScheduler (cron 默认每天 22:00)
- *     ↓ poll("twitter:run") → processTask(taskId) → startsWith("twitter:")
+ *     ↓ poll("twitter:run:{yyyy-MM-dd}") → processTask(taskId) → startsWith("twitter:")
  *     ↓ twitterProcessor.process()
  *
  *   TwitterProcessor.process()
- *     ├─ Stage 1: twitterSource.fetch()                       (故障隔离 L1 — catch Exception 兜底)
+ *     ├─ Stage 1: twitterSource.fetch()                       (批次级 Retryable 向调度器透传)
  *     ├─ Stage 2: contentFilters[].filter() (责任链)          (故障隔离 L3 — 阶段级降级)
  *     └─ Stage 3-5: per-article rewrite + publish             (故障隔离 L2 — 单条失败不阻塞)
  *         for (tweet : filtered) {
@@ -44,11 +45,10 @@ import java.util.regex.Pattern;
  *
  * <p><b>故障隔离三层防御 (forward-looking 闭环清单):</b>
  * <ul>
- *   <li><b>L1 fetch 兜底</b> — {@link TwitterSource#fetch()} 内部仅 catch
- *       {@code RetryableException | NonRetryableException} (Story 2.2a L93),
- *       其他 {@link RuntimeException} (NPE / {@link IllegalStateException}) 会穿透.
- *       Pipeline 在 fetch 调用周围 {@code catch(Exception)} 兜底 (Story 2.2a N2 闭环),
- *       视为本批次发现数=0, summary 正常输出, 不抛到 {@code ContentScheduler}</li>
+ *   <li><b>L1 fetch 边界</b> — {@link TwitterSource#fetch()} 的批次级
+ *       {@link RetryableException}/{@link NonRetryableException} 必须透传到
+ *       {@code ContentScheduler}, 分别进入重试/死信状态机；其他非预期异常仍按既有故障隔离
+ *       降级为空批次。单文章处理继续由 L2 隔离</li>
  *   <li><b>L2 per-article 隔离</b> — 单条 rewrite / publish 抛出任意异常 →
  *       {@code failure++} + {@code log.error} + continue, 不影响其他文章
  *       (复用 Story 2.3b W2 + Story 2.5 forward-looking 模式).
@@ -59,7 +59,7 @@ import java.util.regex.Pattern;
  * </ul>
  *
  * <p><b>TaskQueue 集成 (Patch-1 修复):</b>
- * 不在 per-article 级别 push/complete — ContentScheduler 已在 {@code twitter:run} 级别
+ * 不在 per-article 级别 push/complete — ContentScheduler 已在 {@code twitter:run:{yyyy-MM-dd}} 级别
  * (外层任务) 做 push/poll/complete 跟踪, 重启时由 {@code TaskRecoveryRunner} 恢复.
  * 早期实现曾尝试 {@code push("twitter:tweet:{id}")} 跟踪单条, 但这些 taskId 从未经过
  * {@code poll()}, 不会进入 {@code task:{queue}:processing} 集合, {@code complete()} 对它们是 no-op,
@@ -153,13 +153,14 @@ public class TwitterProcessor {
         int rewriteWithMediaEmbeddedMediaCount = 0;
         int rewriteWithMediaDegradedMediaCount = 0;
 
-        // Stage 1: fetch (AC-1 + AC-4 catch Exception 兜底, Story 2.2a N2 闭环)
+        // Stage 1: typed batch failures must reach the Story 10.5 queue retry/dead-letter state machine.
         List<Tweet> tweets;
         try {
             tweets = twitterSource.fetch();
+        } catch (RetryableException | NonRetryableException e) {
+            throw e;
         } catch (Exception e) {
-            // L1 兜底: TwitterSource.fetch L93 仅 catch Retryable|NonRetryable,
-            // 其他 RuntimeException (NPE/IllegalStateException) 会穿透 — Pipeline 必须兜底.
+            // Keep the legacy fallback for unexpected, unclassified runtime failures only.
             // Patch-5: e 末参数自动展开堆栈; format 无 error={} 占位符 (N4: 不输出 e.getMessage() 含正文风险)
             log.error("TwitterSource.fetch 失败, 本批次跳过 (故障隔离 L1 兜底)", e);
             tweets = List.of();
@@ -206,7 +207,7 @@ public class TwitterProcessor {
 
         // Stage 3+4+5: per-article rewrite + publish (AC-3)
         // Patch-1 修复: 不在 per-article 级别 push/complete TaskQueue — ContentScheduler 已在
-        // twitter:run 级别跟踪外层任务; per-article push 会让 twitter:tweet:* 残留 task:{queue}:pending
+        // twitter:run:{yyyy-MM-dd} 实例级别跟踪外层任务; per-article push 会让 twitter:tweet:* 残留 task:{queue}:pending
         // 触发后续 poll 重新路由到 process() 整批重跑.
         // Patch-2 修复: faultIsolationEnabled=false 时 per-article 异常透传到 ContentScheduler
         // 顶层 (调试用, 由调度器按 Retryable/NonRetryable 分类处理).

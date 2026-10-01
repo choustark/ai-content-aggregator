@@ -25,7 +25,7 @@ import java.util.Optional;
  *
  * <p>编排端到端 Pipeline, 将 Epic 4 各子模块串联为完整自动化流程 (镜像 {@link TwitterProcessor}):
  * <pre>
- *   ContentScheduler.processTask("github:run") → githubProcessor.process()
+ *   ContentScheduler.processTask("github:run:{yyyy-MM-dd}") → githubProcessor.process()
  *
  *   GitHubProcessor.process()
  *     ├─ Stage 1:   githubSource.fetch()                     (L1 fetch 兜底)

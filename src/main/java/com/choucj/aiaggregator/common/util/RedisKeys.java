@@ -102,7 +102,10 @@ public final class RedisKeys {
     /**
      * Story 10.4: 重试调度键(Redis ZSET, 按 dueAt 排序).
      *
-     * <p>本 Story 只建键占位, 重试调度语义由 Story 10.5 实现.
+     * <p>Story 10.5 起承载实际语义: 可重试失败由
+     * {@code TaskQueue.recordRetryableFailure} 以 dueAt(epoch millis)为 score 写入;
+     * {@code RetryDispatchScheduler} 周期扫描到期成员并经
+     * {@code TaskQueue.dispatchDueRetries()} 原子转回 {@link #taskPending()}.
      *
      * @return {@code "task:{queue}:retry"}
      */
@@ -111,9 +114,25 @@ public final class RedisKeys {
     }
 
     /**
+     * Story 10.5 review: 重试损坏成员隔离区键(Redis ZSET, score=移入时间 epoch millis).
+     *
+     * <p>{@code TaskQueue.dispatchDueRetries} 扫描中 TYPE 损坏/数据异常的到期成员会被原子
+     * 移出 {@link #taskRetry()} 并落入本键 — 若只 catch 日志不移除, 坏成员会持续占据
+     * ZRANGEBYSCORE 最早批次, 令后续合法到期任务永久饥饿。隔离区成员处置(修复/丢弃)
+     * 交运维, 本键自带时间审计, 不设 TTL。
+     *
+     * @return {@code "task:{queue}:retry-quarantine"}
+     */
+    public static String taskRetryQuarantine() {
+        return TASK_QUEUE_TAGGED_PREFIX + "retry-quarantine";
+    }
+
+    /**
      * Story 10.4: 死信任务集合键(Redis Set).
      *
-     * <p>只存 taskId, 审计详情(状态/原因/时间)放在对应 {@link #taskState(String)} Hash, 供 10.5 扩展.
+     * <p>只存 taskId, 审计详情(状态/尝试次数/最后错误摘要/进入时间)放在对应
+     * {@link #taskState(String)} Hash(Story 10.5 起完整写入); 只能经
+     * {@code TaskQueue.replayDeadLetter} 人工补跑, 不可自动重投.
      *
      * @return {@code "task:{queue}:dead-letter"}
      */

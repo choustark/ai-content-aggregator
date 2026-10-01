@@ -1,13 +1,16 @@
 package com.choucj.aiaggregator.task.scheduler;
 
+import com.choucj.aiaggregator.common.exception.AggregatorException;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
+import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.common.observability.CorrelationContext;
 import com.choucj.aiaggregator.monitoring.CostMonitor;
 import com.choucj.aiaggregator.monitoring.TaskMetrics;
 import com.choucj.aiaggregator.processor.GitHubProcessor;
 import com.choucj.aiaggregator.processor.TwitterProcessor;
 import com.choucj.aiaggregator.processor.config.ProcessorProperties;
+import com.choucj.aiaggregator.task.queue.RetryPolicyProperties;
 import com.choucj.aiaggregator.task.queue.TaskQueue;
 import com.choucj.aiaggregator.task.queue.TaskRecoveryRunner;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -19,6 +22,8 @@ import org.springframework.context.event.EventListener;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import java.time.Clock;
+import java.time.LocalDate;
 import java.time.YearMonth;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
@@ -66,7 +71,9 @@ public class ContentScheduler {
     private final ProcessorProperties processorProperties;
     private final Optional<CostMonitor> costMonitorOptional;
     private final Optional<TaskMetrics> taskMetricsOptional;
+    private final RetryPolicyProperties retryPolicy;
     private final boolean runOnStartup;
+    private final Clock clock;
 
     /**
      * 构造器注入 {@code schedule.run-on-startup}(CR W2 修复) +
@@ -98,7 +105,8 @@ public class ContentScheduler {
                             ProcessorProperties processorProperties,
                             @Value("${schedule.run-on-startup:false}") boolean runOnStartup) {
         this(taskQueue, recoveryRunner, twitterProcessor, githubProcessorOptional, processorProperties,
-                Optional.empty(), Optional.empty(), runOnStartup);
+                Optional.empty(), Optional.empty(), new RetryPolicyProperties(), runOnStartup,
+                Clock.systemDefaultZone());
     }
 
     public ContentScheduler(TaskQueue taskQueue,
@@ -109,7 +117,8 @@ public class ContentScheduler {
                             Optional<CostMonitor> costMonitorOptional,
                             @Value("${schedule.run-on-startup:false}") boolean runOnStartup) {
         this(taskQueue, recoveryRunner, twitterProcessor, githubProcessorOptional, processorProperties,
-                costMonitorOptional, Optional.empty(), runOnStartup);
+                costMonitorOptional, Optional.empty(), new RetryPolicyProperties(), runOnStartup,
+                Clock.systemDefaultZone());
     }
 
     @Autowired
@@ -120,7 +129,28 @@ public class ContentScheduler {
                             ProcessorProperties processorProperties,
                             Optional<CostMonitor> costMonitorOptional,
                             Optional<TaskMetrics> taskMetricsOptional,
+                            RetryPolicyProperties retryPolicy,
                             @Value("${schedule.run-on-startup:false}") boolean runOnStartup) {
+        this(taskQueue, recoveryRunner, twitterProcessor, githubProcessorOptional, processorProperties,
+                costMonitorOptional, taskMetricsOptional, retryPolicy, runOnStartup,
+                Clock.systemDefaultZone());
+    }
+
+    /**
+     * 全参构造器 — 额外注入 {@link Clock} 供批量任务实例 ID 日期化
+     * (10.5 review 二轮任务身份决策, 测试注入 fixed Clock 验证跨日实例化;
+     * Spring 装配走 {@code @Autowired} 构造器并以 {@code Clock.systemDefaultZone()} 委托)。
+     */
+    ContentScheduler(TaskQueue taskQueue,
+                     TaskRecoveryRunner recoveryRunner,
+                     TwitterProcessor twitterProcessor,
+                     Optional<GitHubProcessor> githubProcessorOptional,
+                     ProcessorProperties processorProperties,
+                     Optional<CostMonitor> costMonitorOptional,
+                     Optional<TaskMetrics> taskMetricsOptional,
+                     RetryPolicyProperties retryPolicy,
+                     boolean runOnStartup,
+                     Clock clock) {
         this.taskQueue = taskQueue;
         this.recoveryRunner = recoveryRunner;
         this.twitterProcessor = twitterProcessor;
@@ -128,7 +158,9 @@ public class ContentScheduler {
         this.processorProperties = processorProperties;
         this.costMonitorOptional = costMonitorOptional;
         this.taskMetricsOptional = taskMetricsOptional;
+        this.retryPolicy = retryPolicy;
         this.runOnStartup = runOnStartup;
+        this.clock = clock;
     }
 
     /**
@@ -198,13 +230,21 @@ public class ContentScheduler {
      *
      * <p>MVP 实现: 单线程顺序处理. 多线程/并发处理留 Story 1.7 Feature Flags 控制.
      *
-     * <p>异常策略(Story 10.4 起):
+     * <p>异常策略(Story 10.5 起, 10.5 review 二轮强化):
      * <ul>
-     *   <li>{@link RetryableException} — 任务失败可重试, <b>不调用 complete</b>,
-     *       任务留在 {@code task:{queue}:processing} 集合中,
-     *       下次启动时由 {@link TaskRecoveryRunner} 原子重排回 pending 队列</li>
+     *   <li><b>先权威状态迁移, 后旁路指标</b> — 处理结果指标经 safe wrapper 记录且只在
+     *       状态迁移完成后调用; 指标组件故障只降级告警, 不会让任务停留 processing
+     *       或中断当前批次, 也不会把已成功的迁移误报为失败</li>
+     *   <li>{@link RetryableException} — 任务失败可重试, 经
+     *       {@code TaskQueue.recordRetryableFailure} 单个原子状态迁移推进:
+     *       未达 {@code task.retry.max-attempts} 上限时转 RETRY_SCHEDULED
+     *       (retry ZSET 按 dueAt 延迟, 由 RetryDispatchScheduler 到期重投回 pending);
+     *       达上限时同脚本落死信终态 DEAD_LETTER。推进自身的异常(如 state 数据损坏)
+     *       在批次内隔离 — 单个损坏任务不得拖延其后全部健康 pending 任务, 也不得
+     *       提前结束本批(任务保持 PROCESSING, 重启恢复按状态重排)</li>
      *   <li>{@link NonRetryableException} — 任务不可重试, 经 {@code TaskQueue.markDeadLetter}
-     *       原子移入死信终态(DEAD_LETTER), 不再误写 COMPLETED</li>
+     *       原子移入死信终态(DEAD_LETTER, 审计本次执行的 errorCode 与递增后 attempt),
+     *       不再误写 COMPLETED</li>
      * </ul>
      */
     private void processQueueOnce() {
@@ -215,23 +255,115 @@ public class ContentScheduler {
                 return;
             }
             CorrelationContext.putTaskId(taskId);
+            long startedAtMs = System.currentTimeMillis();
             TaskRoute route = TaskRoute.UNKNOWN;
             try {
                 route = routeOf(taskId);
                 TaskMetrics.Outcome outcome = processTask(taskId, route);
                 taskQueue.complete(taskId);
-                recordProcessed(route.source(), outcome);
+                recordProcessedSafely(route.source(), outcome);
             } catch (RetryableException e) {
-                recordProcessed(route.source(), TaskMetrics.Outcome.RETRYABLE_FAILURE);
-                log.warn("任务 {} 失败(可重试), 留在 processing 集合中待启动时重入队", taskId, e);
+                // 先权威状态迁移(推进异常批次内隔离), 再旁路记录指标 —
+                // 指标故障不得让任务停留 processing 或中断批次(10.5 review 二轮)
+                advanceRetryableFailure(taskId, e, startedAtMs);
+                recordProcessedSafely(route.source(), TaskMetrics.Outcome.RETRYABLE_FAILURE);
             } catch (NonRetryableException e) {
-                recordProcessed(route.source(), TaskMetrics.Outcome.NON_RETRYABLE_FAILURE);
-                log.error("任务 {} 失败(不可重试), 移入死信终态 DEAD_LETTER(Story 10.4)", taskId, e);
-                taskQueue.markDeadLetter(taskId, e.getMessage());
+                deadLetterNonRetryableFailure(taskId, e);
+                recordProcessedSafely(route.source(), TaskMetrics.Outcome.NON_RETRYABLE_FAILURE);
             } catch (RuntimeException e) {
-                recordProcessed(route.source(), TaskMetrics.Outcome.UNEXPECTED_FAILURE);
+                recordProcessedSafely(route.source(), TaskMetrics.Outcome.UNEXPECTED_FAILURE);
                 throw e;
             }
+        }
+    }
+
+    /**
+     * 可重试失败推进(10.5 review 二轮) — 调用 {@code TaskQueue.recordRetryableFailure}
+     * 完成权威状态迁移并按 outcome 记录审计日志与指标.
+     *
+     * <p>批次内隔离(F-R8): 推进自身抛出的 {@link NonRetryableException}(state 数据损坏
+     * 写前拒绝)或 RuntimeException 被本方法捕获记 ERROR, 不向上传播 — 否则异常会直接结束
+     * {@code processQueueOnce}(Retryable catch 内的同级 catch 不会再捕获),
+     * 单个损坏任务拖延其后全部健康 pending 任务并滞留 processing。
+     * 错误摘要经 {@link #safeErrorSummary} 白名单脱敏(N4), 不得持久化第三方异常原文。
+     */
+    private void advanceRetryableFailure(String taskId, RetryableException e, long startedAtMs) {
+        try {
+            TaskQueue.RetryAdvance advance = taskQueue.recordRetryableFailure(
+                    taskId, errorCodeOf(e), safeErrorSummary(e), retryPolicy);
+            TaskQueue.RetryOutcome outcome = advance.outcome();
+            if (outcome == TaskQueue.RetryOutcome.RETRY_SCHEDULED) {
+                recordRetryMetricSafely(TaskMetrics.RetryMetricOutcome.SCHEDULED, taskId);
+                // W11: 重试排期审计日志 — 到点时间/尝试次数/失败耗时全量落盘,
+                // 运维凭 taskId 即可回答"这个任务下次何时重试"(10.5 review)
+                log.warn("任务 {} 失败(可重试), 已排期重试: attempt={}, dueAtEpochMs={}, "
+                                + "failedAfterMs={}, errorCode={}",
+                        taskId, advance.attempt(), advance.dueAtEpochMs(),
+                        System.currentTimeMillis() - startedAtMs, errorCodeOf(e));
+            } else if (outcome == TaskQueue.RetryOutcome.DEAD_LETTERED) {
+                recordRetryMetricSafely(TaskMetrics.RetryMetricOutcome.EXHAUSTED, taskId);
+                log.warn("任务 {} 失败(可重试)且尝试耗尽, 已落死信: attempt={}, "
+                                + "failedAfterMs={}, errorCode={}",
+                        taskId, advance.attempt(),
+                        System.currentTimeMillis() - startedAtMs, errorCodeOf(e));
+            } else {
+                log.warn("任务 {} 失败(可重试), 但不在 processing 集合, 跳过重试推进: outcome={}",
+                        taskId, outcome, e);
+            }
+        } catch (RuntimeException advanceFailure) {
+            log.error("任务 {} 可重试失败推进异常(批次内隔离, 继续处理后续任务; "
+                            + "任务保持 PROCESSING 待重启恢复按状态重排): errorType={}, detail={}",
+                    taskId, advanceFailure.getClass().getSimpleName(), advanceFailure.getMessage());
+        }
+    }
+
+    /**
+     * 不可重试失败死信推进(10.5 review 二轮) — 调用 {@code TaskQueue.markDeadLetter}
+     * 完成权威状态迁移, 审计<b>本次执行</b>的 errorCode 与递增后 attempt.
+     *
+     * <p>批次内隔离同 {@link #advanceRetryableFailure}: 推进异常(state attempt 损坏等)
+     * 捕获记 ERROR 不传播, 不中断批次。指标仅在真正落入死信时计 DEAD_LETTERED(F13)。
+     */
+    private void deadLetterNonRetryableFailure(String taskId, NonRetryableException e) {
+        try {
+            boolean deadLettered = taskQueue.markDeadLetter(taskId, errorCodeOf(e), safeErrorSummary(e));
+            if (deadLettered) {
+                log.warn("任务 {} 失败(不可重试), 移入死信终态 DEAD_LETTER: errorCode={}",
+                        taskId, errorCodeOf(e));
+                recordRetryMetricSafely(TaskMetrics.RetryMetricOutcome.DEAD_LETTERED, taskId);
+            } else {
+                log.warn("任务 {} 非死信推进未发生(不在 processing 集合, 幂等跳过), 不计 DEAD_LETTERED", taskId);
+            }
+        } catch (RuntimeException advanceFailure) {
+            log.error("任务 {} 不可重试失败推进异常(批次内隔离, 继续处理后续任务; "
+                            + "任务保持 PROCESSING 待重启恢复按状态重排): errorType={}, detail={}",
+                    taskId, advanceFailure.getClass().getSimpleName(), advanceFailure.getMessage());
+        }
+    }
+
+    /**
+     * 处理结果指标隔离记录(10.5 review 二轮) — 指标异常只降级为告警,
+     * 不让观测组件故障中断当前批次或覆盖已完成的权威状态迁移.
+     */
+    private void recordProcessedSafely(TaskMetrics.Source source, TaskMetrics.Outcome outcome) {
+        try {
+            taskMetricsOptional.ifPresent(metrics -> metrics.recordProcessed(source, outcome));
+        } catch (RuntimeException e) {
+            log.warn("处理结果指标记录失败(已降级, 不影响任务状态迁移): source={}, outcome={}, reason={}",
+                    source, outcome, e.getMessage());
+        }
+    }
+
+    /**
+     * 重试指标隔离记录(10.5 review) — 指标异常只降级为告警,
+     * 不让观测组件故障中断任务失败处理主流程(失败推进本身不能被指标拖垮).
+     */
+    private void recordRetryMetricSafely(TaskMetrics.RetryMetricOutcome outcome, String taskId) {
+        try {
+            taskMetricsOptional.ifPresent(metrics -> metrics.recordRetry(outcome));
+        } catch (RuntimeException e) {
+            log.warn("重试指标记录失败(已降级, 不影响失败处理): taskId={}, outcome={}, reason={}",
+                    taskId, outcome, e.getMessage());
         }
     }
 
@@ -254,7 +386,7 @@ public class ContentScheduler {
      * 已捕获所有异常不会抛出, 但若因 Bean 装配问题抛出, 或
      * {@code processor.fault-isolation-enabled=false} 调试模式主动透传 per-article 异常,
      * 沿用 processQueueOnce catch Retryable/NonRetryable 策略
-     * (Retryable 留 processing 集合待重启重入队, NonRetryable complete 移除避免阻塞).
+     * (Retryable 经 recordRetryableFailure 推进重试/死信, NonRetryable 移入死信终态).
      *
      * <p><b>Patch-3 修复动机:</b>
      * 早期实现硬编码 {@code taskId.startsWith("twitter:")}, 但 {@code TwitterProcessor}
@@ -265,7 +397,7 @@ public class ContentScheduler {
      * <p><b>Story 4.4 github: 前缀硬编码决策 (Task 4.4):</b> GitHubProcessor 暂不实现
      * 独立的 {@code processor.github.task-id-prefix} 配置 — github: 前缀硬编码于本方法,
      * 与 TwitterProcessor 的配置驱动 prefix 解耦. 触发 github 处理仅通过手动
-     * {@code redis-cli RPUSH task:{queue}:pending "github:run"} 或测试用例, 不实现自动 enqueue
+     * {@code redis-cli RPUSH task:{queue}:pending "github:run:{yyyy-MM-dd}"} 或测试用例, 不实现自动 enqueue
      * (避免与 TwitterProcessor 共享 cron 时段冲突, 留 Epic 5 按需扩展).
      *
      * <p><b>Epic 5+ 扩展点:</b>
@@ -307,8 +439,35 @@ public class ContentScheduler {
         return TaskRoute.UNKNOWN;
     }
 
-    private void recordProcessed(TaskMetrics.Source source, TaskMetrics.Outcome outcome) {
-        taskMetricsOptional.ifPresent(metrics -> metrics.recordProcessed(source, outcome));
+    /**
+     * 提取脱敏错误码(state Hash {@code lastErrorCode} 字段来源) —
+     * 优先异常携带的 {@link ErrorCode} 枚举名, 缺失时退化为异常类 simpleName。
+     * 禁止堆栈/消息原文入库(N4); 最终写库前仍会过 {@code sanitizeStateText} 净化。
+     */
+    private String errorCodeOf(RetryableException e) {
+        ErrorCode code = e.getErrorCode();
+        if (code != null) {
+            return code.name();
+        }
+        return e.getClass().getSimpleName();
+    }
+
+    private String errorCodeOf(AggregatorException e) {
+        ErrorCode code = e.getErrorCode();
+        if (code != null) {
+            return code.name();
+        }
+        return e.getClass().getSimpleName();
+    }
+
+    /**
+     * 白名单化错误摘要(state Hash {@code lastErrorSummary} 字段来源, 10.5 review F-R5) —
+     * 只保留 errorCode 与消息长度, 不持久化异常原文: 消息可能携带第三方 API 响应体
+     * (URL/账号标识等潜在敏感信息), 入库违反 N4 脱敏纪律。
+     */
+    private String safeErrorSummary(AggregatorException e) {
+        String message = e.getMessage();
+        return errorCodeOf(e) + " len=" + (message == null ? 0 : message.length());
     }
 
     private enum TaskRoute {
@@ -340,7 +499,7 @@ public class ContentScheduler {
     }
 
     private void enqueueRunTaskIfAbsent(String trigger) {
-        String runTaskId = processorProperties.getTaskIdPrefix() + ":run";
+        String runTaskId = batchRunTaskId();
         if (taskQueue.getProcessingTasks().contains(runTaskId)) {
             log.info("批量任务已在 processing 中, 跳过重复入队: trigger={}, taskId={}", trigger, runTaskId);
             return;
@@ -349,7 +508,21 @@ public class ContentScheduler {
             log.info("批量任务已在队列中, 跳过重复入队: trigger={}, taskId={}", trigger, runTaskId);
             return;
         }
-         taskQueue.push(runTaskId);
+        taskQueue.push(runTaskId);
         log.info("已推送批量任务: trigger={}, taskId={}", trigger, runTaskId);
+    }
+
+    /**
+     * 当日批量运行任务实例 ID(10.5 review 任务身份决策) —
+     * {@code <prefix>:run:{yyyy-MM-dd}}(按注入 {@link Clock} 取当前日期).
+     *
+     * <p>同日多次触发(cron/startup)生成同一确定性 ID, 兼作逻辑作业去重键:
+     * {@code isQueued}/{@code processing} 守卫与 {@code push} 脚本幂等守卫双保险,
+     * 同日不会重复入队。跨日自然产生新实例 ID — 消除固定 {@code :run} ID 的两大缺陷:
+     * 一次死信即永久阻断后续调度(只能人工补跑), 以及 attempt 跨批次累计导致
+     * 早于 {@code max-attempts} 误判耗尽。
+     */
+    private String batchRunTaskId() {
+        return processorProperties.getTaskIdPrefix() + ":run:" + LocalDate.now(clock);
     }
 }

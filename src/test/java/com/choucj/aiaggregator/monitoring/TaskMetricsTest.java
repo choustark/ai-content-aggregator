@@ -162,13 +162,47 @@ class TaskMetricsTest {
         assertMeterIdsUseClosedLowCardinalityContract();
     }
 
+    // ============ Story 10.5: 重试/死信/补跑指标 ============
+
+    @Test
+    void should_count_each_retry_outcome_once_when_recorded() {
+        for (TaskMetrics.RetryMetricOutcome outcome : TaskMetrics.RetryMetricOutcome.values()) {
+            metrics.recordRetry(outcome);
+            assertThat(registry.get("aiaggregator.task.retry")
+                    .tag("outcome", outcome.tagValue()).counter().count()).isEqualTo(1);
+        }
+
+        assertMeterIdsUseClosedLowCardinalityContract();
+    }
+
+    @Test
+    void should_accumulate_retry_outcome_by_amount_when_batch_recorded() {
+        metrics.recordRetry(TaskMetrics.RetryMetricOutcome.DISPATCHED, 4);
+
+        assertThat(registry.get("aiaggregator.task.retry")
+                .tag("outcome", "dispatched").counter().count()).isEqualTo(4);
+    }
+
+    @Test
+    void should_expose_retry_and_dead_letter_queue_gauges() {
+        when(taskQueue.retryCount()).thenReturn(6L);
+        when(taskQueue.deadLetterCount()).thenReturn(2L);
+
+        assertThat(registry.get("aiaggregator.task.queue.size").tag("state", "retry").gauge().value())
+                .isEqualTo(6);
+        assertThat(registry.get("aiaggregator.task.queue.size")
+                .tag("state", "dead-letter").gauge().value()).isEqualTo(2);
+        assertMeterIdsUseClosedLowCardinalityContract();
+    }
+
     private void assertMeterIdsUseClosedLowCardinalityContract() {
         Set<String> allowedKeys = Set.of("state", "source", "outcome", "operation");
         Set<String> allowedValues = Set.of(
-                "pending", "processing",
+                "pending", "processing", "retry", "dead-letter",
                 "twitter", "github", "unknown",
                 "success", "failure", "retryable_failure", "non_retryable_failure", "unexpected_failure", "skipped",
-                "content_fetch", "batch_publish");
+                "content_fetch", "batch_publish",
+                "scheduled", "dispatched", "exhausted", "dead_lettered", "replayed");
         registry.getMeters().forEach(meter -> {
             assertThat(meter.getId().getName()).startsWith("aiaggregator.");
             assertThat(meter.getId().getTags())

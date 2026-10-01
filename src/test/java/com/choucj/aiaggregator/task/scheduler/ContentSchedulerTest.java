@@ -9,6 +9,7 @@ import com.choucj.aiaggregator.monitoring.TaskMetrics;
 import com.choucj.aiaggregator.processor.GitHubProcessor;
 import com.choucj.aiaggregator.processor.TwitterProcessor;
 import com.choucj.aiaggregator.processor.config.ProcessorProperties;
+import com.choucj.aiaggregator.task.queue.RetryPolicyProperties;
 import com.choucj.aiaggregator.task.queue.TaskQueue;
 import com.choucj.aiaggregator.task.queue.TaskRecoveryRunner;
 import org.junit.jupiter.api.BeforeEach;
@@ -17,7 +18,10 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.slf4j.MDC;
+import java.time.Clock;
+import java.time.Instant;
 import java.time.YearMonth;
+import java.time.ZoneOffset;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
 
@@ -27,6 +31,7 @@ import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.doAnswer;
@@ -48,13 +53,20 @@ import static org.mockito.Mockito.when;
  *   <li>recovery 失败仍继续 processContent(应用启动不被阻塞)</li>
  * </ul>
  *
- * <p><b>Story 2.6 更新:</b> 构造器从 3 参数扩展为 5 参数, 加 {@link TwitterProcessor} mock
- * + {@link ProcessorProperties} mock (Patch-3 修复 — 配置驱动 taskId 前缀路由).
- * 现有 7 用例 taskId="task-1" 不匹配 "twitter:" 前缀, 走 "未知前缀" 路径不调 process(),
- * 业务逻辑不变.
+ * <p><b>Story 10.5 review 更新:</b> 批量任务 ID 日期化为 {@code twitter:run:{yyyy-MM-dd}}
+ * (任务身份决策 — 同日确定性 ID 兼作去重键, 跨日新实例消除 attempt 跨批累计与死信阻断),
+ * 全部用例经包级构造器注入 fixed Clock 保证日期确定; {@code markDeadLetter} 三参签名
+ * (errorCode + 白名单摘要); F-R3 指标旁路隔离与 F-R8 推进异常批次内隔离新增用例。
  */
 @ExtendWith({MockitoExtension.class, OutputCaptureExtension.class})
 class ContentSchedulerTest {
+
+    /** 固定时钟 — 2026-10-01T13:00Z(UTC 当日), 保证日期化实例 ID 可断言. */
+    private static final Clock FIXED_CLOCK =
+            Clock.fixed(Instant.parse("2026-10-01T13:00:00Z"), ZoneOffset.UTC);
+
+    /** fixed Clock 下的当日批量任务实例 ID. */
+    private static final String RUN_ID = "twitter:run:2026-10-01";
 
     @Mock
     private TaskQueue taskQueue;
@@ -77,17 +89,26 @@ class ContentSchedulerTest {
     @Mock
     private TaskMetrics taskMetrics;
 
-    private ContentScheduler scheduler;
-
     @BeforeEach
     void setUp() {
         MDC.clear();
         // lenient: 不所有用例都会路由到 processTask (例如 run-on-startup=false 的早返回用例)
         lenient().when(processorProperties.getTaskIdPrefix()).thenReturn("twitter");
         lenient().when(taskQueue.getProcessingTasks()).thenReturn(Set.of());
-        lenient().when(taskQueue.isQueued("twitter:run")).thenReturn(false);
-        scheduler = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
-                Optional.of(githubProcessor), processorProperties, true);
+        lenient().when(taskQueue.isQueued(RUN_ID)).thenReturn(false);
+    }
+
+    /** 标准调度器(fixed Clock, 无成本 gate/指标). */
+    private ContentScheduler scheduler() {
+        return scheduler(Optional.empty(), Optional.empty());
+    }
+
+    /** 带成本 gate / 指标注入的调度器(fixed Clock). */
+    private ContentScheduler scheduler(Optional<CostMonitor> costMonitor,
+                                       Optional<TaskMetrics> taskMetrics) {
+        return new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
+                Optional.of(githubProcessor), processorProperties, costMonitor, taskMetrics,
+                new RetryPolicyProperties(), true, FIXED_CLOCK);
     }
 
     @Test
@@ -101,7 +122,7 @@ class ContentSchedulerTest {
             return null;
         }).when(twitterProcessor).process();
 
-        scheduler.processContent();
+        scheduler().processContent();
 
         assertThat(MDC.getCopyOfContextMap()).isNullOrEmpty();
     }
@@ -116,14 +137,14 @@ class ContentSchedulerTest {
             return null;
         }).when(recoveryRunner).recoverPendingTasks();
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
-                .thenReturn("twitter:run")
+                .thenReturn(RUN_ID)
                 .thenReturn(null);
         doAnswer(invocation -> {
             processingCorrelationId[0] = CorrelationContext.require();
             return null;
         }).when(twitterProcessor).process();
 
-        scheduler.onStartup();
+        scheduler().onStartup();
 
         assertThat(recoveryCorrelationId[0]).isNotBlank();
         assertThat(processingCorrelationId[0]).isNotBlank().isNotEqualTo(recoveryCorrelationId[0]);
@@ -136,7 +157,7 @@ class ContentSchedulerTest {
                 .thenReturn("task-1")
                 .thenReturn(null);
 
-        scheduler.processContent();
+        scheduler().processContent();
 
         verify(taskQueue).complete("task-1");
     }
@@ -145,7 +166,7 @@ class ContentSchedulerTest {
     void should_not_call_complete_when_queue_is_empty() {
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
-        scheduler.processContent();
+        scheduler().processContent();
 
         verify(taskQueue, never()).complete(any());
     }
@@ -156,22 +177,22 @@ class ContentSchedulerTest {
                 .thenThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "redis down"));
 
         // 调度器吞异常不抛出,不中断
-        scheduler.processContent();
+        scheduler().processContent();
 
         // 验证调度器仍可再次执行 — 第二次 poll 正常返回 null
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
-        scheduler.processContent();
+        scheduler().processContent();
     }
 
     @Test
     void should_trigger_recovery_before_processing_when_application_starts() {
-        when(taskQueue.isQueued("twitter:run")).thenReturn(false, true);
+        when(taskQueue.isQueued(RUN_ID)).thenReturn(false, true);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
-        scheduler.onStartup();
+        scheduler().onStartup();
 
         verify(recoveryRunner).recoverPendingTasks();
-        verify(taskQueue).push("twitter:run");
+        verify(taskQueue).push(RUN_ID);
         verify(taskQueue).poll(eq(0L), eq(TimeUnit.SECONDS));
     }
 
@@ -179,13 +200,13 @@ class ContentSchedulerTest {
     void should_continue_processing_when_recovery_throws_retryable_exception() {
         doThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "recovery fail"))
                 .when(recoveryRunner).recoverPendingTasks();
-        when(taskQueue.isQueued("twitter:run")).thenReturn(false, true);
+        when(taskQueue.isQueued(RUN_ID)).thenReturn(false, true);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
-        scheduler.onStartup();
+        scheduler().onStartup();
 
         verify(recoveryRunner).recoverPendingTasks();
-        verify(taskQueue).push("twitter:run");
+        verify(taskQueue).push(RUN_ID);
         verify(taskQueue).poll(eq(0L), eq(TimeUnit.SECONDS));
     }
 
@@ -193,13 +214,13 @@ class ContentSchedulerTest {
     void should_continue_processing_when_recovery_throws_unexpected_exception() {
         doThrow(new RuntimeException("unexpected"))
                 .when(recoveryRunner).recoverPendingTasks();
-        when(taskQueue.isQueued("twitter:run")).thenReturn(false, true);
+        when(taskQueue.isQueued(RUN_ID)).thenReturn(false, true);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
-        scheduler.onStartup();
+        scheduler().onStartup();
 
         verify(recoveryRunner).recoverPendingTasks();
-        verify(taskQueue).push("twitter:run");
+        verify(taskQueue).push(RUN_ID);
         verify(taskQueue).poll(eq(0L), eq(TimeUnit.SECONDS));
     }
 
@@ -208,7 +229,8 @@ class ContentSchedulerTest {
     @Test
     void should_skip_startup_processing_when_run_on_startup_is_false() {
         ContentScheduler disabled = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
-                Optional.of(githubProcessor), processorProperties, false);
+                Optional.of(githubProcessor), processorProperties, Optional.empty(),
+                Optional.empty(), new RetryPolicyProperties(), false, FIXED_CLOCK);
 
         disabled.onStartup();
 
@@ -221,13 +243,14 @@ class ContentSchedulerTest {
     void should_honor_cron_when_run_on_startup_is_false() {
         // run-on-startup=false 不影响 cron 触发的 processContent
         ContentScheduler disabled = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
-                Optional.of(githubProcessor), processorProperties, false);
+                Optional.of(githubProcessor), processorProperties, Optional.empty(),
+                Optional.empty(), new RetryPolicyProperties(), false, FIXED_CLOCK);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
         disabled.processContent();
 
         verify(taskQueue).poll(eq(0L), eq(TimeUnit.SECONDS));
-        verify(taskQueue).push("twitter:run");
+        verify(taskQueue).push(RUN_ID);
         verifyNoInteractions(recoveryRunner);
     }
 
@@ -237,14 +260,14 @@ class ContentSchedulerTest {
     void should_route_twitter_task_when_prefix_matches() {
         // taskId 以 "twitter:" 前缀开头 → 路由到 TwitterProcessor.process()
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
-                .thenReturn("twitter:run")
+                .thenReturn(RUN_ID)
                 .thenReturn(null);
 
-        scheduler.processContent();
+        scheduler().processContent();
 
         verify(twitterProcessor).process();
-        verify(taskQueue).push("twitter:run");
-        verify(taskQueue).complete("twitter:run");
+        verify(taskQueue).push(RUN_ID);
+        verify(taskQueue).complete(RUN_ID);
     }
 
     @Test
@@ -254,10 +277,10 @@ class ContentSchedulerTest {
                 .thenReturn("unknown:xyz")
                 .thenReturn(null);
 
-        scheduler.processContent();
+        scheduler().processContent();
 
         verify(twitterProcessor, never()).process();
-        verify(taskQueue).push("twitter:run");
+        verify(taskQueue).push(RUN_ID);
         verify(taskQueue).complete("unknown:xyz");
         assertThat(output.getOut()).contains("未知 taskId 前缀");
     }
@@ -269,10 +292,10 @@ class ContentSchedulerTest {
                 .thenReturn("   ")
                 .thenReturn(null);
 
-        scheduler.processContent();
+        scheduler().processContent();
 
         verify(twitterProcessor, never()).process();
-        verify(taskQueue).push("twitter:run");
+        verify(taskQueue).push(RUN_ID);
         verify(taskQueue).complete("   ");
         assertThat(output.getOut()).contains("taskId 为空");
     }
@@ -281,15 +304,15 @@ class ContentSchedulerTest {
     void should_route_multiple_twitter_tasks_when_batch_contains_multiple_items() {
         // 队列中含多个 twitter: 任务 → 顺序路由, 全部 process + complete
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
-                .thenReturn("twitter:run")
+                .thenReturn(RUN_ID)
                 .thenReturn("twitter:tweet:123")
                 .thenReturn(null);
 
-        scheduler.processContent();
+        scheduler().processContent();
 
         verify(twitterProcessor, times(2)).process();
-        verify(taskQueue).push("twitter:run");
-        verify(taskQueue).complete("twitter:run");
+        verify(taskQueue).push(RUN_ID);
+        verify(taskQueue).complete(RUN_ID);
         verify(taskQueue).complete("twitter:tweet:123");
     }
 
@@ -303,16 +326,17 @@ class ContentSchedulerTest {
     void should_route_task_when_configured_prefix_matches() {
         when(processorProperties.getTaskIdPrefix()).thenReturn("twitter-stage");
         ContentScheduler staged = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
-                Optional.of(githubProcessor), processorProperties, true);
+                Optional.of(githubProcessor), processorProperties, Optional.empty(),
+                Optional.empty(), new RetryPolicyProperties(), true, FIXED_CLOCK);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
-                .thenReturn("twitter-stage:run")
+                .thenReturn("twitter-stage:run:2026-10-01")
                 .thenReturn(null);
 
         staged.processContent();
 
         verify(twitterProcessor).process();
-        verify(taskQueue).push("twitter-stage:run");
-        verify(taskQueue).complete("twitter-stage:run");
+        verify(taskQueue).push("twitter-stage:run:2026-10-01");
+        verify(taskQueue).complete("twitter-stage:run:2026-10-01");
     }
 
     /**
@@ -322,9 +346,10 @@ class ContentSchedulerTest {
     void should_treat_old_prefix_as_unknown_when_configuration_changes(CapturedOutput output) {
         when(processorProperties.getTaskIdPrefix()).thenReturn("twitter-stage");
         ContentScheduler staged = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
-                Optional.of(githubProcessor), processorProperties, true);
+                Optional.of(githubProcessor), processorProperties, Optional.empty(),
+                Optional.empty(), new RetryPolicyProperties(), true, FIXED_CLOCK);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
-                .thenReturn("twitter:run")
+                .thenReturn("twitter:run:2026-10-01")
                 .thenReturn(null);
 
         staged.processContent();
@@ -339,14 +364,14 @@ class ContentSchedulerTest {
     void should_route_github_task_when_processor_is_registered() {
         // AC-7: github: 前缀 → GitHubProcessor.process(), 不调 TwitterProcessor
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
-                .thenReturn("github:run")
+                .thenReturn("github:run:2026-10-01")
                 .thenReturn(null);
 
-        scheduler.processContent();
+        scheduler().processContent();
 
         verify(githubProcessor).process();
         verify(twitterProcessor, never()).process();
-        verify(taskQueue).complete("github:run");
+        verify(taskQueue).complete("github:run:2026-10-01");
     }
 
     @Test
@@ -354,32 +379,32 @@ class ContentSchedulerTest {
         // AC-7: github.enabled=false → GitHubProcessor Bean 未注册, Optional.empty
         // github: 任务走 warn 日志跳过, 不抛异常 (仍 complete 避免队列阻塞)
         ContentScheduler withoutGithub = new ContentScheduler(taskQueue, recoveryRunner,
-                twitterProcessor, Optional.empty(), processorProperties, true);
+                twitterProcessor, Optional.empty(), processorProperties, Optional.empty(),
+                Optional.empty(), new RetryPolicyProperties(), true, FIXED_CLOCK);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
-                .thenReturn("github:run")
+                .thenReturn("github:run:2026-10-01")
                 .thenReturn(null);
 
         withoutGithub.processContent();
 
         verify(twitterProcessor, never()).process();
-        verify(taskQueue).complete("github:run");
+        verify(taskQueue).complete("github:run:2026-10-01");
         assertThat(output.getOut()).contains("GitHubProcessor 未注册");
-        assertThat(output.getOut()).contains("taskId=github:run");
+        assertThat(output.getOut()).contains("taskId=github:run:2026-10-01");
     }
 
     @Test
     void should_push_twitter_run_when_cron_triggers() {
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
-        scheduler.processContent();
+        scheduler().processContent();
 
-        verify(taskQueue).push("twitter:run");
+        verify(taskQueue).push(RUN_ID);
     }
 
     @Test
     void should_skip_automatic_processing_when_cost_budget_is_halted(CapturedOutput output) {
-        ContentScheduler budgetGated = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
-                Optional.of(githubProcessor), processorProperties, Optional.of(costMonitor), true);
+        ContentScheduler budgetGated = scheduler(Optional.of(costMonitor), Optional.empty());
         when(costMonitor.refreshAndCheckProcessingHalted(any(YearMonth.class))).thenReturn(true);
 
         budgetGated.processContent();
@@ -392,41 +417,38 @@ class ContentSchedulerTest {
 
     @Test
     void should_continue_automatic_processing_when_cost_monitor_fails(CapturedOutput output) {
-        ContentScheduler budgetGated = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
-                Optional.of(githubProcessor), processorProperties, Optional.of(costMonitor), true);
+        ContentScheduler budgetGated = scheduler(Optional.of(costMonitor), Optional.empty());
         when(costMonitor.refreshAndCheckProcessingHalted(any(YearMonth.class))).thenThrow(new RuntimeException("redis down"));
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
         budgetGated.processContent();
 
-        verify(taskQueue).push("twitter:run");
+        verify(taskQueue).push(RUN_ID);
         verify(taskQueue).poll(eq(0L), eq(TimeUnit.SECONDS));
         assertThat(output.getOut()).contains("读取成本预算 gate 失败");
     }
 
     @Test
     void should_refresh_current_month_cost_when_automatic_processing_starts() {
-        ContentScheduler budgetGated = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
-                Optional.of(githubProcessor), processorProperties, Optional.of(costMonitor), true);
+        ContentScheduler budgetGated = scheduler(Optional.of(costMonitor), Optional.empty());
         when(costMonitor.refreshAndCheckProcessingHalted(any(YearMonth.class))).thenReturn(false);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
         budgetGated.processContent();
 
         verify(costMonitor).refreshAndCheckProcessingHalted(any(YearMonth.class));
-        verify(taskQueue).push("twitter:run");
+        verify(taskQueue).push(RUN_ID);
     }
 
     @Test
     void should_not_enqueue_task_when_budget_gate_halts_processing() {
-        ContentScheduler budgetGated = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
-                Optional.of(githubProcessor), processorProperties, Optional.of(costMonitor), true);
+        ContentScheduler budgetGated = scheduler(Optional.of(costMonitor), Optional.empty());
         when(costMonitor.refreshAndCheckProcessingHalted(any(YearMonth.class))).thenReturn(true);
 
         budgetGated.onStartup();
 
         verify(recoveryRunner).recoverPendingTasks();
-        verify(taskQueue, never()).push("twitter:run");
+        verify(taskQueue, never()).push(RUN_ID);
         verify(taskQueue, never()).poll(any(Long.class), any(TimeUnit.class));
     }
 
@@ -434,36 +456,68 @@ class ContentSchedulerTest {
     void should_push_twitter_run_when_application_starts() {
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
-        scheduler.onStartup();
+        scheduler().onStartup();
 
-        verify(taskQueue).push("twitter:run");
+        verify(taskQueue).push(RUN_ID);
     }
 
     @Test
     void should_skip_push_when_run_task_is_already_queued() {
-        when(taskQueue.isQueued("twitter:run")).thenReturn(true);
+        when(taskQueue.isQueued(RUN_ID)).thenReturn(true);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
-        scheduler.processContent();
+        scheduler().processContent();
 
-        verify(taskQueue, never()).push("twitter:run");
+        verify(taskQueue, never()).push(RUN_ID);
     }
 
     @Test
     void should_skip_push_when_run_task_is_already_processing() {
-        when(taskQueue.getProcessingTasks()).thenReturn(Set.of("twitter:run"));
+        when(taskQueue.getProcessingTasks()).thenReturn(Set.of(RUN_ID));
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
-        scheduler.processContent();
+        scheduler().processContent();
 
-        verify(taskQueue, never()).push("twitter:run");
+        verify(taskQueue, never()).push(RUN_ID);
+    }
+
+    // ============ Story 10.5 review F-R1: 日期化任务实例 ID(任务身份模型) ============
+
+    @Test
+    void should_reuse_same_day_instance_id_and_dedupe_when_triggered_twice() {
+        // 同日多次触发(cron/startup)生成同一确定性 ID — 首次 push, 二次经 isQueued 守卫跳过
+        when(taskQueue.isQueued(RUN_ID)).thenReturn(false, true);
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
+
+        scheduler().processContent();
+        scheduler().processContent();
+
+        verify(taskQueue, times(1)).push(RUN_ID);
     }
 
     @Test
+    void should_generate_new_instance_id_when_crossing_day_boundary() {
+        // 跨日新实例 ID — 消除固定 ID 死信阻断与 attempt 跨批累计
+        Clock day2 = Clock.fixed(Instant.parse("2026-10-02T13:00:00Z"), ZoneOffset.UTC);
+        ContentScheduler nextDay = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
+                Optional.of(githubProcessor), processorProperties, Optional.empty(),
+                Optional.empty(), new RetryPolicyProperties(), true, day2);
+        when(taskQueue.isQueued(anyString())).thenReturn(false);
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
+
+        scheduler().processContent();
+        nextDay.processContent();
+
+        verify(taskQueue).push("twitter:run:2026-10-01");
+        verify(taskQueue).push("twitter:run:2026-10-02");
+    }
+
+    // ============ Story 10.5: 失败推进(F-R3 指标隔离 / F-R8 推进异常隔离) ============
+
+    @Test
     void should_record_success_and_window_once_when_task_completes() {
-        ContentScheduler observed = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
-                Optional.of(githubProcessor), processorProperties, Optional.empty(), Optional.of(taskMetrics), true);
-        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn("twitter:run", null);
+        ContentScheduler observed = scheduler(Optional.empty(), Optional.of(taskMetrics));
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(RUN_ID, null);
 
         observed.processContent();
 
@@ -473,8 +527,7 @@ class ContentSchedulerTest {
 
     @Test
     void should_record_skipped_when_task_prefix_is_unknown() {
-        ContentScheduler observed = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
-                Optional.of(githubProcessor), processorProperties, Optional.empty(), Optional.of(taskMetrics), true);
+        ContentScheduler observed = scheduler(Optional.empty(), Optional.of(taskMetrics));
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn("unknown:https://secret.example/id", null);
 
         observed.processContent();
@@ -484,14 +537,16 @@ class ContentSchedulerTest {
 
     @Test
     void should_record_closed_failure_outcomes_when_processing_fails() {
-        ContentScheduler observed = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
-                Optional.of(githubProcessor), processorProperties, Optional.empty(), Optional.of(taskMetrics), true);
+        ContentScheduler observed = scheduler(Optional.empty(), Optional.of(taskMetrics));
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
                 .thenReturn("twitter:retryable", "twitter:non-retryable", "twitter:unexpected", null);
         doThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "temporary"))
                 .doThrow(new NonRetryableException(ErrorCode.INTERNAL_ERROR, "permanent"))
                 .doThrow(new IllegalStateException("unexpected"))
                 .when(twitterProcessor).process();
+        when(taskQueue.recordRetryableFailure(anyString(), anyString(), anyString(),
+                any(RetryPolicyProperties.class)))
+                .thenReturn(TaskQueue.RetryAdvance.scheduled(1, System.currentTimeMillis()));
 
         observed.processContent();
         observed.processContent();
@@ -500,20 +555,168 @@ class ContentSchedulerTest {
         verify(taskMetrics).recordProcessed(TaskMetrics.Source.TWITTER, TaskMetrics.Outcome.RETRYABLE_FAILURE);
         verify(taskMetrics).recordProcessed(TaskMetrics.Source.TWITTER, TaskMetrics.Outcome.NON_RETRYABLE_FAILURE);
         verify(taskMetrics).recordProcessed(TaskMetrics.Source.TWITTER, TaskMetrics.Outcome.UNEXPECTED_FAILURE);
-        // Story 10.4: 不可重试失败走死信终态而非误写 COMPLETED; 可重试失败留在 processing 集合
-        verify(taskQueue).markDeadLetter(eq("twitter:non-retryable"), eq("permanent"));
+        // Story 10.4: 不可重试失败走死信终态而非误写 COMPLETED
+        // F-R5: 错误摘要白名单化 — 只入 errorCode + 消息长度, 不持久化异常原文(N4)
+        verify(taskQueue).markDeadLetter(eq("twitter:non-retryable"),
+                eq(ErrorCode.INTERNAL_ERROR.name()), eq("INTERNAL_ERROR len=9"));
         verify(taskQueue, never()).complete(eq("twitter:non-retryable"));
+        // Story 10.5: 可重试失败不再留 processing, 而是原子推进重试/死信(摘要同样白名单化)
+        verify(taskQueue).recordRetryableFailure(eq("twitter:retryable"),
+                eq(ErrorCode.REDIS_CONNECTION_ERROR.name()), eq("REDIS_CONNECTION_ERROR len=9"),
+                any(RetryPolicyProperties.class));
         verify(taskQueue, never()).complete(eq("twitter:retryable"));
     }
 
     @Test
+    void should_record_exhausted_retry_metric_when_attempts_exhausted() {
+        ContentScheduler observed = scheduler(Optional.empty(), Optional.of(taskMetrics));
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter:retryable", null);
+        doThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "temporary"))
+                .when(twitterProcessor).process();
+        when(taskQueue.recordRetryableFailure(anyString(), anyString(), anyString(),
+                any(RetryPolicyProperties.class)))
+                .thenReturn(TaskQueue.RetryAdvance.deadLettered(3));
+
+        observed.processContent();
+
+        verify(taskMetrics).recordRetry(TaskMetrics.RetryMetricOutcome.EXHAUSTED);
+        verify(taskMetrics, never()).recordRetry(TaskMetrics.RetryMetricOutcome.SCHEDULED);
+    }
+
+    @Test
+    void should_not_record_dead_lettered_metric_when_mark_dead_letter_skipped() {
+        // F13: markDeadLetter 返回 false = 任务不在 processing(幂等跳过),
+        // 死信并未真正发生, 计 DEAD_LETTERED 会让死信指标虚高误导运维
+        ContentScheduler observed = scheduler(Optional.empty(), Optional.of(taskMetrics));
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter:non-retryable", null);
+        doThrow(new NonRetryableException(ErrorCode.INTERNAL_ERROR, "permanent"))
+                .when(twitterProcessor).process();
+        when(taskQueue.markDeadLetter(anyString(), anyString(), anyString())).thenReturn(false);
+
+        observed.processContent();
+
+        verify(taskQueue).markDeadLetter(eq("twitter:non-retryable"),
+                eq(ErrorCode.INTERNAL_ERROR.name()), eq("INTERNAL_ERROR len=9"));
+        verify(taskMetrics, never()).recordRetry(any(TaskMetrics.RetryMetricOutcome.class));
+    }
+
+    @Test
+    void should_continue_failure_handling_when_metric_recording_throws() {
+        // F14 + F-R3: 指标组件故障只降级为告警 — 先权威状态迁移后旁路指标,
+        // 指标抛出不得影响已完成的失败推进, 也不得中断批次
+        ContentScheduler observed = scheduler(Optional.empty(), Optional.of(taskMetrics));
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter:retryable", "twitter:healthy", null);
+        doThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "temporary"))
+                .doNothing()
+                .when(twitterProcessor).process();
+        when(taskQueue.recordRetryableFailure(anyString(), anyString(), anyString(),
+                any(RetryPolicyProperties.class)))
+                .thenReturn(TaskQueue.RetryAdvance.scheduled(1, System.currentTimeMillis()));
+        doThrow(new IllegalStateException("metrics registry broken"))
+                .when(taskMetrics).recordRetry(TaskMetrics.RetryMetricOutcome.SCHEDULED);
+
+        observed.processContent();
+
+        // 主流程不受影响: 失败推进照常执行, 后续健康任务照常处理成功
+        verify(taskQueue).recordRetryableFailure(eq("twitter:retryable"),
+                eq(ErrorCode.REDIS_CONNECTION_ERROR.name()), anyString(),
+                any(RetryPolicyProperties.class));
+        verify(taskMetrics).recordProcessed(TaskMetrics.Source.TWITTER,
+                TaskMetrics.Outcome.RETRYABLE_FAILURE);
+        verify(taskQueue).complete("twitter:healthy");
+    }
+
+    @Test
+    void should_continue_loop_when_retryable_task_not_in_processing_set() {
+        ContentScheduler observed = scheduler(Optional.empty(), Optional.of(taskMetrics));
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter:retryable", null);
+        doThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "temporary"))
+                .when(twitterProcessor).process();
+        // NOT_IN_PROCESSING: 任务已被并发恢复迁出, 幂等跳过不抛异常, while 循环继续
+        when(taskQueue.recordRetryableFailure(anyString(), anyString(), anyString(),
+                any(RetryPolicyProperties.class)))
+                .thenReturn(TaskQueue.RetryAdvance.notInProcessing());
+
+        observed.processContent();
+
+        verify(taskQueue, never()).complete(eq("twitter:retryable"));
+        verify(taskMetrics).recordProcessed(TaskMetrics.Source.TWITTER,
+                TaskMetrics.Outcome.RETRYABLE_FAILURE);
+    }
+
+    @Test
+    void should_continue_batch_when_retry_advance_throws_non_retryable(CapturedOutput output) {
+        // F-R8: state 数据损坏令 recordRetryableFailure 抛 NonRetryableException —
+        // 推进异常批次内隔离(任务保持 PROCESSING 待恢复重排), 不得中断批次拖累后续健康任务
+        ContentScheduler observed = scheduler(Optional.empty(), Optional.of(taskMetrics));
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter:corrupt", "twitter:healthy", null);
+        doThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "temporary"))
+                .doNothing()
+                .when(twitterProcessor).process();
+        when(taskQueue.recordRetryableFailure(eq("twitter:corrupt"), anyString(), anyString(),
+                any(RetryPolicyProperties.class)))
+                .thenThrow(new NonRetryableException(ErrorCode.REDIS_DATA_ERROR, "corrupt state"));
+
+        observed.processContent();
+
+        verify(taskMetrics).recordProcessed(TaskMetrics.Source.TWITTER,
+                TaskMetrics.Outcome.RETRYABLE_FAILURE);
+        verify(twitterProcessor, times(2)).process();
+        verify(taskQueue).complete("twitter:healthy");
+        assertThat(output.getOut()).contains("可重试失败推进异常");
+    }
+
+    @Test
+    void should_continue_batch_when_retry_advance_throws_unexpected(CapturedOutput output) {
+        // F-R8: 推进自身的 RuntimeException 同样批次内隔离
+        ContentScheduler observed = scheduler(Optional.empty(), Optional.of(taskMetrics));
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter:broken", "twitter:healthy", null);
+        doThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "temporary"))
+                .doNothing()
+                .when(twitterProcessor).process();
+        when(taskQueue.recordRetryableFailure(eq("twitter:broken"), anyString(), anyString(),
+                any(RetryPolicyProperties.class)))
+                .thenThrow(new IllegalStateException("cluster topology changed"));
+
+        observed.processContent();
+
+        verify(twitterProcessor, times(2)).process();
+        verify(taskQueue).complete("twitter:healthy");
+        assertThat(output.getOut()).contains("可重试失败推进异常");
+    }
+
+    @Test
+    void should_continue_batch_when_dead_letter_advance_throws(CapturedOutput output) {
+        // F-R8: 不可重试失败的死信推进异常同样批次内隔离
+        ContentScheduler observed = scheduler(Optional.empty(), Optional.of(taskMetrics));
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter:corrupt", "twitter:healthy", null);
+        doThrow(new NonRetryableException(ErrorCode.INTERNAL_ERROR, "permanent"))
+                .doNothing()
+                .when(twitterProcessor).process();
+        when(taskQueue.markDeadLetter(eq("twitter:corrupt"), anyString(), anyString()))
+                .thenThrow(new NonRetryableException(ErrorCode.REDIS_DATA_ERROR, "state attempt corrupt"));
+
+        observed.processContent();
+
+        verify(twitterProcessor, times(2)).process();
+        verify(taskQueue).complete("twitter:healthy");
+        assertThat(output.getOut()).contains("不可重试失败推进异常");
+    }
+
+    @Test
     void should_record_unknown_failure_when_route_resolution_fails() {
-        ContentScheduler observed = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
-                Optional.of(githubProcessor), processorProperties, Optional.empty(), Optional.of(taskMetrics), true);
+        ContentScheduler observed = scheduler(Optional.empty(), Optional.of(taskMetrics));
         when(processorProperties.getTaskIdPrefix())
                 .thenReturn("twitter")
                 .thenThrow(new IllegalStateException("route config unavailable"));
-        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn("twitter:run");
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(RUN_ID);
 
         observed.processContent();
 
@@ -522,24 +725,24 @@ class ContentSchedulerTest {
 
     @Test
     void should_enqueue_and_process_when_startup_task_is_absent() {
-        when(taskQueue.isQueued("twitter:run"))
+        when(taskQueue.isQueued(RUN_ID))
                 .thenReturn(false);
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS))).thenReturn(null);
 
-        scheduler.onStartup();
+        scheduler().onStartup();
 
-        verify(taskQueue).push("twitter:run");
+        verify(taskQueue).push(RUN_ID);
     }
 
     @Test
     void should_keep_startup_listener_alive_when_enqueue_fails() {
         doThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "redis down"))
-                .when(taskQueue).push("twitter:run");
+                .when(taskQueue).push(RUN_ID);
 
-        scheduler.onStartup();
+        scheduler().onStartup();
 
         verify(recoveryRunner).recoverPendingTasks();
-        verify(taskQueue).push("twitter:run");
+        verify(taskQueue).push(RUN_ID);
         verify(taskQueue, never()).poll(eq(0L), eq(TimeUnit.SECONDS));
     }
 }
