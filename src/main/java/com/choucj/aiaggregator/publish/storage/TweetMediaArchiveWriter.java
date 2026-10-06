@@ -6,6 +6,9 @@ import com.choucj.aiaggregator.publish.storage.config.ArchiverProperties;
 import com.choucj.aiaggregator.source.twitter.config.TwitterMediaProperties;
 import com.choucj.aiaggregator.source.twitter.model.MediaDownloadStatus;
 import com.choucj.aiaggregator.source.twitter.model.MediaUploadStatus;
+import com.choucj.aiaggregator.source.twitter.model.MediaPhaseState;
+import com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus;
+import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import com.choucj.aiaggregator.source.twitter.model.PublishabilityStatus;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
 import com.fasterxml.jackson.core.JsonProcessingException;
@@ -19,6 +22,7 @@ import java.io.IOException;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.time.DateTimeException;
@@ -135,20 +139,28 @@ public class TweetMediaArchiveWriter {
      * @return 写入的 sidecar record
      */
     public MediaArchiveRecord writeSidecar(String tweetId, LocalDateTime publishedAt, List<TweetMedia> media) {
+        LocalDate canonicalDate = resolveCanonicalDate(tweetId, publishedAt, true);
         List<TweetMedia> safeMedia = media == null ? List.of() : new ArrayList<>(media);
         MediaArchiveRecord record = MediaArchiveRecord.builder()
                 .tweetId(tweetId)
                 .generatedAt(LocalDateTime.now())
+                .canonicalArchiveDate(canonicalDate)
                 .media(safeMedia)
                 .build();
 
         long startNanos = System.nanoTime();
-        Path dir = resolveArchiveDir(tweetId, publishedAt);
+        Path dir = resolveArchiveDirForDate(tweetId, canonicalDate);
         // review patch-2: 按目录加锁, 保证整个 ensureDir+serialize+write 串行, 防止并发 writeSidecar
         // 与 updateMedia (内部调本方法, 同线程可重入) 交错丢失更新
         synchronized (dirLock(dir)) {
             ensureDirectoryExists(dir, tweetId);
             Path file = dir.resolve(sidecarFilename);
+
+            if (Files.exists(file)) {
+                readSidecar(tweetId, publishedAt).ifPresent(existing ->
+                        record.setCanonicalArchiveDate(existing.getCanonicalArchiveDate()));
+            }
+            initializeSchema(record);
 
             byte[] bytes = serialize(record, tweetId);
             writeBytes(file, bytes, tweetId);
@@ -173,13 +185,19 @@ public class TweetMediaArchiveWriter {
      * publishability 字段时反序列化为 null。读出后统一补默认值, 免调用方 null-safe 负担 (D3 警示)。
      */
     public Optional<MediaArchiveRecord> readSidecar(String tweetId, LocalDateTime publishedAt) {
-        Path file = resolveSidecarFile(tweetId, publishedAt);
+        LocalDate canonicalDate = resolveCanonicalDate(tweetId, publishedAt, false);
+        Path file = resolveArchiveDirForDate(tweetId, canonicalDate).resolve(sidecarFilename);
         if (!Files.exists(file)) {
             return Optional.empty();
         }
         try {
             byte[] bytes = Files.readAllBytes(file);
-            return Optional.ofNullable(backfillDefaults(objectMapper.readValue(bytes, MediaArchiveRecord.class)));
+            MediaArchiveRecord record = backfillDefaults(objectMapper.readValue(bytes, MediaArchiveRecord.class));
+            if (record != null && record.getCanonicalArchiveDate() == null) {
+                record.setCanonicalArchiveDate(canonicalDate);
+            }
+            writeCanonicalDateIndexIfAbsent(tweetId, canonicalDate);
+            return Optional.ofNullable(record);
         } catch (JsonProcessingException e) {
             log.error("media.json 损坏 (JSON 解析失败), 按未归档重新处理: tweetId={}, 文件={}, error={}",
                     tweetId, file, TextTruncateUtil.truncateForLog(TextTruncateUtil.getRootMessage(e), LOG_MSG_MAX_LENGTH));
@@ -302,12 +320,89 @@ public class TweetMediaArchiveWriter {
      * <p>public 可见性: TweetMediaArchiver 需要调用 (Story 7.2).
      */
     public Path resolveArchiveDir(String tweetId, LocalDateTime publishedAt) {
+        return resolveArchiveDirForDate(tweetId, resolveCanonicalDate(tweetId, publishedAt, false));
+    }
+
+    /** 不依赖执行日期读取首次持久化的 canonical sidecar，供跨日恢复、门禁与补跑使用。 */
+    public Optional<MediaArchiveRecord> readCanonicalSidecar(String tweetId) {
         validateTweetId(tweetId);
-        LocalDateTime when = publishedAt != null ? publishedAt : LocalDateTime.now();
-        if (publishedAt == null) {
-            log.warn("推文 publishedAt 为 null, fallback 到当前时刻归档: tweetId={}", tweetId);
+        Optional<LocalDate> indexed = readCanonicalDateIndex(tweetId);
+        if (indexed.isEmpty()) {
+            return Optional.empty();
         }
-        String datePart = when.toLocalDate().format(dateFormatter);
+        Path file = resolveArchiveDirForDate(tweetId, indexed.get()).resolve(sidecarFilename);
+        if (!Files.exists(file)) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.ofNullable(backfillDefaults(objectMapper.readValue(Files.readAllBytes(file),
+                    MediaArchiveRecord.class)));
+        } catch (JsonProcessingException e) {
+            log.error("canonical media.json 损坏: tweetId={}, error={}", tweetId,
+                    TextTruncateUtil.truncateForLog(TextTruncateUtil.getRootMessage(e), LOG_MSG_MAX_LENGTH));
+            return Optional.empty();
+        } catch (IOException e) {
+            log.warn("canonical media.json 读取失败: tweetId={}, error={}", tweetId,
+                    TextTruncateUtil.truncateForLog(TextTruncateUtil.getRootMessage(e), LOG_MSG_MAX_LENGTH));
+            return Optional.empty();
+        }
+    }
+
+    /** 仅在最终正文实际包含已准备媒体 URL 时标记引用成功。 */
+    public boolean markArticleReferencesSucceeded(String tweetId, String renderedContent) {
+        Optional<LocalDate> indexed = readCanonicalDateIndex(tweetId);
+        if (indexed.isEmpty()) {
+            return false;
+        }
+        Path dir = resolveArchiveDirForDate(tweetId, indexed.get());
+        synchronized (dirLock(dir)) {
+            return markArticleReferencesSucceededLocked(tweetId, renderedContent);
+        }
+    }
+
+    private boolean markArticleReferencesSucceededLocked(String tweetId, String renderedContent) {
+        Optional<MediaArchiveRecord> existing = readCanonicalSidecar(tweetId);
+        if (existing.isEmpty() || existing.get().getCanonicalArchiveDate() == null
+                || existing.get().getMedia() == null || !StringUtils.hasText(renderedContent)) {
+            return false;
+        }
+        MediaArchiveRecord record = existing.get();
+        List<TweetMedia> required = record.getMedia().stream()
+                .filter(Objects::nonNull)
+                .filter(media -> media.getType() == TweetMediaType.PHOTO
+                        || media.getType() == TweetMediaType.VIDEO)
+                .toList();
+        boolean allDeferredGif = required.isEmpty() && !record.getMedia().isEmpty()
+                && record.getMedia().stream().allMatch(media -> media != null
+                && media.getType() == TweetMediaType.GIF
+                && media.getDownload() != null
+                && media.getDownload().getStatus() == MediaPhaseStatus.DEFERRED
+                && StringUtils.hasText(media.getOriginalPostUrl())
+                && StringUtils.hasText(media.getManualInstruction()));
+        if (allDeferredGif) {
+            return true;
+        }
+        boolean evidenceComplete = !required.isEmpty() && required.stream().allMatch(media ->
+                media.getDownload() != null && media.getWechatPrepare() != null
+                        && media.getDownload().getStatus() == MediaPhaseStatus.SUCCEEDED
+                        && media.getWechatPrepare().getStatus() == MediaPhaseStatus.SUCCEEDED
+                        && StringUtils.hasText(media.getWechatUrl())
+                        && renderedContent.contains(media.getWechatUrl()));
+        if (!evidenceComplete) {
+            return false;
+        }
+        LocalDateTime now = LocalDateTime.now();
+        for (TweetMedia media : required) {
+            media.setArticleReference(MediaPhaseState.builder()
+                    .status(MediaPhaseStatus.SUCCEEDED).attempt(1).updatedAt(now).build());
+        }
+        writeSidecar(tweetId, record.getCanonicalArchiveDate().atStartOfDay(), record.getMedia());
+        return true;
+    }
+
+    private Path resolveArchiveDirForDate(String tweetId, LocalDate date) {
+        validateTweetId(tweetId);
+        String datePart = date.format(dateFormatter);
         Path baseNormalized = Path.of(baseDirectory).normalize();
         Path resolved = baseNormalized.resolve("media").resolve("twitter")
                 .resolve(datePart).resolve(tweetId).normalize();
@@ -316,6 +411,67 @@ public class TweetMediaArchiveWriter {
                     + " resolved=" + resolved + " tweetId=" + tweetId, null);
         }
         return resolved;
+    }
+
+    private LocalDate resolveCanonicalDate(String tweetId, LocalDateTime publishedAt, boolean persist) {
+        validateTweetId(tweetId);
+        Optional<LocalDate> indexed = readCanonicalDateIndex(tweetId);
+        if (indexed.isPresent()) {
+            return indexed.get();
+        }
+        LocalDate date = (publishedAt != null ? publishedAt : LocalDateTime.now()).toLocalDate();
+        if (publishedAt == null) {
+            log.warn("推文 publishedAt 为 null, fallback 到当前时刻归档: tweetId={}", tweetId);
+        }
+        if (persist) {
+            writeCanonicalDateIndexIfAbsent(tweetId, date);
+            return readCanonicalDateIndex(tweetId)
+                    .orElseThrow(() -> new NonRetryableException(
+                            "canonical archive date 索引写后缺失: tweetId=" + tweetId, null));
+        }
+        return date;
+    }
+
+    private Optional<LocalDate> readCanonicalDateIndex(String tweetId) {
+        Path index = canonicalIndexFile(tweetId);
+        if (!Files.exists(index)) {
+            return Optional.empty();
+        }
+        try {
+            return Optional.of(LocalDate.parse(Files.readString(index, StandardCharsets.UTF_8).trim(), dateFormatter));
+        } catch (IOException | DateTimeException e) {
+            throw new NonRetryableException("canonical archive date 索引损坏: tweetId=" + tweetId, e);
+        }
+    }
+
+    private void writeCanonicalDateIndexIfAbsent(String tweetId, LocalDate date) {
+        Path index = canonicalIndexFile(tweetId);
+        synchronized (dirLock(index.getParent())) {
+            if (Files.exists(index)) {
+                return;
+            }
+            try {
+                Files.createDirectories(index.getParent());
+                Files.writeString(index, date.format(dateFormatter), StandardCharsets.UTF_8,
+                        StandardOpenOption.CREATE_NEW, StandardOpenOption.WRITE);
+            } catch (java.nio.file.FileAlreadyExistsException ignored) {
+                // 并发首次创建由唯一赢家冻结日期。
+            } catch (IOException | SecurityException e) {
+                throw new NonRetryableException("媒体归档目录创建失败或 canonical archive date 索引写入失败: tweetId="
+                        + tweetId, e);
+            }
+        }
+    }
+
+    private Path canonicalIndexFile(String tweetId) {
+        validateTweetId(tweetId);
+        Path base = Path.of(baseDirectory).normalize();
+        Path index = base.resolve("media").resolve("twitter").resolve(".canonical")
+                .resolve(tweetId + ".date").normalize();
+        if (!index.startsWith(base)) {
+            throw new NonRetryableException("canonical archive date 索引路径逃逸: tweetId=" + tweetId, null);
+        }
+        return index;
     }
 
     /** 解析 sidecar 文件完整路径. */
@@ -398,6 +554,9 @@ public class TweetMediaArchiveWriter {
             return null;
         }
         List<TweetMedia> media = record.getMedia();
+        if (record.getCanonicalArchiveDate() == null && record.getGeneratedAt() != null) {
+            record.setCanonicalArchiveDate(record.getGeneratedAt().toLocalDate());
+        }
         if (media != null) {
             for (TweetMedia m : media) {
                 if (m == null) {
@@ -412,8 +571,85 @@ public class TweetMediaArchiveWriter {
                 if (m.getPublishability() == null) {
                     m.setPublishability(PublishabilityStatus.UNKNOWN);
                 }
+                backfillPhases(m);
             }
         }
         return record;
+    }
+
+    private static void initializeSchema(MediaArchiveRecord record) {
+        if (record.getMedia() == null) {
+            return;
+        }
+        for (TweetMedia media : record.getMedia()) {
+            if (media == null) {
+                continue;
+            }
+            if (media.getType() == TweetMediaType.GIF
+                    || (media.getType() == TweetMediaType.UNKNOWN && media.getManualInstruction() == null)) {
+                media.initializeDeliveryPhases(media.getOriginalPostUrl());
+            } else {
+                reconcilePhasesFromCompatibility(media);
+            }
+            projectCompatibility(media);
+        }
+    }
+
+    private static void backfillPhases(TweetMedia media) {
+        if (media.getType() == TweetMediaType.GIF) {
+            media.initializeDeliveryPhases(media.getOriginalPostUrl());
+            projectCompatibility(media);
+            return;
+        }
+        reconcilePhasesFromCompatibility(media);
+        projectCompatibility(media);
+    }
+
+    /**
+     * 旧链路仍通过 downloadStatus/uploadStatus 增量更新；在其迁移完成前，写盘时把这些
+     * 已完成/失败结果投影到新权威阶段，避免新 schema 反向把真实结果重置为 PENDING。
+     */
+    private static void reconcilePhasesFromCompatibility(TweetMedia media) {
+        if (media.getDownload() == null
+                || media.getDownload().getStatus() == null
+                || media.getDownload().getStatus() == MediaPhaseStatus.NOT_STARTED) {
+            MediaPhaseStatus status = switch (media.getDownloadStatus()) {
+                case DOWNLOADED -> MediaPhaseStatus.SUCCEEDED;
+                case FAILED -> MediaPhaseStatus.FAILED_TERMINAL;
+                default -> MediaPhaseStatus.NOT_STARTED;
+            };
+            media.setDownload(MediaPhaseState.builder().status(status)
+                    .attempt(status == MediaPhaseStatus.FAILED_TERMINAL ? 1 : 0)
+                    .updatedAt(status == MediaPhaseStatus.NOT_STARTED ? null : LocalDateTime.now())
+                    .build());
+        }
+        if (media.getWechatPrepare() == null
+                || media.getWechatPrepare().getStatus() == null
+                || media.getWechatPrepare().getStatus() == MediaPhaseStatus.NOT_STARTED) {
+            MediaPhaseStatus status = media.getUploadStatus() == MediaUploadStatus.UPLOADED
+                    ? MediaPhaseStatus.SUCCEEDED : MediaPhaseStatus.NOT_STARTED;
+            media.setWechatPrepare(MediaPhaseState.builder().status(status)
+                    .updatedAt(status == MediaPhaseStatus.NOT_STARTED ? null : LocalDateTime.now()).build());
+        }
+        if (media.getArticleReference() == null) {
+            media.setArticleReference(MediaPhaseState.notStarted());
+        }
+    }
+
+    private static void projectCompatibility(TweetMedia media) {
+        MediaPhaseStatus download = media.getDownload().getStatus();
+        media.setDownloadStatus(switch (download) {
+            case SUCCEEDED -> MediaDownloadStatus.DOWNLOADED;
+            case FAILED_TERMINAL, ENVIRONMENT_BLOCKED -> MediaDownloadStatus.FAILED;
+            case DEFERRED -> MediaDownloadStatus.SKIPPED;
+            default -> media.getDownloadStatus() == null ? MediaDownloadStatus.PENDING : media.getDownloadStatus();
+        });
+        MediaPhaseStatus prepare = media.getWechatPrepare().getStatus();
+        media.setUploadStatus(switch (prepare) {
+            case SUCCEEDED -> MediaUploadStatus.UPLOADED;
+            case FAILED_TERMINAL, ENVIRONMENT_BLOCKED -> MediaUploadStatus.FAILED;
+            case DEFERRED -> MediaUploadStatus.SKIPPED;
+            default -> media.getUploadStatus() == null ? MediaUploadStatus.PENDING : media.getUploadStatus();
+        });
     }
 }

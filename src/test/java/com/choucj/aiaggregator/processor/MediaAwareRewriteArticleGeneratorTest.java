@@ -7,6 +7,7 @@ import com.choucj.aiaggregator.common.model.ContentGenerationMode;
 import com.choucj.aiaggregator.content.rewriter.ContentRewriter;
 import com.choucj.aiaggregator.publish.storage.MediaArchiveRecord;
 import com.choucj.aiaggregator.publish.storage.TweetMediaArchiveWriter;
+import com.choucj.aiaggregator.publish.status.DeliveryFailureCoordinator;
 import com.choucj.aiaggregator.publish.wechat.converter.MarkdownMediaInserter;
 import com.choucj.aiaggregator.publish.wechat.media.MediaPreparationResult;
 import com.choucj.aiaggregator.publish.wechat.media.WeChatMediaPreparer;
@@ -37,6 +38,7 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.same;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -74,6 +76,8 @@ class MediaAwareRewriteArticleGeneratorTest {
     private WeChatMediaPreparer preparer;
     @Mock
     private TweetMediaArchiveWriter writer;
+    @Mock
+    private DeliveryFailureCoordinator deliveryFailureCoordinator;
 
     private MediaAwareRewriteArticleGenerator generator;
 
@@ -81,7 +85,33 @@ class MediaAwareRewriteArticleGeneratorTest {
     void setUp() {
         generator = new MediaAwareRewriteArticleGenerator(
                 contentRewriter, Optional.of(archiver), Optional.of(gate), preparer,
-                Optional.of(writer), new MarkdownMediaInserter());
+                Optional.of(writer), new MarkdownMediaInserter(), Optional.of(deliveryFailureCoordinator));
+        lenient().when(deliveryFailureCoordinator.converge(any(Article.class), anyString(),
+                        anyString(), anyString()))
+                .thenReturn(new DeliveryFailureCoordinator.ConvergenceResult(true,
+                        DeliveryFailureCoordinator.Layer.COMPLETE));
+        lenient().when(writer.markArticleReferencesSucceeded(anyString(), anyString())).thenReturn(true);
+    }
+
+    @Test
+    void should_terminalize_required_media_download_failure_without_wechat_prepare() {
+        Tweet tweet = tweetWithPhoto();
+        when(contentRewriter.rewrite(tweet)).thenReturn(rewrittenArticle());
+        when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+                .thenReturn(new TweetMediaArchiver.ArchiveResult(0, 0, 1, List.of()));
+        when(writer.readCanonicalSidecar(TWEET_ID)).thenReturn(Optional.of(
+                MediaArchiveRecord.builder().tweetId(TWEET_ID).media(tweet.getMedia()).build()));
+        when(deliveryFailureCoordinator.converge(any(Article.class), eq("MEDIA_DOWNLOAD"),
+                eq("MEDIA_DOWNLOAD_FAILED"), anyString()))
+                .thenReturn(new DeliveryFailureCoordinator.ConvergenceResult(true,
+                        DeliveryFailureCoordinator.Layer.COMPLETE));
+
+        var result = generator.generate(tweet);
+
+        assertThat(result.article().getContent()).isEqualTo(REWRITTEN_MARKDOWN);
+        verify(preparer, never()).prepareMedia(anyString(), any(), anyList());
+        verify(deliveryFailureCoordinator).converge(any(Article.class), eq("MEDIA_DOWNLOAD"),
+                eq("MEDIA_DOWNLOAD_FAILED"), anyString());
     }
 
     // ===== 全链成功 + 编排顺序 (AD-2) =====
@@ -123,6 +153,24 @@ class MediaAwareRewriteArticleGeneratorTest {
         order.verify(gate).evaluate(any(Tweet.class));
         order.verify(preparer).prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList());
         order.verify(writer).readSidecar(TWEET_ID, PUBLISHED_AT);
+    }
+
+    @Test
+    void should_converge_when_article_reference_evidence_fails() {
+        Tweet tweet = tweetWithPhoto();
+        when(contentRewriter.rewrite(any(Tweet.class))).thenReturn(rewrittenArticle());
+        when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+                .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
+        when(gate.evaluate(any())).thenReturn(publishableResult());
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+                .thenReturn(new MediaPreparationResult(1, 0, 0, List.of()));
+        when(writer.readSidecar(TWEET_ID, PUBLISHED_AT)).thenReturn(Optional.of(
+                MediaArchiveRecord.builder().tweetId(TWEET_ID).media(List.of(uploadedSidecarPhoto())).build()));
+        when(writer.markArticleReferencesSucceeded(anyString(), anyString())).thenReturn(false);
+
+        assertThatThrownBy(() -> generator.generate(tweet)).isInstanceOf(RetryableException.class);
+        verify(deliveryFailureCoordinator).converge(any(Article.class), eq("ARTICLE_REFERENCE"),
+                eq("ARTICLE_REFERENCE_FAILED"), anyString());
     }
 
     // ===== AC 4: LLM 媒体隔离 =====
@@ -173,9 +221,6 @@ class MediaAwareRewriteArticleGeneratorTest {
         when(contentRewriter.rewrite(any(Tweet.class))).thenReturn(rewrittenArticle());
         when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
                 .thenReturn(new TweetMediaArchiver.ArchiveResult(0, 0, 1, List.of()));
-        when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
-        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
-                .thenReturn(new MediaPreparationResult(0, 0, 1, List.of()));
         // sidecar 权威状态: 上传失败, 无 wechatUrl → 不可嵌入, 只降级
         TweetMedia failedPhoto = TweetMedia.builder()
                 .id("m-1")
@@ -185,7 +230,7 @@ class MediaAwareRewriteArticleGeneratorTest {
                 .publishability(PublishabilityStatus.PUBLISHABLE)
                 .failureReason("wechat upload error")
                 .build();
-        when(writer.readSidecar(TWEET_ID, PUBLISHED_AT))
+        when(writer.readCanonicalSidecar(TWEET_ID))
                 .thenReturn(Optional.of(MediaArchiveRecord.builder()
                         .tweetId(TWEET_ID)
                         .media(List.of(failedPhoto))
@@ -352,6 +397,8 @@ class MediaAwareRewriteArticleGeneratorTest {
                 .isInstanceOf(RetryableException.class)
                 .hasMessageContaining(TWEET_ID)
                 .hasMessageContaining("connection reset");
+        verify(deliveryFailureCoordinator).converge(any(Article.class), eq("WECHAT_PREPARE"),
+                eq("MEDIA_PREPARE_FAILED"), anyString());
     }
 
     // ===== 辅助 =====

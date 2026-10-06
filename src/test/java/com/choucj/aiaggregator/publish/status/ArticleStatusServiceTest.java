@@ -90,6 +90,17 @@ class ArticleStatusServiceTest {
         verify(redisRepository, never()).set(eq(STATUS_KEY), eq(ArticleStatus.DRAFT_CREATED.name()), any(Duration.class));
     }
 
+    @Test
+    void should_mark_delivery_failed_strictly_and_propagate_redis_failure() {
+        service.markDeliveryFailed(ARTICLE_ID);
+        verify(redisRepository).setKeepingTtl(STATUS_KEY, ArticleStatus.DELIVERY_FAILED.name());
+
+        doThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "redis down"))
+                .when(redisRepository).setKeepingTtl(STATUS_KEY, ArticleStatus.DELIVERY_FAILED.name());
+        assertThatThrownBy(() -> service.markDeliveryFailed(ARTICLE_ID))
+                .isInstanceOf(RetryableException.class);
+    }
+
     // ===== Task 2.4: 入口校验 (AC-7) =====
 
     @Test

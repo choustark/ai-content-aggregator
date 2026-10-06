@@ -6,6 +6,7 @@ import com.choucj.aiaggregator.common.model.Article;
 import com.choucj.aiaggregator.common.model.ContentGenerationMode;
 import com.choucj.aiaggregator.publish.storage.MediaArchiveRecord;
 import com.choucj.aiaggregator.publish.storage.TweetMediaArchiveWriter;
+import com.choucj.aiaggregator.publish.status.DeliveryFailureCoordinator;
 import com.choucj.aiaggregator.publish.wechat.converter.OriginalPostRenderer;
 import com.choucj.aiaggregator.publish.wechat.media.MediaPreparationResult;
 import com.choucj.aiaggregator.publish.wechat.media.WeChatMediaPreparer;
@@ -35,6 +36,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.inOrder;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -76,6 +78,8 @@ class PreserveOriginalArticleGeneratorTest {
 
     @Mock
     private TweetMediaArchiveWriter writer;
+    @Mock
+    private DeliveryFailureCoordinator deliveryFailureCoordinator;
 
     private PreserveOriginalArticleGenerator generator;
 
@@ -83,7 +87,52 @@ class PreserveOriginalArticleGeneratorTest {
     void setUp() {
         generator = new PreserveOriginalArticleGenerator(
                 Optional.of(archiver), Optional.of(gate), preparer,
-                Optional.of(writer), new OriginalPostRenderer());
+                Optional.of(writer), new OriginalPostRenderer(), Optional.of(deliveryFailureCoordinator));
+        lenient().when(deliveryFailureCoordinator.converge(any(Article.class), anyString(),
+                        anyString(), anyString()))
+                .thenReturn(new DeliveryFailureCoordinator.ConvergenceResult(true,
+                        DeliveryFailureCoordinator.Layer.COMPLETE));
+        lenient().when(writer.markArticleReferencesSucceeded(anyString(), anyString())).thenReturn(true);
+    }
+
+    @Test
+    void should_preserve_article_and_skip_wechat_prepare_when_download_fails() {
+        Tweet tweet = tweetWithOneUploadedPhoto();
+        when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+                .thenReturn(new TweetMediaArchiver.ArchiveResult(0, 0, 1, List.of()));
+        when(writer.readCanonicalSidecar(TWEET_ID)).thenReturn(Optional.of(
+                MediaArchiveRecord.builder().tweetId(TWEET_ID).media(tweet.getMedia()).build()));
+        when(deliveryFailureCoordinator.converge(any(Article.class), eq("MEDIA_DOWNLOAD"),
+                eq("MEDIA_DOWNLOAD_FAILED"), anyString()))
+                .thenReturn(new DeliveryFailureCoordinator.ConvergenceResult(true,
+                        DeliveryFailureCoordinator.Layer.COMPLETE));
+
+        Article article = generator.generate(tweet);
+
+        assertThat(article.getGenerationMode()).isEqualTo(ContentGenerationMode.PRESERVE_ORIGINAL);
+        verify(preparer, never()).prepareMedia(anyString(), any(), anyList());
+        verify(deliveryFailureCoordinator).converge(any(Article.class), eq("MEDIA_DOWNLOAD"),
+                eq("MEDIA_DOWNLOAD_FAILED"), anyString());
+    }
+
+    @Test
+    void should_converge_download_failure_with_minimal_article_when_failure_renderer_throws() {
+        OriginalPostRenderer failingRenderer = mock(OriginalPostRenderer.class);
+        PreserveOriginalArticleGenerator fallbackGenerator = new PreserveOriginalArticleGenerator(
+                Optional.of(archiver), Optional.of(gate), preparer,
+                Optional.of(writer), failingRenderer, Optional.of(deliveryFailureCoordinator));
+        Tweet tweet = tweetWithOneUploadedPhoto();
+        when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+                .thenReturn(new TweetMediaArchiver.ArchiveResult(0, 0, 1, List.of()));
+        when(writer.readCanonicalSidecar(TWEET_ID)).thenReturn(Optional.of(
+                MediaArchiveRecord.builder().tweetId(TWEET_ID).media(tweet.getMedia()).build()));
+        when(failingRenderer.render(eq(tweet), anyList())).thenThrow(new IllegalStateException("render failed"));
+
+        Article article = fallbackGenerator.generate(tweet);
+
+        assertThat(article.getId()).isEqualTo("tw-" + TWEET_ID);
+        verify(deliveryFailureCoordinator).converge(eq(article), eq("MEDIA_DOWNLOAD"),
+                eq("MEDIA_DOWNLOAD_FAILED"), anyString());
     }
 
     // ===== 全链成功 + 审计 + 同源配对 =====
@@ -130,6 +179,39 @@ class PreserveOriginalArticleGeneratorTest {
         order.verify(gate).evaluate(any(Tweet.class));
         order.verify(preparer).prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList());
         order.verify(writer).readSidecar(TWEET_ID, PUBLISHED_AT);
+    }
+
+    @Test
+    void should_converge_when_preserved_article_reference_evidence_fails() {
+        Tweet tweet = tweetWithOneUploadedPhoto();
+        TweetMedia sidecarMedia = uploadedPhotoMedia(null);
+        when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+                .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
+        when(gate.evaluate(any())).thenReturn(publishableResult());
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+                .thenReturn(new MediaPreparationResult(1, 0, 0, List.of()));
+        when(writer.readSidecar(TWEET_ID, PUBLISHED_AT)).thenReturn(Optional.of(
+                MediaArchiveRecord.builder().tweetId(TWEET_ID).media(List.of(sidecarMedia)).build()));
+        when(writer.markArticleReferencesSucceeded(anyString(), anyString())).thenReturn(false);
+
+        assertThatThrownBy(() -> generator.generate(tweet)).isInstanceOf(RetryableException.class);
+        verify(deliveryFailureCoordinator).converge(any(Article.class), eq("ARTICLE_REFERENCE"),
+                eq("ARTICLE_REFERENCE_FAILED"), anyString());
+    }
+
+    @Test
+    void should_converge_when_sidecar_is_missing_after_prepare() {
+        Tweet tweet = tweetWithOneUploadedPhoto();
+        when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+                .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
+        when(gate.evaluate(any())).thenReturn(publishableResult());
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+                .thenReturn(new MediaPreparationResult(1, 0, 0, List.of()));
+        when(writer.readSidecar(TWEET_ID, PUBLISHED_AT)).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> generator.generate(tweet)).isInstanceOf(RetryableException.class);
+        verify(deliveryFailureCoordinator).converge(any(Article.class), eq("MEDIA_SIDECAR"),
+                eq("MEDIA_SIDECAR_UNAVAILABLE"), anyString());
     }
 
     @Test
@@ -283,6 +365,8 @@ class PreserveOriginalArticleGeneratorTest {
                 .isInstanceOf(RetryableException.class)
                 .hasMessageContaining(TWEET_ID)
                 .hasMessageContaining("connection reset");
+        verify(deliveryFailureCoordinator).converge(any(Article.class), eq("WECHAT_PREPARE"),
+                eq("MEDIA_PREPARE_FAILED"), anyString());
     }
 
     // ===== 媒体审计 failureReason 截断 (N2/R3-1 + AC4 ≤120) =====
@@ -294,10 +378,7 @@ class PreserveOriginalArticleGeneratorTest {
                 + "x".repeat(300));
         when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
                 .thenReturn(new TweetMediaArchiver.ArchiveResult(0, 0, 1, List.of()));
-        when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
-        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
-                .thenReturn(new MediaPreparationResult(0, 0, 1, List.of()));
-        when(writer.readSidecar(TWEET_ID, PUBLISHED_AT))
+        when(writer.readCanonicalSidecar(TWEET_ID))
                 .thenReturn(Optional.of(MediaArchiveRecord.builder()
                         .tweetId(TWEET_ID)
                         .media(List.of(failedMedia))
@@ -325,10 +406,7 @@ class PreserveOriginalArticleGeneratorTest {
         trickyMedia.setLocalPath("media/twitter/2026-08-29/" + TWEET_ID + "/photo|1.jpg");
         when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
                 .thenReturn(new TweetMediaArchiver.ArchiveResult(0, 0, 1, List.of()));
-        when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
-        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
-                .thenReturn(new MediaPreparationResult(0, 0, 1, List.of()));
-        when(writer.readSidecar(TWEET_ID, PUBLISHED_AT))
+        when(writer.readCanonicalSidecar(TWEET_ID))
                 .thenReturn(Optional.of(MediaArchiveRecord.builder()
                         .tweetId(TWEET_ID)
                         .media(List.of(trickyMedia))

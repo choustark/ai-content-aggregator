@@ -8,6 +8,7 @@ import com.fasterxml.jackson.annotation.JsonInclude;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.time.LocalDateTime;
 
 /**
  * 表示 X/Twitter 原帖中的一个权威媒体单元，统一承载图片、视频和 GIF 元数据。
@@ -97,4 +98,63 @@ public class TweetMedia {
      * 微信媒体 ID；未上传时为 null（Story 8.4 填）。
      */
     private String wechatMediaId;
+
+    /** 下载阶段权威状态；旧 sidecar 缺失时由 Writer 兼容回填。 */
+    @Builder.Default
+    private MediaPhaseState download = MediaPhaseState.notStarted();
+
+    /** 微信准备阶段权威状态；GIF/UNKNOWN 不进入该执行链。 */
+    @Builder.Default
+    private MediaPhaseState wechatPrepare = MediaPhaseState.notStarted();
+
+    /** 文章引用阶段权威状态；成功仅表示本地引用完整，不表示微信已接收草稿。 */
+    @Builder.Default
+    private MediaPhaseState articleReference = MediaPhaseState.notStarted();
+
+    /** GIF 延后处理时保留原文链接，非 GIF 时为 null。 */
+    private String originalPostUrl;
+
+    /** GIF 延后处理或 UNKNOWN 阻断时的人工说明。 */
+    private String manualInstruction;
+
+    /** 首次初始化三阶段 schema，禁止 GIF/UNKNOWN 误入自动执行链。 */
+    public void initializeDeliveryPhases(String postUrl) {
+        LocalDateTime now = LocalDateTime.now();
+        if (type == TweetMediaType.GIF) {
+            download = deferred(now);
+            wechatPrepare = deferred(now);
+            articleReference = deferred(now);
+            originalPostUrl = postUrl;
+            manualInstruction = "GIF 暂不自动下载、上传或嵌入，请按原文链接人工处理";
+        } else {
+            download = MediaPhaseState.notStarted();
+            wechatPrepare = MediaPhaseState.notStarted();
+            articleReference = MediaPhaseState.notStarted();
+            if (type == TweetMediaType.UNKNOWN) {
+                manualInstruction = "未知媒体类型，已阻断自动发布";
+            }
+        }
+    }
+
+    private static MediaPhaseState deferred(LocalDateTime now) {
+        return MediaPhaseState.builder().status(MediaPhaseStatus.DEFERRED).attempt(0).updatedAt(now).build();
+    }
+
+    /** 将下载失败固定终态化，后续两阶段保持 NOT_STARTED 且禁止自动重试。 */
+    public void markDownloadFailed(String errorClass, String errorCode, String safeSummary) {
+        LocalDateTime now = LocalDateTime.now();
+        download = MediaPhaseState.builder()
+                .status(MediaPhaseStatus.FAILED_TERMINAL)
+                .attempt(1)
+                .nextRetryAt(null)
+                .errorClass(errorClass)
+                .errorCode(errorCode)
+                .errorSummary(safeSummary)
+                .updatedAt(now)
+                .build();
+        wechatPrepare = MediaPhaseState.notStarted();
+        articleReference = MediaPhaseState.notStarted();
+        downloadStatus = MediaDownloadStatus.FAILED;
+        uploadStatus = MediaUploadStatus.PENDING;
+    }
 }

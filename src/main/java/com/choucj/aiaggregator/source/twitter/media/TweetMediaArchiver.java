@@ -158,7 +158,9 @@ public class TweetMediaArchiver {
                     statuses.add(MediaArchiveStatus.failed(mediaId,
                             TextTruncateUtil.truncateForLog(TextTruncateUtil.getRootMessage(e), 200),
                             e instanceof RetryableException));
-                    failCount.incrementAndGet();
+                    if (m.getType() == TweetMediaType.VIDEO) {
+                        failCount.incrementAndGet();
+                    }
                     saveRuntimeSnapshot(tweetId, buildRuntimeItems(tweetId, media, statuses));
                 }
                 continue;
@@ -583,11 +585,16 @@ public class TweetMediaArchiver {
 
         try {
             updateSidecar(tweetId, publishedAt, media, mediaId, mediaIndex,
-                    original -> original.toBuilder()
-                    .id(mediaId)
-                    .downloadStatus(MediaDownloadStatus.FAILED)
-                    .failureReason(failureReason)
-                    .build());
+                    original -> {
+                        TweetMedia failed = original.toBuilder()
+                                .id(mediaId)
+                                .failureReason(failureReason)
+                                .build();
+                        String errorClass = e instanceof RetryableException
+                                ? "RETRYABLE" : e instanceof NonRetryableException ? "TERMINAL" : "UNKNOWN";
+                        failed.markDownloadFailed(errorClass, e.getClass().getSimpleName(), failureReason);
+                        return failed;
+                    });
         } catch (Exception sidecarEx) {
             log.warn("回写失败状态到 sidecar 失败: tweetId={}, mediaId={}",
                     tweetId, mediaId);

@@ -10,6 +10,7 @@ import com.choucj.aiaggregator.monitoring.TaskMetrics;
 import com.choucj.aiaggregator.processor.GitHubProcessor;
 import com.choucj.aiaggregator.processor.TwitterProcessor;
 import com.choucj.aiaggregator.processor.config.ProcessorProperties;
+import com.choucj.aiaggregator.publish.status.ArticleDeliveryReplayExecutor;
 import com.choucj.aiaggregator.task.queue.RetryPolicyProperties;
 import com.choucj.aiaggregator.task.queue.TaskQueue;
 import com.choucj.aiaggregator.task.queue.TaskRecoveryRunner;
@@ -68,6 +69,7 @@ public class ContentScheduler {
     private final TaskRecoveryRunner recoveryRunner;
     private final TwitterProcessor twitterProcessor;
     private final Optional<GitHubProcessor> githubProcessorOptional;
+    private final Optional<ArticleDeliveryReplayExecutor> deliveryReplayExecutor;
     private final ProcessorProperties processorProperties;
     private final Optional<CostMonitor> costMonitorOptional;
     private final Optional<TaskMetrics> taskMetricsOptional;
@@ -129,10 +131,11 @@ public class ContentScheduler {
                             ProcessorProperties processorProperties,
                             Optional<CostMonitor> costMonitorOptional,
                             Optional<TaskMetrics> taskMetricsOptional,
+                            Optional<ArticleDeliveryReplayExecutor> deliveryReplayExecutor,
                             RetryPolicyProperties retryPolicy,
                             @Value("${schedule.run-on-startup:false}") boolean runOnStartup) {
         this(taskQueue, recoveryRunner, twitterProcessor, githubProcessorOptional, processorProperties,
-                costMonitorOptional, taskMetricsOptional, retryPolicy, runOnStartup,
+                costMonitorOptional, taskMetricsOptional, deliveryReplayExecutor, retryPolicy, runOnStartup,
                 Clock.systemDefaultZone());
     }
 
@@ -151,10 +154,26 @@ public class ContentScheduler {
                      RetryPolicyProperties retryPolicy,
                      boolean runOnStartup,
                      Clock clock) {
+        this(taskQueue, recoveryRunner, twitterProcessor, githubProcessorOptional, processorProperties,
+                costMonitorOptional, taskMetricsOptional, Optional.empty(), retryPolicy, runOnStartup, clock);
+    }
+
+    ContentScheduler(TaskQueue taskQueue,
+                     TaskRecoveryRunner recoveryRunner,
+                     TwitterProcessor twitterProcessor,
+                     Optional<GitHubProcessor> githubProcessorOptional,
+                     ProcessorProperties processorProperties,
+                     Optional<CostMonitor> costMonitorOptional,
+                     Optional<TaskMetrics> taskMetricsOptional,
+                     Optional<ArticleDeliveryReplayExecutor> deliveryReplayExecutor,
+                     RetryPolicyProperties retryPolicy,
+                     boolean runOnStartup,
+                     Clock clock) {
         this.taskQueue = taskQueue;
         this.recoveryRunner = recoveryRunner;
         this.twitterProcessor = twitterProcessor;
         this.githubProcessorOptional = githubProcessorOptional;
+        this.deliveryReplayExecutor = deliveryReplayExecutor;
         this.processorProperties = processorProperties;
         this.costMonitorOptional = costMonitorOptional;
         this.taskMetricsOptional = taskMetricsOptional;
@@ -423,6 +442,14 @@ public class ContentScheduler {
             }
             return TaskMetrics.Outcome.SKIPPED;
         }
+        if (route == TaskRoute.DELIVERY_REPLAY) {
+            if (deliveryReplayExecutor.isPresent()) {
+                deliveryReplayExecutor.get().execute(taskId);
+                return TaskMetrics.Outcome.SUCCESS;
+            }
+            throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                    "文章交付补跑执行器未注册: taskId=" + taskId);
+        }
         String prefix = processorProperties.getTaskIdPrefix() + ":";
         log.warn("未知 taskId 前缀, 跳过 (Epic 5+ 其他前缀待扩展): taskId={}, expectedPrefix={}",
                 taskId, prefix);
@@ -435,6 +462,9 @@ public class ContentScheduler {
         }
         if (taskId != null && taskId.startsWith("github:")) {
             return TaskRoute.GITHUB;
+        }
+        if (taskId != null && taskId.startsWith("delivery:tw-")) {
+            return TaskRoute.DELIVERY_REPLAY;
         }
         return TaskRoute.UNKNOWN;
     }
@@ -473,6 +503,7 @@ public class ContentScheduler {
     private enum TaskRoute {
         TWITTER(TaskMetrics.Source.TWITTER),
         GITHUB(TaskMetrics.Source.GITHUB),
+        DELIVERY_REPLAY(TaskMetrics.Source.UNKNOWN),
         UNKNOWN(TaskMetrics.Source.UNKNOWN);
 
         private final TaskMetrics.Source source;

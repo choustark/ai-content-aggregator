@@ -32,5 +32,15 @@ public class ArchivedArticle {
 
     private String archiveFile;
 
+    private String failureStage;
+
+    private String failureCode;
+
+    private String failureSummary;
+
+    private LocalDateTime failedAt;
+
+    private String failureTaskId;
+
     private Article article;
 }

@@ -138,10 +138,15 @@ public class MarkdownArchiver implements ContentPublisher {
         Optional<ArchivedArticle> archivedSnapshot = findSnapshotForIdempotency(article.getId());
         if (archivedSnapshot.isPresent()) {
             ArchivedArticle snapshot = archivedSnapshot.get();
-            log.warn("跨日/重复投递命中归档快照, 跳过重复归档: articleId={}, snapshotStatus={}, archiveFile={}",
-                    article.getId(), snapshot.getStatus(), snapshot.getArchiveFile());
-            recordIdempotentSkipSafely(article.getId());
-            return;
+            if (snapshot.getStatus() == ArticleStatus.DELIVERY_FAILED
+                    && (snapshot.getArchiveFile() == null || snapshot.getArchiveFile().isBlank())) {
+                log.info("交付失败快照尚无 Markdown 归档, 保留改写成果: articleId={}", article.getId());
+            } else {
+                log.warn("跨日/重复投递命中归档快照, 跳过重复归档: articleId={}, snapshotStatus={}, archiveFile={}",
+                        article.getId(), snapshot.getStatus(), snapshot.getArchiveFile());
+                recordIdempotentSkipSafely(article.getId());
+                return;
+            }
         }
 
         Path archiveFile = resolveArchiveFile(article.getCreatedAt());

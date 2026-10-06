@@ -44,6 +44,8 @@ class ArticlePublicationWorkflowTest {
     private ArticleStatusService articleStatusService;
     @Mock
     private TaskMetrics taskMetrics;
+    @Mock
+    private ArticleMediaReadinessGate mediaReadinessGate;
 
     private PublishingProperties publishingProperties;
     private ArticlePublicationWorkflow workflow;
@@ -61,6 +63,65 @@ class ArticlePublicationWorkflowTest {
     private ArticlePublicationWorkflow workflowWithMetrics() {
         return new ArticlePublicationWorkflow(weChatPublisher, archiveRepository,
                 articleStatusService, publishingProperties, Optional.of(taskMetrics), clock);
+    }
+
+    private ArticlePublicationWorkflow workflowWithMediaGate() {
+        return new ArticlePublicationWorkflow(weChatPublisher, archiveRepository,
+                articleStatusService, publishingProperties, Optional.empty(),
+                Optional.of(mediaReadinessGate), clock);
+    }
+
+    @Test
+    void should_block_realtime_publish_before_pending_or_draft_when_media_incomplete() {
+        Article article = article("tw-media");
+        when(mediaReadinessGate.evaluate(article))
+                .thenReturn(ArticleMediaReadinessGate.GateResult.PHASE_INCOMPLETE);
+
+        assertThatThrownBy(() -> workflowWithMediaGate().publishRealtime(article))
+                .isInstanceOf(NonRetryableException.class)
+                .hasMessageContaining("PHASE_INCOMPLETE");
+        verify(archiveRepository, never()).saveSnapshot(any(), any(), any(), any());
+        verify(weChatPublisher, never()).publishDraft(any());
+    }
+
+    @Test
+    void should_block_queueing_when_media_is_incomplete() {
+        Article article = article("tw-queue-media");
+        when(mediaReadinessGate.evaluate(article))
+                .thenReturn(ArticleMediaReadinessGate.GateResult.PHASE_INCOMPLETE);
+
+        assertThatThrownBy(() -> workflowWithMediaGate().queueForNextPublishWindow(article))
+                .isInstanceOf(NonRetryableException.class)
+                .hasMessageContaining("PHASE_INCOMPLETE");
+        verify(archiveRepository, never()).saveSnapshot(any(), any(), any(), any());
+        verify(articleStatusService, never()).markPendingPublish(anyString());
+    }
+
+    @Test
+    void should_block_due_publish_when_media_is_incomplete() {
+        Article article = article("tw-due-media");
+        when(archiveRepository.findDueForPublish(LocalDateTime.of(2026, 9, 1, 20, 0)))
+                .thenReturn(List.of(snapshot(article, ArticleStatus.PENDING_PUBLISH)));
+        when(mediaReadinessGate.evaluate(article))
+                .thenReturn(ArticleMediaReadinessGate.GateResult.PHASE_INCOMPLETE);
+
+        ArticlePublicationWorkflow.PublishDueResult result =
+                workflowWithMediaGate().publishDueArticles();
+
+        assertThat(result.success()).isZero();
+        assertThat(result.failure()).isEqualTo(1);
+        verify(weChatPublisher, never()).publishDraft(any());
+    }
+
+    @Test
+    void should_block_manual_publish_when_article_delivery_failed() {
+        Article article = article("tw-failed");
+        when(archiveRepository.findByArticleId("tw-failed"))
+                .thenReturn(Optional.of(snapshot(article, ArticleStatus.DELIVERY_FAILED)));
+
+        assertThatThrownBy(() -> workflowWithMediaGate().publishNow("tw-failed"))
+                .isInstanceOf(NonRetryableException.class);
+        verify(weChatPublisher, never()).publishDraft(any());
     }
 
     @Test
@@ -180,6 +241,26 @@ class ArticlePublicationWorkflowTest {
         verify(archiveRepository).markDraftCreated("tw-first-draft", "media-new",
                 LocalDateTime.of(2026, 9, 1, 20, 0));
         verify(articleStatusService).markDraftCreated("tw-first-draft");
+    }
+
+    @Test
+    void should_expose_media_id_when_wechat_succeeds_but_snapshot_write_fails() {
+        Article article = article("tw-receipt");
+        when(archiveRepository.findByArticleId("tw-receipt")).thenReturn(Optional.empty());
+        when(weChatPublisher.publishDraft(article)).thenReturn("media-receipt");
+        doThrow(new IllegalStateException("disk full")).when(archiveRepository)
+                .markDraftCreated("tw-receipt", "media-receipt",
+                        LocalDateTime.of(2026, 9, 1, 20, 0));
+
+        assertThatThrownBy(() -> workflow.publishRealtime(article))
+                .isInstanceOf(ArticlePublicationWorkflow.DraftCreatedPersistenceException.class)
+                .satisfies(error -> {
+                    var typed = (ArticlePublicationWorkflow.DraftCreatedPersistenceException) error;
+                    assertThat(typed.articleId()).isEqualTo("tw-receipt");
+                    assertThat(typed.mediaId()).isEqualTo("media-receipt");
+                });
+        verify(weChatPublisher).publishDraft(article);
+        verify(articleStatusService, never()).markDraftCreated("tw-receipt");
     }
 
     // fail-closed: 快照读取失败时异常原样传播, 绝不在幂等状态未知时冒险创建草稿

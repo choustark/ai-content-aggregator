@@ -339,6 +339,25 @@ class TaskQueueRetryReplayTest {
     // ============ replayDeadLetter ============
 
     @Test
+    void should_create_article_level_delivery_dead_letter_atomically() {
+        stubExecute(1L);
+
+        boolean recorded = taskQueue.recordDeliveryFailure(
+                "delivery:tw-1", "tw-1", "MEDIA_DOWNLOAD_FAILED", "unsafe\nsummary");
+
+        assertThat(recorded).isTrue();
+        ArgumentCaptor<List<String>> keysCaptor = ArgumentCaptor.forClass((Class) List.class);
+        ArgumentCaptor<Object[]> argsCaptor = ArgumentCaptor.forClass(Object[].class);
+        verify(stringRedisTemplate).execute(any(RedisScript.class), keysCaptor.capture(), argsCaptor.capture());
+        assertThat(keysCaptor.getValue()).containsExactly(
+                RedisKeys.taskDeadLetter(), RedisKeys.taskState("delivery:tw-1"));
+        assertThat(argsCaptor.getValue()[0]).isEqualTo("delivery:tw-1");
+        assertThat(argsCaptor.getValue()[2]).isEqualTo("MEDIA_DOWNLOAD_FAILED");
+        assertThat(argsCaptor.getValue()[3].toString()).doesNotContain("\n");
+        assertThat(argsCaptor.getValue()[4]).isEqualTo("tw-1");
+    }
+
+    @Test
     void should_replay_dead_letter_with_deterministic_task_id_from_request_id() {
         stubExecute(1L);
 
@@ -449,6 +468,23 @@ class TaskQueueRetryReplayTest {
         assertThatThrownBy(() -> taskQueue.replayDeadLetter("task-dead", "req-1"))
                 .isInstanceOf(NonRetryableException.class)
                 .hasMessageContaining("TYPE 前置校验拒绝");
+    }
+
+    @Test
+    void should_read_and_write_replay_draft_receipt() {
+        when(stringRedisTemplate.opsForHash()).thenReturn(hashOps);
+        String stateKey = RedisKeys.taskState("replay-task");
+        when(hashOps.get(stateKey, "articleId")).thenReturn("tw-1");
+        when(hashOps.get(stateKey, "replayedFrom")).thenReturn("delivery:tw-1");
+        when(hashOps.get(stateKey, "draftMediaId")).thenReturn("media-1");
+
+        TaskQueue.ReplayMetadata metadata = taskQueue.getReplayMetadata("replay-task");
+        taskQueue.recordReplayDraftReceipt("replay-task", "media-1");
+
+        assertThat(metadata.articleId()).isEqualTo("tw-1");
+        assertThat(metadata.replayedFrom()).isEqualTo("delivery:tw-1");
+        assertThat(metadata.draftMediaId()).isEqualTo("media-1");
+        verify(hashOps).put(stateKey, "draftMediaId", "media-1");
     }
 
     // ============ push 退避窗口守卫 ============

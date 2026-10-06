@@ -10,6 +10,7 @@ import lombok.NoArgsConstructor;
 import lombok.Setter;
 
 import java.time.LocalDateTime;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -49,6 +50,9 @@ public class MediaArchiveRecord {
 
     /** sidecar 生成/最后更新时间。 */
     private LocalDateTime generatedAt;
+
+    /** 首次归档日期；创建后冻结，恢复和补跑必须复用。 */
+    private LocalDate canonicalArchiveDate;
 
     /** 该推文的全部媒体项。 */
     @JsonProperty("media")

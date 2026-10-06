@@ -234,6 +234,25 @@ public class TaskQueue {
             """, Long.class);
 
     /**
+     * 文章交付失败记录脚本(2 键): 直接创建文章级死信审计任务，不污染日期批次任务。
+     * 已存在同一 DEAD_LETTER 记录时幂等成功；其他既有状态拒绝覆盖。
+     */
+    private static final DefaultRedisScript<Long> DELIVERY_FAILURE_SCRIPT = new DefaultRedisScript<>("""
+            local deadLetterType = redis.call('TYPE', KEYS[1])['ok']
+            if deadLetterType ~= 'none' and deadLetterType ~= 'set' then return -1 end
+            local stateType = redis.call('TYPE', KEYS[2])['ok']
+            if stateType ~= 'none' and stateType ~= 'hash' then return -1 end
+            local status = redis.call('HGET', KEYS[2], 'status')
+            if status == 'DEAD_LETTER' and redis.call('SISMEMBER', KEYS[1], ARGV[1]) == 1 then return 0 end
+            if status then return 2 end
+            redis.call('SADD', KEYS[1], ARGV[1])
+            redis.call('HSET', KEYS[2], 'taskId', ARGV[1], 'status', 'DEAD_LETTER',
+                'attempt', 1, 'lastErrorCode', ARGV[3], 'lastErrorSummary', ARGV[4],
+                'updatedAt', ARGV[2], 'deadLetteredAt', ARGV[2], 'articleId', ARGV[5])
+            return 1
+            """, Long.class);
+
+    /**
      * RECOVER 脚本(3 键): KEYS=[processing, pending, state], ARGV=[taskId, now].
      *
      * <p>同槽内重新校验 taskId 仍在 processing 且 status==PROCESSING, 才原子
@@ -475,6 +494,23 @@ public class TaskQueue {
         return moved;
     }
 
+    /** 原子创建文章级交付失败死信；保留日期批次任务，供显式补跑复用既有 REPLAY 契约。 */
+    public boolean recordDeliveryFailure(String taskId, String articleId, String errorCode, String reason) {
+        Long result = executeScript("delivery-failure", RedisKeys.taskDeadLetter(), Operation.REMOVE,
+                DELIVERY_FAILURE_SCRIPT,
+                List.of(RedisKeys.taskDeadLetter(), RedisKeys.taskState(taskId)),
+                taskId, Instant.now().toString(), sanitizeStateText(errorCode),
+                sanitizeStateText(reason), sanitizeStateText(articleId));
+        if (result != null && (result == 1L || result == 0L)) {
+            return true;
+        }
+        if (result != null && result == 2L) {
+            throw new NonRetryableException(ErrorCode.REDIS_DATA_ERROR,
+                    "文章交付失败任务状态冲突: taskId=" + taskId);
+        }
+        return false;
+    }
+
     /**
      * 可重试失败推进(Story 10.5 AC1/AC3) — 单个原子状态迁移把 PROCESSING 任务
      * 转为 RETRY_SCHEDULED(未达上限)或 DEAD_LETTER(已达上限).
@@ -680,6 +716,41 @@ public class TaskQueue {
      * {@code [A-Za-z0-9._-]{1,64}} 白名单(防 Redis key 注入/路径穿越), 非法抛
      * {@link NonRetryableException}。
      */
+    /** 读取补跑执行器所需的显式路由元数据，避免从 taskId 字符串反推业务标识。 */
+    public ReplayMetadata getReplayMetadata(String taskId) {
+        if (taskId == null || taskId.isBlank()) {
+            throw new NonRetryableException(ErrorCode.REDIS_DATA_ERROR,
+                    "getReplayMetadata 失败: taskId 不能为空");
+        }
+        String stateKey = RedisKeys.taskState(taskId);
+        Object articleId = supplyWithMapping("replay-metadata", stateKey, Operation.GET,
+                () -> stringRedisTemplate.opsForHash().get(stateKey, "articleId"));
+        Object replayedFrom = supplyWithMapping("replay-metadata", stateKey, Operation.GET,
+                () -> stringRedisTemplate.opsForHash().get(stateKey, "replayedFrom"));
+        Object draftMediaId = supplyWithMapping("replay-metadata", stateKey, Operation.GET,
+                () -> stringRedisTemplate.opsForHash().get(stateKey, "draftMediaId"));
+        if (!(articleId instanceof String article) || article.isBlank()
+                || !(replayedFrom instanceof String original) || original.isBlank()) {
+            throw new NonRetryableException(ErrorCode.REDIS_DATA_ERROR,
+                    "补跑任务缺少 articleId/replayedFrom 路由元数据: taskId=" + taskId);
+        }
+        String receipt = draftMediaId instanceof String value && !value.isBlank() ? value : null;
+        return new ReplayMetadata(article, original, receipt);
+    }
+
+    /** 持久化微信草稿成功收据；后续补跑只能据此完成本地对账，不能再次调用微信。 */
+    public void recordReplayDraftReceipt(String taskId, String mediaId) {
+        if (taskId == null || taskId.isBlank() || mediaId == null || mediaId.isBlank()) {
+            throw new NonRetryableException(ErrorCode.REDIS_DATA_ERROR,
+                    "记录补跑草稿收据失败: taskId/mediaId 不能为空");
+        }
+        String stateKey = RedisKeys.taskState(taskId);
+        supplyWithMapping("replay-draft-receipt", stateKey, Operation.SET, () -> {
+            stringRedisTemplate.opsForHash().put(stateKey, "draftMediaId", mediaId);
+            return null;
+        });
+    }
+
     private String sanitizeReplayRequestId(String replayRequestId) {
         if (replayRequestId == null || replayRequestId.isBlank()) {
             return LocalDate.now().toString();
@@ -970,9 +1041,11 @@ public class TaskQueue {
             local origStatus = redis.call('HGET', KEYS[3], 'status')
             if not origStatus or origStatus ~= 'DEAD_LETTER' then return 3 end
             if redis.call('EXISTS', KEYS[4]) == 1 then return 2 end
+            local articleId = redis.call('HGET', KEYS[3], 'articleId')
             redis.call('RPUSH', KEYS[2], ARGV[2])
             redis.call('HSET', KEYS[4], 'taskId', ARGV[2], 'status', 'QUEUED',
                 'replayedFrom', ARGV[1], 'updatedAt', ARGV[3])
+            if articleId then redis.call('HSET', KEYS[4], 'articleId', articleId) end
             return 1
             """, Long.class);
 
@@ -1034,6 +1107,13 @@ public class TaskQueue {
      * @param newTaskId 新创建的待处理任务 ID(仅 {@link ReplayOutcome#REPLAYED} 非空, 其余为 null)
      */
     public record ReplayResult(ReplayOutcome outcome, String newTaskId) {
+    }
+
+    /** 文章交付补跑任务的显式业务路由字段。 */
+    public record ReplayMetadata(String articleId, String replayedFrom, String draftMediaId) {
+        public ReplayMetadata(String articleId, String replayedFrom) {
+            this(articleId, replayedFrom, null);
+        }
     }
 
     /**

@@ -1,6 +1,7 @@
 package com.choucj.aiaggregator.publish.wechat;
 
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
+import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.Article;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.monitoring.TaskMetrics;
@@ -42,15 +43,17 @@ public class ArticlePublicationWorkflow {
     private final PublishingProperties publishingProperties;
     private final Optional<TaskMetrics> taskMetricsOptional;
     private final Clock clock;
+    private final Optional<ArticleMediaReadinessGate> mediaReadinessGate;
 
     @Autowired
     public ArticlePublicationWorkflow(WeChatPublisher weChatPublisher,
                                       ArticleArchiveRepository archiveRepository,
                                       ArticleStatusService articleStatusService,
                                       PublishingProperties publishingProperties,
-                                      Optional<TaskMetrics> taskMetricsOptional) {
+                                      Optional<TaskMetrics> taskMetricsOptional,
+                                      Optional<ArticleMediaReadinessGate> mediaReadinessGate) {
         this(weChatPublisher, archiveRepository, articleStatusService, publishingProperties,
-                taskMetricsOptional, Clock.systemDefaultZone());
+                taskMetricsOptional, mediaReadinessGate, Clock.systemDefaultZone());
     }
 
     ArticlePublicationWorkflow(WeChatPublisher weChatPublisher,
@@ -59,15 +62,28 @@ public class ArticlePublicationWorkflow {
                                PublishingProperties publishingProperties,
                                Optional<TaskMetrics> taskMetricsOptional,
                                Clock clock) {
+        this(weChatPublisher, archiveRepository, articleStatusService, publishingProperties,
+                taskMetricsOptional, Optional.empty(), clock);
+    }
+
+    ArticlePublicationWorkflow(WeChatPublisher weChatPublisher,
+                               ArticleArchiveRepository archiveRepository,
+                               ArticleStatusService articleStatusService,
+                               PublishingProperties publishingProperties,
+                               Optional<TaskMetrics> taskMetricsOptional,
+                               Optional<ArticleMediaReadinessGate> mediaReadinessGate,
+                               Clock clock) {
         this.weChatPublisher = weChatPublisher;
         this.archiveRepository = archiveRepository;
         this.articleStatusService = articleStatusService;
         this.publishingProperties = publishingProperties;
         this.taskMetricsOptional = taskMetricsOptional;
         this.clock = clock;
+        this.mediaReadinessGate = mediaReadinessGate;
     }
 
     public void queueForNextPublishWindow(Article article) {
+        requireMediaReady(article);
         LocalDateTime scheduledAt = nextPublishWindow();
         archiveRepository.saveSnapshot(article, ArticleStatus.PENDING_PUBLISH, scheduledAt, null);
         articleStatusService.markPendingPublish(article.getId());
@@ -75,6 +91,7 @@ public class ArticlePublicationWorkflow {
     }
 
     public String publishRealtime(Article article) {
+        requireMediaReady(article);
         // Story 10.6 幂等守卫在 saveSnapshot 之前: 重复投递不再触碰快照(不改写 scheduledPublishAt),
         // 直接返回既有 mediaId. 快照读取失败抛 NonRetryableException(fail-closed).
         Optional<String> existingDraftMediaId = findExistingDraftMediaId(article);
@@ -94,6 +111,7 @@ public class ArticlePublicationWorkflow {
             throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
                     "当前状态不允许发布: articleId=" + articleId + ", status=" + snapshot.getStatus());
         }
+        requireMediaReady(snapshot.getArticle());
         Article article = snapshot.getArticle();
         if (article == null) {
             throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
@@ -138,6 +156,7 @@ public class ArticlePublicationWorkflow {
         if (article == null || article.getId() == null || article.getId().isBlank()) {
             throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR, "待发布 Article 非法");
         }
+        requireMediaReady(article);
         Optional<String> existingDraftMediaId = findExistingDraftMediaId(article);
         if (existingDraftMediaId.isPresent()) {
             auditIdempotentDraftSkip(article.getId(), existingDraftMediaId.get());
@@ -146,9 +165,33 @@ public class ArticlePublicationWorkflow {
         archiveRepository.markStatus(article.getId(), ArticleStatus.PROCESSING);
         articleStatusService.markProcessing(article.getId());
         String mediaId = weChatPublisher.publishDraft(article);
-        archiveRepository.markDraftCreated(article.getId(), mediaId, LocalDateTime.now(clock));
+        try {
+            archiveRepository.markDraftCreated(article.getId(), mediaId, LocalDateTime.now(clock));
+        } catch (RuntimeException e) {
+            throw new DraftCreatedPersistenceException(article.getId(), mediaId, e);
+        }
         articleStatusService.markDraftCreated(article.getId());
         return mediaId;
+    }
+
+    /** 微信草稿已创建，但本地权威快照尚未持久化；调用方必须只做本地对账，禁止再次调用微信。 */
+    public static final class DraftCreatedPersistenceException extends RetryableException {
+        private final String articleId;
+        private final String mediaId;
+
+        public DraftCreatedPersistenceException(String articleId, String mediaId, Throwable cause) {
+            super("微信草稿已创建但本地快照写入失败: articleId=" + articleId, cause);
+            this.articleId = articleId;
+            this.mediaId = mediaId;
+        }
+
+        public String articleId() {
+            return articleId;
+        }
+
+        public String mediaId() {
+            return mediaId;
+        }
     }
 
     /**
@@ -204,6 +247,23 @@ public class ArticlePublicationWorkflow {
 
     private static boolean canPublish(ArticleStatus status) {
         return status == ArticleStatus.CREATED || status == ArticleStatus.PENDING_PUBLISH;
+    }
+
+    private void requireMediaReady(Article article) {
+        ArchivedArticle snapshot = article == null || article.getId() == null
+                ? null : archiveRepository.findByArticleId(article.getId()).orElse(null);
+        if (snapshot != null && snapshot.getStatus() == ArticleStatus.DELIVERY_FAILED) {
+            throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                    "媒体门禁拒绝发布: articleId=" + article.getId() + ", reason=ARTICLE_DELIVERY_FAILED");
+        }
+        if (mediaReadinessGate.isEmpty()) {
+            return;
+        }
+        ArticleMediaReadinessGate.GateResult result = mediaReadinessGate.get().evaluate(article);
+        if (result != ArticleMediaReadinessGate.GateResult.READY) {
+            throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                    "媒体门禁拒绝发布: articleId=" + article.getId() + ", reason=" + result);
+        }
     }
 
     public record PublishDueResult(long total, long success, long failure) {

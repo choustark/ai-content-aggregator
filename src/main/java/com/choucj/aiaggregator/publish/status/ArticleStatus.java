@@ -64,6 +64,12 @@ public enum ArticleStatus {
      */
     PENDING_PUBLISH,
 
+    /** 必需媒体仍在处理，尚不可进入发布池。 */
+    MEDIA_PROCESSING,
+
+    /** 文章交付终态失败；保留 Article 与失败证据，只能显式人工补跑。 */
+    DELIVERY_FAILED,
+
     /**
      * 处理中 — 文章已传给 WeChatPublisher.publish, 微信 addDraft 调用进行中.
      */

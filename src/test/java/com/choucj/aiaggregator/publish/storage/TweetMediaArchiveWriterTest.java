@@ -6,6 +6,7 @@ import com.choucj.aiaggregator.source.twitter.config.TwitterMediaConfig;
 import com.choucj.aiaggregator.source.twitter.config.TwitterMediaProperties;
 import com.choucj.aiaggregator.source.twitter.model.MediaDownloadStatus;
 import com.choucj.aiaggregator.source.twitter.model.MediaUploadStatus;
+import com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus;
 import com.choucj.aiaggregator.source.twitter.model.PublishabilityStatus;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
@@ -20,6 +21,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.LocalDateTime;
+import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
@@ -509,5 +511,114 @@ class TweetMediaArchiveWriterTest {
 
         // 旧 sidecar 逐字节完整保留
         assertThat(Files.readString(file)).isEqualTo(oldContent);
+    }
+
+    @Test
+    void should_freeze_canonical_archive_date_across_cross_day_replay() {
+        LocalDateTime first = LocalDateTime.of(2026, 8, 2, 23, 59);
+        LocalDateTime replay = LocalDateTime.of(2026, 8, 3, 9, 0);
+
+        writer.writeSidecar("canonical-1", first, List.of(samplePhotoMedia("p1", "https://x/p1.jpg")));
+        writer.writeSidecar("canonical-1", replay, List.of(samplePhotoMedia("p1", "https://x/p1.jpg")));
+
+        MediaArchiveRecord record = writer.readCanonicalSidecar("canonical-1").orElseThrow();
+        assertThat(record.getCanonicalArchiveDate()).isEqualTo(LocalDate.of(2026, 8, 2));
+        assertThat(tempDir.resolve("media/twitter/2026-08-02/canonical-1/media.json")).exists();
+        assertThat(tempDir.resolve("media/twitter/2026-08-03/canonical-1/media.json")).doesNotExist();
+    }
+
+    @Test
+    void should_use_existing_canonical_winner_instead_of_local_first_write_candidate() throws IOException {
+        Path index = tempDir.resolve("media/twitter/.canonical/race-1.date");
+        Files.createDirectories(index.getParent());
+        Files.writeString(index, "2026-08-01");
+
+        writer.writeSidecar("race-1", LocalDateTime.of(2026, 8, 2, 10, 0),
+                List.of(samplePhotoMedia("p", "https://x/p.jpg")));
+
+        assertThat(tempDir.resolve("media/twitter/2026-08-01/race-1/media.json")).exists();
+        assertThat(tempDir.resolve("media/twitter/2026-08-02/race-1/media.json")).doesNotExist();
+    }
+
+    @Test
+    void should_initialize_photo_video_gif_and_unknown_with_strict_schema() {
+        TweetMedia photo = samplePhotoMedia("p", "https://x/p.jpg");
+        TweetMedia video = TweetMedia.builder().id("v").type(TweetMediaType.VIDEO).build();
+        TweetMedia gif = TweetMedia.builder().id("g").type(TweetMediaType.GIF)
+                .originalPostUrl("https://x/status/1").build();
+        TweetMedia unknown = TweetMedia.builder().id("u").type(TweetMediaType.UNKNOWN).build();
+
+        MediaArchiveRecord record = writer.writeSidecar("schema-1",
+                LocalDateTime.of(2026, 8, 2, 10, 0), List.of(photo, video, gif, unknown));
+
+        assertThat(record.getMedia().get(0).getDownload().getStatus()).isEqualTo(MediaPhaseStatus.NOT_STARTED);
+        assertThat(record.getMedia().get(1).getArticleReference().getStatus()).isEqualTo(MediaPhaseStatus.NOT_STARTED);
+        assertThat(record.getMedia().get(2).getDownload().getStatus()).isEqualTo(MediaPhaseStatus.DEFERRED);
+        assertThat(record.getMedia().get(2).getManualInstruction()).contains("人工处理");
+        assertThat(record.getMedia().get(3).getManualInstruction()).contains("阻断自动发布");
+    }
+
+    @Test
+    void should_terminalize_download_failure_without_scheduling_retry() {
+        TweetMedia photo = samplePhotoMedia("p", "https://x/p.jpg");
+        photo.markDownloadFailed("TERMINAL", "MEDIA_DOWNLOAD", "safe summary");
+
+        MediaArchiveRecord record = writer.writeSidecar("failed-1",
+                LocalDateTime.of(2026, 8, 2, 10, 0), List.of(photo));
+        TweetMedia stored = record.getMedia().getFirst();
+
+        assertThat(stored.getDownload().getStatus()).isEqualTo(MediaPhaseStatus.FAILED_TERMINAL);
+        assertThat(stored.getDownload().getAttempt()).isEqualTo(1);
+        assertThat(stored.getDownload().getNextRetryAt()).isNull();
+        assertThat(stored.getWechatPrepare().getStatus()).isEqualTo(MediaPhaseStatus.NOT_STARTED);
+        assertThat(stored.getArticleReference().getStatus()).isEqualTo(MediaPhaseStatus.NOT_STARTED);
+    }
+
+    @Test
+    void should_mark_required_media_article_reference_succeeded_after_render() {
+        LocalDateTime when = LocalDateTime.of(2026, 8, 2, 10, 0);
+        TweetMedia photo = samplePhotoMedia("p", "https://x/p.jpg").toBuilder()
+                .downloadStatus(MediaDownloadStatus.DOWNLOADED)
+                .uploadStatus(MediaUploadStatus.UPLOADED)
+                .wechatUrl("https://mmbiz.qpic.cn/p.jpg")
+                .build();
+        TweetMedia gif = TweetMedia.builder().id("g").type(TweetMediaType.GIF)
+                .originalPostUrl("https://x/status/1").build();
+        writer.writeSidecar("referenced-1", when, List.of(photo, gif));
+
+        assertThat(writer.markArticleReferencesSucceeded(
+                "referenced-1", "正文 ![](https://mmbiz.qpic.cn/p.jpg)")).isTrue();
+
+        List<TweetMedia> stored = writer.readCanonicalSidecar("referenced-1").orElseThrow().getMedia();
+        assertThat(stored.get(0).getArticleReference().getStatus()).isEqualTo(MediaPhaseStatus.SUCCEEDED);
+        assertThat(stored.get(1).getArticleReference().getStatus()).isEqualTo(MediaPhaseStatus.DEFERRED);
+    }
+
+    @Test
+    void should_reject_article_reference_without_prepared_url_or_rendered_evidence() {
+        LocalDateTime when = LocalDateTime.of(2026, 8, 2, 10, 0);
+        TweetMedia missingUrl = samplePhotoMedia("p", "https://x/p.jpg").toBuilder()
+                .downloadStatus(MediaDownloadStatus.DOWNLOADED)
+                .uploadStatus(MediaUploadStatus.UPLOADED)
+                .build();
+        writer.writeSidecar("missing-url", when, List.of(missingUrl));
+        assertThat(writer.markArticleReferencesSucceeded("missing-url", "正文")).isFalse();
+
+        TweetMedia prepared = missingUrl.toBuilder().wechatUrl("https://mmbiz.qpic.cn/p.jpg").build();
+        writer.writeSidecar("missing-content", when, List.of(prepared));
+        assertThat(writer.markArticleReferencesSucceeded("missing-content", "正文不含图片")).isFalse();
+        assertThat(writer.markArticleReferencesSucceeded("missing-content", null)).isFalse();
+    }
+
+    @Test
+    void should_accept_valid_deferred_gif_only_without_marking_required_reference() {
+        TweetMedia gif = TweetMedia.builder().id("g").type(TweetMediaType.GIF)
+                .originalPostUrl("https://x/status/1").build();
+        gif.initializeDeliveryPhases("https://x/status/1");
+        writer.writeSidecar("gif-only", LocalDateTime.of(2026, 8, 2, 10, 0), List.of(gif));
+
+        assertThat(writer.markArticleReferencesSucceeded("gif-only", "正文")).isTrue();
+        TweetMedia stored = writer.readCanonicalSidecar("gif-only").orElseThrow().getMedia().getFirst();
+        assertThat(stored.getArticleReference().getStatus()).isEqualTo(MediaPhaseStatus.DEFERRED);
     }
 }

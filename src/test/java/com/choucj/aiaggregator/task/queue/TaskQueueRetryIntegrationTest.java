@@ -52,6 +52,15 @@ import static org.assertj.core.api.Assertions.fail;
 @org.junit.jupiter.api.Tag("external")
 class TaskQueueRetryIntegrationTest {
 
+    @Test
+    void delivery_failure_replay_should_propagate_article_metadata() {
+        assertThat(taskQueue.recordDeliveryFailure("delivery:tw-42", "tw-42", "MEDIA", "safe")).isTrue();
+        TaskQueue.ReplayResult replay = taskQueue.replayDeadLetter("delivery:tw-42", "req-42");
+        TaskQueue.ReplayMetadata metadata = taskQueue.getReplayMetadata(replay.newTaskId());
+        assertThat(metadata.articleId()).isEqualTo("tw-42");
+        assertThat(metadata.replayedFrom()).isEqualTo("delivery:tw-42");
+    }
+
     @Autowired
     private TaskQueue taskQueue;
 

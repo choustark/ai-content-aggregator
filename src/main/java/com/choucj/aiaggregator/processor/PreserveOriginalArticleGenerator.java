@@ -8,6 +8,7 @@ import com.choucj.aiaggregator.common.util.TextTruncateUtil;
 import com.choucj.aiaggregator.content.rewriter.SingleModelRewriter;
 import com.choucj.aiaggregator.publish.storage.MediaArchiveRecord;
 import com.choucj.aiaggregator.publish.storage.TweetMediaArchiveWriter;
+import com.choucj.aiaggregator.publish.status.DeliveryFailureCoordinator;
 import com.choucj.aiaggregator.publish.wechat.converter.OriginalPostRenderResult;
 import com.choucj.aiaggregator.publish.wechat.converter.OriginalPostRenderer;
 import com.choucj.aiaggregator.publish.wechat.media.MediaPreparationResult;
@@ -17,6 +18,7 @@ import com.choucj.aiaggregator.source.twitter.media.TweetPublishabilityGate;
 import com.choucj.aiaggregator.source.twitter.model.PublishabilityStatus;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
+import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -92,18 +94,30 @@ public class PreserveOriginalArticleGenerator implements OriginalPostGenerationG
     private final Optional<TweetMediaArchiveWriter> tweetMediaArchiveWriter;
 
     private final OriginalPostRenderer originalPostRenderer;
+    private final Optional<DeliveryFailureCoordinator> deliveryFailureCoordinator;
 
     @Autowired
     public PreserveOriginalArticleGenerator(Optional<TweetMediaArchiver> tweetMediaArchiver,
                                             Optional<TweetPublishabilityGate> tweetPublishabilityGate,
                                             WeChatMediaPreparer weChatMediaPreparer,
                                             Optional<TweetMediaArchiveWriter> tweetMediaArchiveWriter,
-                                            OriginalPostRenderer originalPostRenderer) {
+                                            OriginalPostRenderer originalPostRenderer,
+                                            Optional<DeliveryFailureCoordinator> deliveryFailureCoordinator) {
         this.tweetMediaArchiver = tweetMediaArchiver;
         this.tweetPublishabilityGate = tweetPublishabilityGate;
         this.weChatMediaPreparer = weChatMediaPreparer;
         this.tweetMediaArchiveWriter = tweetMediaArchiveWriter;
         this.originalPostRenderer = originalPostRenderer;
+        this.deliveryFailureCoordinator = deliveryFailureCoordinator;
+    }
+
+    public PreserveOriginalArticleGenerator(Optional<TweetMediaArchiver> tweetMediaArchiver,
+                                            Optional<TweetPublishabilityGate> tweetPublishabilityGate,
+                                            WeChatMediaPreparer weChatMediaPreparer,
+                                            Optional<TweetMediaArchiveWriter> tweetMediaArchiveWriter,
+                                            OriginalPostRenderer originalPostRenderer) {
+        this(tweetMediaArchiver, tweetPublishabilityGate, weChatMediaPreparer,
+                tweetMediaArchiveWriter, originalPostRenderer, Optional.empty());
     }
 
     /**
@@ -130,6 +144,10 @@ public class PreserveOriginalArticleGenerator implements OriginalPostGenerationG
 
         List<TweetMedia> media = tweet.getMedia() == null ? List.of() : tweet.getMedia();
         boolean hasMedia = !media.isEmpty();
+        media.stream()
+                .filter(item -> item != null && item.getType() == TweetMediaType.GIF)
+                .filter(item -> item.getOriginalPostUrl() == null || item.getOriginalPostUrl().isBlank())
+                .forEach(item -> item.setOriginalPostUrl(tweet.getUrl()));
 
         // AC1 步骤 2: 媒体下载归档 (有媒体时; archiver 缺失 = twitter.media.enabled=false → 配置不一致)
         final TweetMediaArchiver.ArchiveResult archiveResult;
@@ -140,6 +158,33 @@ public class PreserveOriginalArticleGenerator implements OriginalPostGenerationG
                     archiver.archiveMedia(tweetId, publishedAt, media));
         } else {
             archiveResult = null;
+        }
+
+        if (archiveResult != null && archiveResult.failCount() > 0) {
+            TweetMediaArchiveWriter archiveWriter = requireBean(
+                    tweetMediaArchiveWriter, "TweetMediaArchiveWriter", "twitter.media.enabled", tweetId);
+            List<TweetMedia> failedMedia = archiveWriter.readCanonicalSidecar(tweetId)
+                    .map(MediaArchiveRecord::getMedia).orElse(List.of());
+            Article failedArticle;
+            try {
+                OriginalPostRenderResult failedRender = callExternal(tweetId, "renderFailureArchive", () ->
+                        originalPostRenderer.render(tweet, failedMedia));
+                failedArticle = callExternal(tweetId, "toFailureArticle", () ->
+                        originalPostRenderer.toArticle(tweet, failedRender));
+            } catch (RuntimeException renderFailure) {
+                failedArticle = minimalFailureArticle(tweet);
+            }
+            failedArticle.setGenerationMode(ContentGenerationMode.PRESERVE_ORIGINAL);
+            failedArticle.setMediaAuditMarkdown(buildMediaAuditMarkdown(failedMedia, tweet.getUrl()));
+            DeliveryFailureCoordinator coordinator = requireBean(deliveryFailureCoordinator,
+                    "DeliveryFailureCoordinator", "archive.enabled", tweetId);
+            DeliveryFailureCoordinator.ConvergenceResult convergence = coordinator.converge(
+                    failedArticle, "MEDIA_DOWNLOAD", "MEDIA_DOWNLOAD_FAILED", "必需媒体下载失败");
+            if (!convergence.converged()) {
+                throw new RetryableException("原帖交付失败状态未收敛: tweetId=" + tweetId
+                        + ", layer=" + convergence.incompleteLayer());
+            }
+            return failedArticle;
         }
 
         // AC1 步骤 3: publishability 推文级评估 (gate 缺失时跳过, 推文级 BLOCKED → fail-fast)
@@ -160,14 +205,30 @@ public class PreserveOriginalArticleGenerator implements OriginalPostGenerationG
             TweetMediaArchiveWriter archiveWriter = requireBean(
                     tweetMediaArchiveWriter, "TweetMediaArchiveWriter", "twitter.media.enabled", tweetId);
             // AC1 步骤 4: 微信正文图片上传 (幂等: wechatUrl 非空的媒体由 preparer 内部跳过)
-            preparation = callExternal(tweetId, "prepareMedia", () ->
-                    weChatMediaPreparer.prepareMedia(tweetId, publishedAt, media));
+            try {
+                preparation = callExternal(tweetId, "prepareMedia", () ->
+                        weChatMediaPreparer.prepareMedia(tweetId, publishedAt, media));
+            } catch (RuntimeException failure) {
+                Article failed = minimalFailureArticle(tweet);
+                failed.setMediaAuditMarkdown(buildMediaAuditMarkdown(media, tweet.getUrl()));
+                convergeFailure(tweetId, failed, "WECHAT_PREPARE", "MEDIA_PREPARE_FAILED", "媒体微信准备失败");
+                throw failure;
+            }
             // AC1 步骤 5: 从 sidecar 重读权威媒体状态。prepareMedia 后仍读不到 sidecar
             // 说明权威审计状态缺失，按可重试失败处理，避免静默生成缺图片/缺审计的草稿。
-            MediaArchiveRecord sidecar = callExternal(tweetId, "readSidecar", () ->
-                            archiveWriter.readSidecar(tweetId, publishedAt))
-                    .orElseThrow(() -> new RetryableException("原帖生成失败: tweetId=" + tweetId
-                            + ", reason=media sidecar missing after prepareMedia"));
+            MediaArchiveRecord sidecar;
+            try {
+                sidecar = callExternal(tweetId, "readSidecar", () ->
+                                archiveWriter.readSidecar(tweetId, publishedAt))
+                        .orElseThrow(() -> new RetryableException("原帖生成失败: tweetId=" + tweetId
+                                + ", reason=media sidecar missing after prepareMedia"));
+            } catch (RuntimeException failure) {
+                Article failed = minimalFailureArticle(tweet);
+                failed.setMediaAuditMarkdown(buildMediaAuditMarkdown(media, tweet.getUrl()));
+                convergeFailure(tweetId, failed, "MEDIA_SIDECAR", "MEDIA_SIDECAR_UNAVAILABLE",
+                        "媒体权威状态不可用");
+                throw failure;
+            }
             sidecarMedia = sidecar.getMedia() == null ? List.of() : sidecar.getMedia();
         } else {
             sidecarMedia = List.of();
@@ -178,6 +239,16 @@ public class PreserveOriginalArticleGenerator implements OriginalPostGenerationG
                 callExternal(tweetId, "render", () -> originalPostRenderer.render(tweet, sidecarMedia));
         Article article =
                 callExternal(tweetId, "toArticle", () -> originalPostRenderer.toArticle(tweet, renderResult));
+        if (hasMedia) {
+            boolean referenced = callExternal(tweetId, "markArticleReference", () ->
+                    tweetMediaArchiveWriter.orElseThrow().markArticleReferencesSucceeded(tweetId, renderResult.html()));
+            if (!referenced) {
+                article.setGenerationMode(ContentGenerationMode.PRESERVE_ORIGINAL);
+                article.setMediaAuditMarkdown(buildMediaAuditMarkdown(sidecarMedia, tweet.getUrl()));
+                convergeFailure(tweetId, article, "ARTICLE_REFERENCE", "ARTICLE_REFERENCE_FAILED", "媒体正文引用失败");
+                throw new RetryableException("媒体正文引用状态回写失败: tweetId=" + tweetId);
+            }
+        }
 
         // AC1 步骤 7: html 长度预算防御 (fail-fast 优于截断破坏保真)
         if (article.getContent() == null || article.getContent().length() > HTML_LENGTH_BUDGET) {
@@ -204,6 +275,22 @@ public class PreserveOriginalArticleGenerator implements OriginalPostGenerationG
                 renderResult.embeddedImageCount(), renderResult.degradedMediaCount(),
                 article.getContent().length(), elapsedMs);
         return article;
+    }
+
+    private static Article minimalFailureArticle(Tweet tweet) {
+        String content = tweet.getFormattedText() != null ? tweet.getFormattedText()
+                : (tweet.getContent() != null ? tweet.getContent() : "");
+        return Article.builder().id("tw-" + tweet.getId()).title("原帖交付失败")
+                .content(content).source("Twitter").originalUrl(tweet.getUrl())
+                .createdAt(tweet.getPublishedAt()).aiGenerated(false)
+                .generationMode(ContentGenerationMode.PRESERVE_ORIGINAL).build();
+    }
+
+    private void convergeFailure(String tweetId, Article article, String stage, String code, String summary) {
+        DeliveryFailureCoordinator coordinator = requireBean(deliveryFailureCoordinator,
+                "DeliveryFailureCoordinator", "archive.enabled", tweetId);
+        var result = coordinator.converge(article, stage, code, summary);
+        if (!result.converged()) throw new RetryableException("原帖交付失败状态未收敛: tweetId=" + tweetId);
     }
 
     /** 有媒体但依赖 Bean 缺失 → 配置不一致 fail-fast (AC9, message 含 tweetId + 缺失开关名)。 */

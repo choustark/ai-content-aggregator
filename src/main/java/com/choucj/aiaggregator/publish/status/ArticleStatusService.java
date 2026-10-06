@@ -105,6 +105,14 @@ public class ArticleStatusService {
         writeSoftFail("markDraftCreated", articleId, ArticleStatus.DRAFT_CREATED, false);
     }
 
+    /** 严格镜像 DELIVERY_FAILED；Redis 写失败必须透传，供 saga 重放补齐。 */
+    public void markDeliveryFailed(String articleId) {
+        validateArticleId(articleId);
+        String key = RedisKeys.articleStatus(articleId);
+        redisRepository.setKeepingTtl(key, ArticleStatus.DELIVERY_FAILED.name());
+        log.info("交付失败状态镜像成功: articleId={}, status=DELIVERY_FAILED", articleId);
+    }
+
     /**
      * Story 3.5 AC-5 / AC-6 — 状态查询.
      *

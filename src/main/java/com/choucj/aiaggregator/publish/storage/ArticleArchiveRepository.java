@@ -14,11 +14,14 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.AtomicMoveNotSupportedException;
+import java.nio.file.StandardCopyOption;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 import java.util.regex.Pattern;
 
 /**
@@ -32,6 +35,8 @@ public class ArticleArchiveRepository {
     private static final String ARTICLE_ID_MARKER_TEMPLATE = "<!-- article-id: %s -->";
 
     private static final Pattern ARTICLE_ID_PATTERN = Pattern.compile("(tw|gh)-[A-Za-z0-9_-]+");
+    private static final Object[] ARTICLE_LOCKS = new Object[64];
+    static { java.util.Arrays.setAll(ARTICLE_LOCKS, ignored -> new Object()); }
 
     private final ArchiverProperties properties;
     private final ObjectMapper objectMapper;
@@ -39,25 +44,22 @@ public class ArticleArchiveRepository {
     public ArchivedArticle saveSnapshot(Article article, ArticleStatus targetStatus,
                                         LocalDateTime scheduledPublishAt, Path archiveFile) {
         requireArticle(article);
-        ArticleStatus desiredStatus = targetStatus == null ? ArticleStatus.CREATED : targetStatus;
-        ArchivedArticle existing = findByArticleId(article.getId()).orElse(null);
-        ArticleStatus status = mergeStatus(existing == null ? null : existing.getStatus(), desiredStatus);
-        ArchivedArticle snapshot = existing == null ? new ArchivedArticle() : existing;
-        snapshot.setArticleId(article.getId());
-        snapshot.setArticle(article);
-        snapshot.setCreatedAt(article.getCreatedAt());
-        snapshot.setStatus(status);
-        if (scheduledPublishAt != null) {
-            snapshot.setScheduledPublishAt(scheduledPublishAt);
+        synchronized (articleLock(article.getId())) {
+            ArticleStatus desiredStatus = targetStatus == null ? ArticleStatus.CREATED : targetStatus;
+            ArchivedArticle existing = findByArticleId(article.getId()).orElse(null);
+            ArticleStatus status = mergeStatus(existing == null ? null : existing.getStatus(), desiredStatus);
+            ArchivedArticle snapshot = existing == null ? new ArchivedArticle() : existing;
+            snapshot.setArticleId(article.getId());
+            snapshot.setArticle(article);
+            snapshot.setCreatedAt(article.getCreatedAt());
+            snapshot.setStatus(status);
+            if (scheduledPublishAt != null) snapshot.setScheduledPublishAt(scheduledPublishAt);
+            if (archiveFile != null) snapshot.setArchiveFile(normalizeArchivePath(archiveFile));
+            else if (snapshot.getArchiveFile() == null) snapshot.setArchiveFile("");
+            writeSnapshot(snapshot);
+            updateMarkdownStatus(snapshot);
+            return snapshot;
         }
-        if (archiveFile != null) {
-            snapshot.setArchiveFile(normalizeArchivePath(archiveFile));
-        } else if (snapshot.getArchiveFile() == null) {
-            snapshot.setArchiveFile("");
-        }
-        writeSnapshot(snapshot);
-        updateMarkdownStatus(snapshot);
-        return snapshot;
     }
 
     public Optional<ArchivedArticle> findByArticleId(String articleId) {
@@ -93,26 +95,112 @@ public class ArticleArchiveRepository {
 
     public ArchivedArticle markStatus(String articleId, ArticleStatus status) {
         validateArticleId(articleId);
-        ArchivedArticle snapshot = findByArticleId(articleId)
+        synchronized (articleLock(articleId)) {
+            ArchivedArticle snapshot = findByArticleId(articleId)
                 .orElseThrow(() -> new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
                         "文章归档快照不存在: articleId=" + articleId));
-        snapshot.setStatus(status);
-        writeSnapshot(snapshot);
-        updateMarkdownStatus(snapshot);
-        return snapshot;
+            if (snapshot.getStatus() == ArticleStatus.DELIVERY_FAILED && status != ArticleStatus.DELIVERY_FAILED) {
+                throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                        "DELIVERY_FAILED 为受保护终态，必须通过显式补跑创建新任务: articleId=" + articleId);
+            }
+            snapshot.setStatus(status);
+            writeSnapshot(snapshot);
+            updateMarkdownStatus(snapshot);
+            return snapshot;
+        }
+    }
+
+    /** 原子记录文章交付失败，并保留已经生成的 Article 与首次失败证据。 */
+    public ArchivedArticle markDeliveryFailed(String articleId, String stage, String code,
+                                               String summary, String taskId, LocalDateTime failedAt) {
+        validateArticleId(articleId);
+        synchronized (articleLock(articleId)) {
+            ArchivedArticle snapshot = findByArticleId(articleId)
+                .orElseThrow(() -> new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                        "文章归档快照不存在: articleId=" + articleId));
+            snapshot.setStatus(ArticleStatus.DELIVERY_FAILED);
+            if (snapshot.getFailedAt() == null) {
+                snapshot.setFailureStage(stage); snapshot.setFailureCode(code);
+                snapshot.setFailureSummary(summary); snapshot.setFailureTaskId(taskId);
+                snapshot.setFailedAt(failedAt);
+            }
+            writeSnapshot(snapshot);
+            updateMarkdownStatus(snapshot);
+            return snapshot;
+        }
+    }
+
+    /** 人工已修复媒体后，保留失败证据并将文章重新交给受控补跑任务。 */
+    public ArchivedArticle reopenDeliveryFailedForReplay(String articleId) {
+        validateArticleId(articleId);
+        synchronized (articleLock(articleId)) {
+            ArchivedArticle snapshot = findByArticleId(articleId)
+                .orElseThrow(() -> new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                        "文章归档快照不存在: articleId=" + articleId));
+            if (snapshot.getStatus() != ArticleStatus.DELIVERY_FAILED) {
+                throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                        "文章不处于 DELIVERY_FAILED，拒绝补跑恢复: articleId=" + articleId);
+            }
+            snapshot.setStatus(ArticleStatus.CREATED);
+            writeSnapshot(snapshot);
+            updateMarkdownStatus(snapshot);
+            return snapshot;
+        }
     }
 
     public ArchivedArticle markDraftCreated(String articleId, String mediaId, LocalDateTime draftCreatedAt) {
         validateArticleId(articleId);
-        ArchivedArticle snapshot = findByArticleId(articleId)
+        synchronized (articleLock(articleId)) {
+            ArchivedArticle snapshot = findByArticleId(articleId)
                 .orElseThrow(() -> new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
                         "文章归档快照不存在: articleId=" + articleId));
-        snapshot.setStatus(ArticleStatus.DRAFT_CREATED);
-        snapshot.setWechatDraftMediaId(mediaId);
-        snapshot.setDraftCreatedAt(draftCreatedAt);
-        writeSnapshot(snapshot);
-        updateMarkdownStatus(snapshot);
-        return snapshot;
+            if (snapshot.getStatus() == ArticleStatus.DELIVERY_FAILED) {
+                throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                        "DELIVERY_FAILED 为受保护终态，拒绝写入草稿成功: articleId=" + articleId);
+            }
+            snapshot.setStatus(ArticleStatus.DRAFT_CREATED);
+            snapshot.setWechatDraftMediaId(mediaId);
+            snapshot.setDraftCreatedAt(draftCreatedAt);
+            writeSnapshot(snapshot);
+            updateMarkdownStatus(snapshot);
+            return snapshot;
+        }
+    }
+
+    /**
+     * 根据补跑任务中已持久化的微信成功收据完成本地对账。该入口允许从补跑中间态恢复，
+     * 但若快照已是草稿成功且 mediaId 不一致则 fail-closed，避免覆盖冲突证据。
+     */
+    public ArchivedArticle reconcileDraftCreatedFromReplay(String articleId, String mediaId,
+                                                            LocalDateTime draftCreatedAt) {
+        validateArticleId(articleId);
+        if (mediaId == null || mediaId.isBlank()) {
+            throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                    "补跑草稿收据 mediaId 不能为空: articleId=" + articleId);
+        }
+        synchronized (articleLock(articleId)) {
+            ArchivedArticle snapshot = findByArticleId(articleId)
+                    .orElseThrow(() -> new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                            "文章归档快照不存在: articleId=" + articleId));
+            if (snapshot.getStatus() == ArticleStatus.DRAFT_CREATED) {
+                if (!mediaId.equals(snapshot.getWechatDraftMediaId())) {
+                    throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                            "补跑草稿收据与既有草稿冲突: articleId=" + articleId);
+                }
+                return snapshot;
+            }
+            snapshot.setStatus(ArticleStatus.DRAFT_CREATED);
+            snapshot.setWechatDraftMediaId(mediaId);
+            snapshot.setDraftCreatedAt(draftCreatedAt);
+            writeSnapshot(snapshot);
+            updateMarkdownStatus(snapshot);
+            return snapshot;
+        }
+    }
+
+    private Object articleLock(String articleId) {
+        String key = snapshotFile(articleId).toAbsolutePath().normalize().toString();
+        return ARTICLE_LOCKS[(key.hashCode() & Integer.MAX_VALUE) % ARTICLE_LOCKS.length];
     }
 
     private Optional<ArchivedArticle> readDue(Path path, LocalDateTime now) {
@@ -142,10 +230,21 @@ public class ArticleArchiveRepository {
 
     private void writeSnapshot(ArchivedArticle snapshot) {
         Path file = snapshotFile(snapshot.getArticleId());
+        Path temp = file.resolveSibling(file.getFileName() + "." + UUID.randomUUID() + ".tmp");
         try {
             Files.createDirectories(file.getParent());
-            objectMapper.writerWithDefaultPrettyPrinter().writeValue(file.toFile(), snapshot);
+            objectMapper.writerWithDefaultPrettyPrinter().writeValue(temp.toFile(), snapshot);
+            try {
+                Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } catch (AtomicMoveNotSupportedException e) {
+                Files.move(temp, file, StandardCopyOption.REPLACE_EXISTING);
+            }
         } catch (IOException e) {
+            try {
+                Files.deleteIfExists(temp);
+            } catch (IOException ignored) {
+                // 清理失败不能掩盖原始快照写入错误。
+            }
             throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
                     "写入文章归档快照失败: articleId=" + snapshot.getArticleId() + " 文件=" + file, e);
         }
@@ -232,6 +331,12 @@ public class ArticleArchiveRepository {
         if (status == ArticleStatus.PENDING_PUBLISH) {
             return "待发布";
         }
+        if (status == ArticleStatus.MEDIA_PROCESSING) {
+            return "媒体处理中";
+        }
+        if (status == ArticleStatus.DELIVERY_FAILED) {
+            return "交付失败";
+        }
         return "已创建";
     }
 
@@ -240,7 +345,7 @@ public class ArticleArchiveRepository {
     }
 
     private ArticleStatus mergeStatus(ArticleStatus existing, ArticleStatus desired) {
-        if (existing == ArticleStatus.DRAFT_CREATED) {
+        if (existing == ArticleStatus.DRAFT_CREATED || existing == ArticleStatus.DELIVERY_FAILED) {
             return existing;
         }
         if (desired == ArticleStatus.CREATED && existing != null) {

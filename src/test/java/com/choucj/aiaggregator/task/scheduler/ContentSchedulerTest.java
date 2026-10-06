@@ -9,6 +9,7 @@ import com.choucj.aiaggregator.monitoring.TaskMetrics;
 import com.choucj.aiaggregator.processor.GitHubProcessor;
 import com.choucj.aiaggregator.processor.TwitterProcessor;
 import com.choucj.aiaggregator.processor.config.ProcessorProperties;
+import com.choucj.aiaggregator.publish.status.ArticleDeliveryReplayExecutor;
 import com.choucj.aiaggregator.task.queue.RetryPolicyProperties;
 import com.choucj.aiaggregator.task.queue.TaskQueue;
 import com.choucj.aiaggregator.task.queue.TaskRecoveryRunner;
@@ -88,6 +89,7 @@ class ContentSchedulerTest {
 
     @Mock
     private TaskMetrics taskMetrics;
+    @Mock private ArticleDeliveryReplayExecutor deliveryReplayExecutor;
 
     @BeforeEach
     void setUp() {
@@ -109,6 +111,28 @@ class ContentSchedulerTest {
         return new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
                 Optional.of(githubProcessor), processorProperties, costMonitor, taskMetrics,
                 new RetryPolicyProperties(), true, FIXED_CLOCK);
+    }
+
+    private ContentScheduler schedulerWithReplay(Optional<ArticleDeliveryReplayExecutor> executor) {
+        return new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
+                Optional.of(githubProcessor), processorProperties, Optional.empty(), Optional.empty(),
+                executor, new RetryPolicyProperties(), true, FIXED_CLOCK);
+    }
+
+    @Test
+    void should_route_delivery_replay_to_registered_executor() {
+        when(taskQueue.poll(0L, TimeUnit.SECONDS)).thenReturn("delivery:tw-1:replay:req").thenReturn(null);
+        schedulerWithReplay(Optional.of(deliveryReplayExecutor)).processContent();
+        verify(deliveryReplayExecutor).execute("delivery:tw-1:replay:req");
+        verify(taskQueue).complete("delivery:tw-1:replay:req");
+    }
+
+    @Test
+    void should_dead_letter_delivery_replay_when_executor_is_missing() {
+        when(taskQueue.poll(0L, TimeUnit.SECONDS)).thenReturn("delivery:tw-1:replay:req").thenReturn(null);
+        when(taskQueue.markDeadLetter(anyString(), anyString(), anyString())).thenReturn(true);
+        schedulerWithReplay(Optional.empty()).processContent();
+        verify(taskQueue).markDeadLetter(eq("delivery:tw-1:replay:req"), anyString(), anyString());
     }
 
     @Test
