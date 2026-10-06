@@ -1,6 +1,7 @@
 package com.choucj.aiaggregator.task.scheduler;
 
 import com.choucj.aiaggregator.common.exception.AggregatorException;
+import com.choucj.aiaggregator.common.exception.ArticleDeliveryRetryableException;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
@@ -11,6 +12,8 @@ import com.choucj.aiaggregator.processor.GitHubProcessor;
 import com.choucj.aiaggregator.processor.TwitterProcessor;
 import com.choucj.aiaggregator.processor.config.ProcessorProperties;
 import com.choucj.aiaggregator.publish.status.ArticleDeliveryReplayExecutor;
+import com.choucj.aiaggregator.publish.status.DeliveryFailureCoordinator;
+import com.choucj.aiaggregator.publish.storage.TweetMediaArchiveWriter;
 import com.choucj.aiaggregator.task.queue.RetryPolicyProperties;
 import com.choucj.aiaggregator.task.queue.TaskQueue;
 import com.choucj.aiaggregator.task.queue.TaskRecoveryRunner;
@@ -76,6 +79,9 @@ public class ContentScheduler {
     private final RetryPolicyProperties retryPolicy;
     private final boolean runOnStartup;
     private final Clock clock;
+    /** Story 10.8: 耗尽收敛钩子依赖 — Optional 注入, 缺失时钩子旁路跳过. */
+    private final Optional<DeliveryFailureCoordinator> deliveryFailureCoordinatorOptional;
+    private final Optional<TweetMediaArchiveWriter> archiveWriterOptional;
 
     /**
      * 构造器注入 {@code schedule.run-on-startup}(CR W2 修复) +
@@ -123,7 +129,7 @@ public class ContentScheduler {
                 Clock.systemDefaultZone());
     }
 
-    @Autowired
+    /** Story 10.8 前签名 (兼容): 耗尽收敛钩子依赖为空 (Optional.empty). */
     public ContentScheduler(TaskQueue taskQueue,
                             TaskRecoveryRunner recoveryRunner,
                             TwitterProcessor twitterProcessor,
@@ -136,6 +142,26 @@ public class ContentScheduler {
                             @Value("${schedule.run-on-startup:false}") boolean runOnStartup) {
         this(taskQueue, recoveryRunner, twitterProcessor, githubProcessorOptional, processorProperties,
                 costMonitorOptional, taskMetricsOptional, deliveryReplayExecutor, retryPolicy, runOnStartup,
+                Clock.systemDefaultZone());
+    }
+
+    /** Story 10.8: Spring 装构造器 — 注入耗尽收敛钩子依赖 (协调器 + sidecar 写入器, 均可缺失). */
+    @Autowired
+    public ContentScheduler(TaskQueue taskQueue,
+                            TaskRecoveryRunner recoveryRunner,
+                            TwitterProcessor twitterProcessor,
+                            Optional<GitHubProcessor> githubProcessorOptional,
+                            ProcessorProperties processorProperties,
+                            Optional<CostMonitor> costMonitorOptional,
+                            Optional<TaskMetrics> taskMetricsOptional,
+                            Optional<ArticleDeliveryReplayExecutor> deliveryReplayExecutor,
+                            Optional<DeliveryFailureCoordinator> deliveryFailureCoordinatorOptional,
+                            Optional<TweetMediaArchiveWriter> archiveWriterOptional,
+                            RetryPolicyProperties retryPolicy,
+                            @Value("${schedule.run-on-startup:false}") boolean runOnStartup) {
+        this(taskQueue, recoveryRunner, twitterProcessor, githubProcessorOptional, processorProperties,
+                costMonitorOptional, taskMetricsOptional, deliveryReplayExecutor,
+                deliveryFailureCoordinatorOptional, archiveWriterOptional, retryPolicy, runOnStartup,
                 Clock.systemDefaultZone());
     }
 
@@ -158,6 +184,7 @@ public class ContentScheduler {
                 costMonitorOptional, taskMetricsOptional, Optional.empty(), retryPolicy, runOnStartup, clock);
     }
 
+    /** Story 10.8 前签名 (兼容): 耗尽收敛钩子依赖为空 (Optional.empty). */
     ContentScheduler(TaskQueue taskQueue,
                      TaskRecoveryRunner recoveryRunner,
                      TwitterProcessor twitterProcessor,
@@ -169,6 +196,25 @@ public class ContentScheduler {
                      RetryPolicyProperties retryPolicy,
                      boolean runOnStartup,
                      Clock clock) {
+        this(taskQueue, recoveryRunner, twitterProcessor, githubProcessorOptional, processorProperties,
+                costMonitorOptional, taskMetricsOptional, deliveryReplayExecutor,
+                Optional.empty(), Optional.empty(), retryPolicy, runOnStartup, clock);
+    }
+
+    /** Story 10.8: 最大构造器 — 钩子依赖 + Clock 全量注入. */
+    ContentScheduler(TaskQueue taskQueue,
+                     TaskRecoveryRunner recoveryRunner,
+                     TwitterProcessor twitterProcessor,
+                     Optional<GitHubProcessor> githubProcessorOptional,
+                     ProcessorProperties processorProperties,
+                     Optional<CostMonitor> costMonitorOptional,
+                     Optional<TaskMetrics> taskMetricsOptional,
+                     Optional<ArticleDeliveryReplayExecutor> deliveryReplayExecutor,
+                     Optional<DeliveryFailureCoordinator> deliveryFailureCoordinatorOptional,
+                     Optional<TweetMediaArchiveWriter> archiveWriterOptional,
+                     RetryPolicyProperties retryPolicy,
+                     boolean runOnStartup,
+                     Clock clock) {
         this.taskQueue = taskQueue;
         this.recoveryRunner = recoveryRunner;
         this.twitterProcessor = twitterProcessor;
@@ -177,6 +223,8 @@ public class ContentScheduler {
         this.processorProperties = processorProperties;
         this.costMonitorOptional = costMonitorOptional;
         this.taskMetricsOptional = taskMetricsOptional;
+        this.deliveryFailureCoordinatorOptional = deliveryFailureCoordinatorOptional;
+        this.archiveWriterOptional = archiveWriterOptional;
         this.retryPolicy = retryPolicy;
         this.runOnStartup = runOnStartup;
         this.clock = clock;
@@ -312,6 +360,21 @@ public class ContentScheduler {
                     taskId, errorCodeOf(e), safeErrorSummary(e), retryPolicy);
             TaskQueue.RetryOutcome outcome = advance.outcome();
             if (outcome == TaskQueue.RetryOutcome.RETRY_SCHEDULED) {
+                // Story 10.8: 媒体交付可重试失败 — 把 articleId 记入 state Hash,
+                // 使重试耗尽落死信时耗尽收敛钩子能凭 state 定位失败文章
+                // (先权威状态迁移、后旁路上下文写入, 写入失败只降级告警,
+                // 不得跳过下方 SCHEDULED 指标与 W11 审计日志)。
+                if (e instanceof ArticleDeliveryRetryableException articleFailure
+                        && articleFailure.getArticleId() != null
+                        && !articleFailure.getArticleId().isBlank()) {
+                    try {
+                        taskQueue.recordDeliveryRetryContext(taskId, articleFailure.getArticleId());
+                    } catch (RuntimeException contextFailure) {
+                        log.warn("articleId 上下文写入失败(降级, 不阻断重试排期审计): "
+                                        + "taskId={}, articleId={}, reason={}",
+                                taskId, articleFailure.getArticleId(), contextFailure.getMessage());
+                    }
+                }
                 recordRetryMetricSafely(TaskMetrics.RetryMetricOutcome.SCHEDULED, taskId);
                 // W11: 重试排期审计日志 — 到点时间/尝试次数/失败耗时全量落盘,
                 // 运维凭 taskId 即可回答"这个任务下次何时重试"(10.5 review)
@@ -320,11 +383,27 @@ public class ContentScheduler {
                         taskId, advance.attempt(), advance.dueAtEpochMs(),
                         System.currentTimeMillis() - startedAtMs, errorCodeOf(e));
             } else if (outcome == TaskQueue.RetryOutcome.DEAD_LETTERED) {
+                // Story 10.8: max-attempts=1 等场景首次失败即落死信, 补记 articleId 上下文
+                // (幂等: 已存在则 HSET 覆盖为本次失败文章, 语义不变; 写入失败只降级告警,
+                // 不得跳过下方 EXHAUSTED 指标与耗尽收敛钩子)。
+                if (e instanceof ArticleDeliveryRetryableException articleFailure
+                        && articleFailure.getArticleId() != null
+                        && !articleFailure.getArticleId().isBlank()) {
+                    try {
+                        taskQueue.recordDeliveryRetryContext(taskId, articleFailure.getArticleId());
+                    } catch (RuntimeException contextFailure) {
+                        log.warn("articleId 上下文写入失败(降级, 不阻断耗尽钩子): "
+                                        + "taskId={}, articleId={}, reason={}",
+                                taskId, articleFailure.getArticleId(), contextFailure.getMessage());
+                    }
+                }
                 recordRetryMetricSafely(TaskMetrics.RetryMetricOutcome.EXHAUSTED, taskId);
                 log.warn("任务 {} 失败(可重试)且尝试耗尽, 已落死信: attempt={}, "
                                 + "failedAfterMs={}, errorCode={}",
                         taskId, advance.attempt(),
                         System.currentTimeMillis() - startedAtMs, errorCodeOf(e));
+                // Story 10.8: 耗尽收敛旁路钩子 — 先权威落死信(上方脚本迁移), 后旁路四层收敛
+                convergeExhaustedPrepare(taskId, e);
             } else {
                 log.warn("任务 {} 失败(可重试), 但不在 processing 集合, 跳过重试推进: outcome={}",
                         taskId, outcome, e);
@@ -333,6 +412,52 @@ public class ContentScheduler {
             log.error("任务 {} 可重试失败推进异常(批次内隔离, 继续处理后续任务; "
                             + "任务保持 PROCESSING 待重启恢复按状态重排): errorType={}, detail={}",
                     taskId, advanceFailure.getClass().getSimpleName(), advanceFailure.getMessage());
+        }
+    }
+
+    /**
+     * Story 10.8: 可重试媒体交付失败的<b>耗尽收敛</b>旁路钩子 —
+     * 先权威落死信(上方 {@code recordRetryableFailure} 同脚本迁移), 再旁路收敛。
+     *
+     * <p>触发条件: state Hash 携带 {@code articleId}({@code tw-} 前缀, 由
+     * {@code recordDeliveryRetryContext} 在 RETRY_SCHEDULED 时写入)且协调器已注册。
+     * 步骤: 先把 canonical sidecar 中 {@code wechatPrepare=RETRY_SCHEDULED} 的媒体终态化为
+     * {@code FAILED_TERMINAL}(保留本次 attempt, nextRetryAt=null), 再调
+     * {@code DeliveryFailureCoordinator.converge(articleId,…)} 四层收敛 —
+     * AC4 语义: 配置上限内重试期间文章快照保持 MEDIA_PROCESSING, 耗尽才终态。
+     *
+     * <p>不改 Lua 契约与 10.5 重试状态机语义; 钩子自身异常只降级日志 — 权威死信迁移已完成,
+     * 未收敛的文章可经死信显式补跑恢复(10.7 零 LLM 路径)。
+     */
+    private void convergeExhaustedPrepare(String taskId, RetryableException e) {
+        if (deliveryFailureCoordinatorOptional.isEmpty()) {
+            return;
+        }
+        Optional<String> articleId = taskQueue.readStateArticleId(taskId);
+        if (articleId.isEmpty() || !articleId.get().startsWith("tw-")) {
+            return;
+        }
+        String code = errorCodeOf(e);
+        String summary = safeErrorSummary(e);
+        try {
+            boolean terminalized = archiveWriterOptional
+                    .map(writer -> writer.markWechatPrepareExhausted(articleId.get(), code, summary))
+                    .orElse(false);
+            if (!terminalized) {
+                log.warn("wechatPrepare 耗尽终态化未执行(writer 缺失/索引或 sidecar 缺失/"
+                                + "无可终态化媒体): taskId={}, articleId={}",
+                        taskId, articleId.get());
+            }
+        } catch (RuntimeException hookFailure) {
+            log.warn("wechatPrepare 耗尽终态化失败(继续四层收敛): taskId={}, articleId={}, reason={}",
+                    taskId, articleId.get(), hookFailure.getMessage());
+        }
+        try {
+            deliveryFailureCoordinatorOptional.get().converge(
+                    articleId.get(), taskId, "WECHAT_PREPARE", code, summary);
+        } catch (RuntimeException convergeFailure) {
+            log.error("重试耗尽四层收敛失败(权威死信已完成, 可经死信补跑恢复): taskId={}, articleId={}, reason={}",
+                    taskId, articleId.get(), convergeFailure.getMessage());
         }
     }
 

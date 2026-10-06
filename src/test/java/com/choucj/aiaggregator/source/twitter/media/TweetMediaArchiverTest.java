@@ -11,6 +11,8 @@ import com.choucj.aiaggregator.publish.storage.config.ArchiverProperties;
 import com.choucj.aiaggregator.source.twitter.config.TwitterMediaConfig;
 import com.choucj.aiaggregator.source.twitter.config.TwitterMediaProperties;
 import com.choucj.aiaggregator.source.twitter.model.MediaDownloadStatus;
+import com.choucj.aiaggregator.source.twitter.model.MediaPhaseState;
+import com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaVariant;
@@ -36,6 +38,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -79,7 +82,7 @@ class TweetMediaArchiverTest {
         TweetMedia photo = photo("photo-1", "https://pbs.twimg.com/media/ABC.jpg");
         writer.writeSidecar("tweet-1", PUBLISHED_AT, List.of(photo));
         when(downloadClient.downloadBinary(eq(photo.getSourceUrl()), eq("tweet-1"), eq("photo-1")))
-                .thenReturn(new MediaDownloadClient.DownloadResult(new byte[]{1, 2, 3}, "image/jpeg"));
+                .thenReturn(new MediaDownloadClient.DownloadResult(jpegBytes(), "image/jpeg"));
 
         TweetMediaArchiver.ArchiveResult result = archiver.archiveMedia("tweet-1", PUBLISHED_AT, List.of(photo));
 
@@ -96,6 +99,133 @@ class TweetMediaArchiverTest {
         assertThat(updated.getDownloadStatus()).isEqualTo(MediaDownloadStatus.DOWNLOADED);
         assertThat(updated.getLocalPath()).startsWith("media/twitter/2026-08-02/tweet-1/photo-1-");
         assertThat(Files.exists(tempDir.resolve(updated.getLocalPath()))).isTrue();
+        // Story 10.8: 成功直写三阶段 download=SUCCEEDED (幂等跳过的权威依据)
+        assertThat(updated.getDownload()).isNotNull();
+        assertThat(updated.getDownload().getStatus()).isEqualTo(MediaPhaseStatus.SUCCEEDED);
+    }
+
+    /**
+     * Story 10.8 (I/O 矩阵「已校验文件重复运行」): download=SUCCEEDED 且文件存在非零 →
+     * 幂等跳过 — 0 次网络下载, sidecar 与归档文件不变 (不二次回写 download 阶段)。
+     */
+    @Test
+    void shouldSkipRedownload_whenFileNonZeroAndDownloadPhaseSucceeded() throws Exception {
+        TweetMedia photo = photo("photo-idem", "https://pbs.twimg.com/media/IDEM.jpg");
+        writer.writeSidecar("tweet-idem", PUBLISHED_AT, List.of(photo));
+        when(downloadClient.downloadBinary(eq(photo.getSourceUrl()), eq("tweet-idem"), eq("photo-idem")))
+                .thenReturn(new MediaDownloadClient.DownloadResult(jpegBytes(), "image/jpeg"));
+
+        archiver.archiveMedia("tweet-idem", PUBLISHED_AT, List.of(photo));
+        MediaArchiveRecord first = writer.readSidecar("tweet-idem", PUBLISHED_AT).orElseThrow();
+        String firstPhaseUpdatedAt = String.valueOf(first.getMedia().get(0).getDownload().getUpdatedAt());
+
+        TweetMediaArchiver.ArchiveResult second =
+                archiver.archiveMedia("tweet-idem", PUBLISHED_AT, List.of(photo));
+
+        assertThat(second.successCount()).isEqualTo(1);
+        // 双校验通过 → 0 次重复下载
+        verify(downloadClient, times(1))
+                .downloadBinary(eq(photo.getSourceUrl()), eq("tweet-idem"), eq("photo-idem"));
+        // sidecar download 阶段不被二次回写 (权威状态不变)
+        MediaArchiveRecord afterSkip = writer.readSidecar("tweet-idem", PUBLISHED_AT).orElseThrow();
+        assertThat(String.valueOf(afterSkip.getMedia().get(0).getDownload().getUpdatedAt()))
+                .isEqualTo(firstPhaseUpdatedAt);
+    }
+
+    /**
+     * Story 10.8 (双校验另一半): 文件存在非零但 sidecar download 阶段非 SUCCEEDED →
+     * 必须重新下载并校验 (文件存在不是唯一权威)。
+     */
+    @Test
+    void shouldRedownload_whenFileExistsButDownloadPhaseNotSucceeded() {
+        TweetMedia photo = photo("photo-redown", "https://pbs.twimg.com/media/REDOWN.jpg");
+        writer.writeSidecar("tweet-redown", PUBLISHED_AT, List.of(photo));
+        when(downloadClient.downloadBinary(eq(photo.getSourceUrl()), eq("tweet-redown"), eq("photo-redown")))
+                .thenReturn(new MediaDownloadClient.DownloadResult(jpegBytes(), "image/jpeg"));
+        archiver.archiveMedia("tweet-redown", PUBLISHED_AT, List.of(photo));
+
+        // 模拟阶段证据缺失/被重置: 文件仍在, download 阶段回 NOT_STARTED
+        // (须同时降 downloadStatus, 否则 10.7 兼容投影会把 DOWNLOADED 读回 SUCCEEDED)
+        writer.updateMedia("tweet-redown", PUBLISHED_AT, "photo-redown",
+                original -> original.toBuilder()
+                        .download(MediaPhaseState.notStarted())
+                        .downloadStatus(MediaDownloadStatus.PENDING)
+                        .build());
+
+        TweetMediaArchiver.ArchiveResult second =
+                archiver.archiveMedia("tweet-redown", PUBLISHED_AT, List.of(photo));
+
+        assertThat(second.successCount()).isEqualTo(1);
+        verify(downloadClient, times(2))
+                .downloadBinary(eq(photo.getSourceUrl()), eq("tweet-redown"), eq("photo-redown"));
+        MediaArchiveRecord record = writer.readSidecar("tweet-redown", PUBLISHED_AT).orElseThrow();
+        assertThat(record.getMedia().get(0).getDownload().getStatus()).isEqualTo(MediaPhaseStatus.SUCCEEDED);
+    }
+
+    /**
+     * Story 10.8 (I/O 矩阵「下载内容损坏」): 魔数校验失败按下载失败处理 —
+     * FAILED_TERMINAL / attempt=1 / nextRetryAt=null + downloadStatus=FAILED, 不自动重试,
+     * 且失败发生在落盘前 (归档目录无图片文件)。
+     */
+    @Test
+    void shouldFailTerminal_whenDownloadedBytesNotImageMagic() throws Exception {
+        TweetMedia photo = photo("photo-bad", "https://pbs.twimg.com/media/BAD.jpg");
+        writer.writeSidecar("tweet-bad", PUBLISHED_AT, List.of(photo));
+        when(downloadClient.downloadBinary(eq(photo.getSourceUrl()), eq("tweet-bad"), eq("photo-bad")))
+                .thenReturn(new MediaDownloadClient.DownloadResult(
+                        "<html>not an image</html>".getBytes(), "text/html"));
+
+        TweetMediaArchiver.ArchiveResult result =
+                archiver.archiveMedia("tweet-bad", PUBLISHED_AT, List.of(photo));
+
+        assertThat(result.failCount()).isEqualTo(1);
+        assertThat(result.mediaStatuses()).singleElement()
+                .satisfies(status -> assertThat(status.retryable()).isFalse());
+        MediaArchiveRecord record = writer.readSidecar("tweet-bad", PUBLISHED_AT).orElseThrow();
+        TweetMedia updated = record.getMedia().get(0);
+        assertThat(updated.getDownload().getStatus()).isEqualTo(MediaPhaseStatus.FAILED_TERMINAL);
+        assertThat(updated.getDownload().getAttempt()).isEqualTo(1);
+        assertThat(updated.getDownload().getNextRetryAt()).isNull();
+        assertThat(updated.getDownloadStatus()).isEqualTo(MediaDownloadStatus.FAILED);
+        // 先校验后落盘: 无图片文件/临时文件残留
+        Path archiveDir = tempDir.resolve("media/twitter/2026-08-02/tweet-bad");
+        try (var files = Files.list(archiveDir)) {
+            assertThat(files.map(Path::toString).toList())
+                    .noneMatch(name -> name.endsWith(".jpg") || name.endsWith(".tmp"));
+        }
+    }
+
+    /** Story 10.8: 图片魔数识别 — JPEG/PNG/WebP 通过, 非图片/过短/null 拒绝。 */
+    @Test
+    void hasImageMagicNumber_detectsJpegPngWebpAndRejectsGarbage() {
+        byte[] jpeg = new byte[12];
+        jpeg[0] = (byte) 0xFF;
+        jpeg[1] = (byte) 0xD8;
+        jpeg[2] = (byte) 0xFF;
+        assertThat(TweetMediaArchiver.hasImageMagicNumber(jpeg)).isTrue();
+
+        byte[] png = new byte[12];
+        png[0] = (byte) 0x89;
+        png[1] = 'P';
+        png[2] = 'N';
+        png[3] = 'G';
+        assertThat(TweetMediaArchiver.hasImageMagicNumber(png)).isTrue();
+
+        byte[] webp = new byte[12];
+        webp[0] = 'R';
+        webp[1] = 'I';
+        webp[2] = 'F';
+        webp[3] = 'F';
+        webp[8] = 'W';
+        webp[9] = 'E';
+        webp[10] = 'B';
+        webp[11] = 'P';
+        assertThat(TweetMediaArchiver.hasImageMagicNumber(webp)).isTrue();
+
+        assertThat(TweetMediaArchiver.hasImageMagicNumber("<html></html>".getBytes())).isFalse();
+        assertThat(TweetMediaArchiver.hasImageMagicNumber(new byte[]{1, 2, 3})).isFalse();
+        assertThat(TweetMediaArchiver.hasImageMagicNumber(new byte[5])).isFalse();
+        assertThat(TweetMediaArchiver.hasImageMagicNumber(null)).isFalse();
     }
 
     /**
@@ -109,7 +239,7 @@ class TweetMediaArchiverTest {
         TweetMedia photo = photo("photo-seed-1", "https://pbs.twimg.com/media/SEED.jpg");
         assertThat(writer.readSidecar("tweet-seed", PUBLISHED_AT)).isEmpty();
         when(downloadClient.downloadBinary(eq(photo.getSourceUrl()), eq("tweet-seed"), eq("photo-seed-1")))
-                .thenReturn(new MediaDownloadClient.DownloadResult(new byte[]{1, 2, 3}, "image/jpeg"));
+                .thenReturn(new MediaDownloadClient.DownloadResult(jpegBytes(), "image/jpeg"));
 
         TweetMediaArchiver.ArchiveResult result = archiver.archiveMedia("tweet-seed", PUBLISHED_AT, List.of(photo));
 
@@ -137,7 +267,7 @@ class TweetMediaArchiverTest {
                 .build();
         writer.writeSidecar("tweet-retry", PUBLISHED_AT, List.of(photo));
         when(downloadClient.downloadBinary(eq(photo.getSourceUrl()), eq("tweet-retry"), eq("photo-retry-1")))
-                .thenReturn(new MediaDownloadClient.DownloadResult(new byte[]{1}, "image/jpeg"));
+                .thenReturn(new MediaDownloadClient.DownloadResult(jpegBytes(), "image/jpeg"));
 
         archiver.archiveMedia("tweet-retry", PUBLISHED_AT, List.of(photo));
 
@@ -156,7 +286,7 @@ class TweetMediaArchiverTest {
         TweetMedia photo = photo(null, "https://pbs.twimg.com/media/XYZ.jpg");
         writer.writeSidecar("tweet-2", PUBLISHED_AT, List.of(photo));
         when(downloadClient.downloadBinary(eq(photo.getSourceUrl()), eq("tweet-2"), eq("tweet-2:0:photo")))
-                .thenReturn(new MediaDownloadClient.DownloadResult(new byte[]{1}, "image/jpeg"));
+                .thenReturn(new MediaDownloadClient.DownloadResult(jpegBytes(), "image/jpeg"));
 
         TweetMediaArchiver.ArchiveResult result = archiver.archiveMedia("tweet-2", PUBLISHED_AT, List.of(photo));
 
@@ -183,9 +313,9 @@ class TweetMediaArchiverTest {
         TweetMedia second = photo("a.b", "https://pbs.twimg.com/media/B.jpg");
         writer.writeSidecar("tweet-3", PUBLISHED_AT, List.of(first, second));
         when(downloadClient.downloadBinary(eq(first.getSourceUrl()), eq("tweet-3"), eq("a/b")))
-                .thenReturn(new MediaDownloadClient.DownloadResult(new byte[]{1}, "image/jpeg"));
+                .thenReturn(new MediaDownloadClient.DownloadResult(jpegBytes(), "image/jpeg"));
         when(downloadClient.downloadBinary(eq(second.getSourceUrl()), eq("tweet-3"), eq("a.b")))
-                .thenReturn(new MediaDownloadClient.DownloadResult(new byte[]{2}, "image/jpeg"));
+                .thenReturn(new MediaDownloadClient.DownloadResult(jpegBytes(), "image/jpeg"));
 
         TweetMediaArchiver.ArchiveResult result = archiver.archiveMedia("tweet-3", PUBLISHED_AT, List.of(first, second));
 
@@ -305,7 +435,7 @@ class TweetMediaArchiverTest {
                 .build();
         writer.writeSidecar("tweet-r1", PUBLISHED_AT, List.of(photo, video));
         when(downloadClient.downloadBinary(eq(photo.getSourceUrl()), eq("tweet-r1"), eq("photo-r1")))
-                .thenReturn(new MediaDownloadClient.DownloadResult(new byte[]{1}, "image/jpeg"));
+                .thenReturn(new MediaDownloadClient.DownloadResult(jpegBytes(), "image/jpeg"));
 
         TweetMediaArchiver.ArchiveResult result = archiver.archiveMedia("tweet-r1", PUBLISHED_AT, List.of(photo, video));
 
@@ -341,9 +471,9 @@ class TweetMediaArchiverTest {
         TweetMedia second = photo("p-inc-2", "https://example.com/inc2.jpg");
         writer.writeSidecar("tweet-inc", PUBLISHED_AT, List.of(first, second));
         when(downloadClient.downloadBinary(eq(first.getSourceUrl()), eq("tweet-inc"), eq("p-inc-1")))
-                .thenReturn(new MediaDownloadClient.DownloadResult(new byte[]{1}, "image/jpeg"));
+                .thenReturn(new MediaDownloadClient.DownloadResult(jpegBytes(), "image/jpeg"));
         when(downloadClient.downloadBinary(eq(second.getSourceUrl()), eq("tweet-inc"), eq("p-inc-2")))
-                .thenReturn(new MediaDownloadClient.DownloadResult(new byte[]{2}, "image/jpeg"));
+                .thenReturn(new MediaDownloadClient.DownloadResult(jpegBytes(), "image/jpeg"));
 
         archiver.archiveMedia("tweet-inc", PUBLISHED_AT, List.of(first, second));
 
@@ -377,7 +507,7 @@ class TweetMediaArchiverTest {
         TweetMedia photo = photo("photo-r2", "https://example.com/r2.jpg");
         writer.writeSidecar("tweet-r2", PUBLISHED_AT, List.of(photo));
         when(downloadClient.downloadBinary(eq(photo.getSourceUrl()), eq("tweet-r2"), eq("photo-r2")))
-                .thenReturn(new MediaDownloadClient.DownloadResult(new byte[]{1, 2}, "image/jpeg"));
+                .thenReturn(new MediaDownloadClient.DownloadResult(jpegBytes(), "image/jpeg"));
         org.mockito.Mockito.doThrow(new RetryableException("Redis 连接失败"))
                 .when(stateRepository).saveSnapshot(org.mockito.ArgumentMatchers.anyString(),
                         org.mockito.ArgumentMatchers.anyList());
@@ -417,5 +547,10 @@ class TweetMediaArchiverTest {
                 .sourceUrl(sourceUrl)
                 .allowDownload(true)
                 .build();
+    }
+
+    /** Story 10.8: 合法 JPEG 魔数 fixture (下载内容校验要求 JPEG/PNG/WebP 魔数, ≥12 字节). */
+    private static byte[] jpegBytes() {
+        return new byte[]{(byte) 0xFF, (byte) 0xD8, (byte) 0xFF, (byte) 0xE0, 0, 0, 'J', 'F', 'I', 'F', 0, 1};
     }
 }

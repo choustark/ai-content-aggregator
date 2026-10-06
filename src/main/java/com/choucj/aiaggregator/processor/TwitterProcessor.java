@@ -1,5 +1,6 @@
 package com.choucj.aiaggregator.processor;
 
+import com.choucj.aiaggregator.common.exception.ArticleDeliveryRetryableException;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.Article;
@@ -279,6 +280,12 @@ public class TwitterProcessor {
                     archiveSuccess++;
                 }
             } catch (Exception e) {
+                // Story 10.8 AC4: 媒体交付可重试失败必须原样透传 — per-article 隔离若吞掉它,
+                // 「任务级延迟重试 → 耗尽 → 调度器钩子收敛」链路即失效(相对立即收敛属回归);
+                // 同时 fail-fast 中止本批, 消除批内多文章覆盖 state.articleId 单槽的问题。
+                if (e instanceof ArticleDeliveryRetryableException) {
+                    throw e;
+                }
                 // Story 9.1 AC 10: 推文级 BLOCKED 单独归类到 blocked 计数 (其余失败进 failure)
                 if (mediaAware && e instanceof TweetPublishabilityBlockedException) {
                     rewriteWithMediaBlocked++;

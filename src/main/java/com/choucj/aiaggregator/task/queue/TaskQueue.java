@@ -25,6 +25,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
@@ -747,6 +748,41 @@ public class TaskQueue {
         String stateKey = RedisKeys.taskState(taskId);
         supplyWithMapping("replay-draft-receipt", stateKey, Operation.SET, () -> {
             stringRedisTemplate.opsForHash().put(stateKey, "draftMediaId", mediaId);
+            return null;
+        });
+    }
+
+    /**
+     * Story 10.8: 读取任务 state Hash 中的 {@code articleId} 上下文 (只读, 供调度器耗尽收敛钩子
+     * 定位失败文章)。无记录/空白 taskId 或字段缺失/空白返回 {@link Optional#empty()}。
+     *
+     * <p>{@code articleId} 由 {@link #recordDeliveryRetryContext} 在 RETRY_SCHEDULED 时写入;
+     * RETRY_SCHEDULE Lua 脚本只 HSET 自身键, 不清除该额外字段, 故耗尽落死信时仍可读。
+     */
+    public Optional<String> readStateArticleId(String taskId) {
+        if (taskId == null || taskId.isBlank()) {
+            return Optional.empty();
+        }
+        String stateKey = RedisKeys.taskState(taskId);
+        Object value = supplyWithMapping("read-state-articleId", stateKey, Operation.GET,
+                () -> stringRedisTemplate.opsForHash().get(stateKey, "articleId"));
+        return value instanceof String articleId && !articleId.isBlank()
+                ? Optional.of(articleId) : Optional.empty();
+    }
+
+    /**
+     * Story 10.8: 可重试媒体交付失败时把 {@code articleId} 记入任务 state Hash —
+     * 使重试耗尽落死信时调度器耗尽收敛钩子能凭 state 定位失败文章并触发四层收敛
+     * (先权威状态迁移、后旁路上下文写入, 不改 Lua 契约与 10.5 状态机语义)。
+     */
+    public void recordDeliveryRetryContext(String taskId, String articleId) {
+        if (taskId == null || taskId.isBlank() || articleId == null || articleId.isBlank()) {
+            throw new NonRetryableException(ErrorCode.REDIS_DATA_ERROR,
+                    "记录媒体交付重试上下文失败: taskId/articleId 不能为空");
+        }
+        String stateKey = RedisKeys.taskState(taskId);
+        supplyWithMapping("record-delivery-retry-context", stateKey, Operation.SET, () -> {
+            stringRedisTemplate.opsForHash().put(stateKey, "articleId", articleId);
             return null;
         });
     }

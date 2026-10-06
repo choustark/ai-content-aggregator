@@ -3,10 +3,13 @@ package com.choucj.aiaggregator.source.twitter.media;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.util.TextTruncateUtil;
+import com.choucj.aiaggregator.publish.storage.MediaArchiveRecord;
 import com.choucj.aiaggregator.publish.storage.TweetMediaArchiveWriter;
 import com.choucj.aiaggregator.source.twitter.config.TwitterMediaProperties;
 import com.choucj.aiaggregator.source.twitter.media.model.MediaRuntimeItem;
 import com.choucj.aiaggregator.source.twitter.model.MediaDownloadStatus;
+import com.choucj.aiaggregator.source.twitter.model.MediaPhaseState;
+import com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaVariant;
@@ -20,8 +23,11 @@ import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
@@ -36,7 +42,8 @@ import java.util.stream.Collectors;
  * <p><b>关键设计:</b>
  * <ul>
  *   <li><b>确定性文件名</b> — {@code {sanitizedMediaId}.{extFromUrl}}, ext 从 sourceUrl 路径段提取, fallback jpg</li>
- *   <li><b>幂等跳过</b> — 文件已存在且非零字节时跳过 HTTP 下载, 仍回写 DOWNLOADED (AD-6)</li>
+ *   <li><b>幂等跳过 (Story 10.8 双校验)</b> — 本地文件存在非零 <b>且</b> sidecar download 阶段
+ *       SUCCEEDED 才跳过 HTTP 下载 (sidecar 与归档文件不变); 下载内容校验非空 + JPEG/PNG/WebP 魔数</li>
  *   <li><b>sidecar 回写</b> — 通过 {@link TweetMediaArchiveWriter#updateMedia} 增量回写, 不覆盖其他字段</li>
  *   <li><b>VIDEO/GIF 元数据归档</b> — 写 previewImageUrl/variants/width/height/order/码率摘要,
  *       downloadStatus=SKIPPED, 不调用 MediaDownloadClient (Story 7.3, AD-6)</li>
@@ -127,6 +134,9 @@ public class TweetMediaArchiver {
         LocalDateTime effectivePublishedAt = publishedAt != null ? publishedAt : LocalDateTime.now();
         ensureSidecarSeeded(tweetId, effectivePublishedAt, media);
         Path archiveDir = archiveWriter.resolveArchiveDir(tweetId, effectivePublishedAt);
+        // Story 10.8: 幂等跳过依据 = sidecar 阶段权威状态 (read 路径已把 legacy downloadStatus=DOWNLOADED
+        // 投影为 download=SUCCEEDED), 一次性载入按 mediaId 索引, 不引入第二权威源。
+        Map<String, TweetMedia> sidecarStateById = loadSidecarStateById(tweetId, effectivePublishedAt);
         AtomicInteger successCount = new AtomicInteger(0);
         AtomicInteger skipCount = new AtomicInteger(0);
         AtomicInteger failCount = new AtomicInteger(0);
@@ -197,7 +207,7 @@ public class TweetMediaArchiver {
 
             try {
                 String localPath = downloadAndSave(tweetId, effectivePublishedAt, archiveDir, m, mediaId,
-                        currentPhotoIndex, mediaIndex);
+                        currentPhotoIndex, mediaIndex, sidecarStateById.get(mediaId));
                 statuses.add(MediaArchiveStatus.downloaded(mediaId, localPath));
                 successCount.incrementAndGet();
                 saveRuntimeSnapshot(tweetId, buildRuntimeItems(tweetId, media, statuses));
@@ -291,22 +301,34 @@ public class TweetMediaArchiver {
     }
 
     /**
-     * 下载单个媒体并保存到本地, 然后回写 sidecar.
+     * 下载单个媒体并保存到本地, 然后直写三阶段 download=SUCCEEDED 到 sidecar.
+     *
+     * <p>Story 10.8: 幂等跳过 = 「本地文件存在非零 + sidecar download 阶段 SUCCEEDED」双校验
+     * (不引入第二权威源); 双校验通过时 sidecar 与归档文件均不变。下载内容校验 = 非空字节 +
+     * 图片魔数 (JPEG/PNG/WebP); {@code maxFileSizeBytes} 上限由
+     * {@link MediaDownloadClient#downloadBinary} 内部 readBounded 承担。
+     * 校验失败按下载失败处理 (NonRetryable → logFailedDownload → FAILED_TERMINAL/attempt=1/
+     * nextRetryAt=null + 10.7 四层收敛, 不自动重试), 且失败发生在文件落盘之前。
      */
     private String downloadAndSave(String tweetId, LocalDateTime publishedAt,
-                                  Path archiveDir, TweetMedia media, String mediaId, int photoIndex, int mediaIndex) {
+                                  Path archiveDir, TweetMedia media, String mediaId, int photoIndex, int mediaIndex,
+                                  TweetMedia sidecarState) {
         long startNanos = System.nanoTime();
         String filename = resolveFilename(tweetId, media, mediaId, photoIndex);
         Path filePath = archiveDir.resolve(filename);
         String localPath = resolveLocalPath(tweetId, publishedAt, filename);
 
-        // 幂等检查: 文件已存在且非零字节 → 跳过下载
+        // 幂等检查 (Story 10.8 双校验): 文件存在非零 + sidecar download=SUCCEEDED → 跳过下载,
+        // sidecar 与归档文件不变; 文件存在但阶段非 SUCCEEDED 时重新下载校验。
         try {
             if (Files.exists(filePath) && Files.size(filePath) > 0) {
-                log.info("媒体已存在,跳过下载: tweetId={}, mediaId={}, file={}",
-                        tweetId, mediaId, filePath.getFileName());
-                updateSidecarSuccess(tweetId, publishedAt, media, mediaId, mediaIndex, localPath);
-                return localPath;
+                if (downloadPhaseSucceeded(sidecarState)) {
+                    log.info("媒体已校验(文件非零+download=SUCCEEDED),幂等跳过下载: tweetId={}, mediaId={}, file={}",
+                            tweetId, mediaId, filePath.getFileName());
+                    return localPath;
+                }
+                log.info("本地文件存在但 download 阶段非 SUCCEEDED, 重新下载校验: tweetId={}, mediaId={}",
+                        tweetId, mediaId);
             }
         } catch (IOException e) {
             log.warn("幂等检查文件状态失败, 继续尝试下载: tweetId={}, mediaId={}, file={}",
@@ -325,6 +347,15 @@ public class TweetMediaArchiver {
         // 下载并保存
         MediaDownloadClient.DownloadResult result = downloadClient.downloadBinary(
                 media.getSourceUrl(), tweetId, mediaId);
+        // Story 10.8: 下载内容校验 (先校验后落盘 — 损坏字节不污染归档目录)
+        if (result.bytes() == null || result.bytes().length == 0) {
+            throw new NonRetryableException("下载内容为空: tweetId=" + tweetId
+                    + " mediaId=" + mediaId);
+        }
+        if (!hasImageMagicNumber(result.bytes())) {
+            throw new NonRetryableException("下载内容校验失败(非 JPEG/PNG/WebP 图片魔数): tweetId="
+                    + tweetId + " mediaId=" + mediaId + " sizeBytes=" + result.bytes().length);
+        }
         try {
             Path tmpFile = archiveDir.resolve(filename + ".tmp");
             Files.write(tmpFile, result.bytes());
@@ -342,20 +373,81 @@ public class TweetMediaArchiver {
         return localPath;
     }
 
+    /** Story 10.8: sidecar download 阶段权威判据 — 阶段对象存在且 status=SUCCEEDED. */
+    private static boolean downloadPhaseSucceeded(TweetMedia sidecarState) {
+        return sidecarState != null
+                && sidecarState.getDownload() != null
+                && sidecarState.getDownload().getStatus() == MediaPhaseStatus.SUCCEEDED;
+    }
+
     /**
-     * 更新 sidecar: 下载成功, 设置 localPath + downloadStatus=DOWNLOADED.
-     * 使用 TweetMedia.toBuilder 复制所有字段, 仅覆盖 localPath 和 downloadStatus.
+     * Story 10.8: 图片魔数识别 (JPEG FF D8 FF / PNG 89 50 4E 47 / WebP RIFF...WEBP)。
+     * 最短识别长度 12 字节 (WebP 需读 offset 8-11)。
+     */
+    static boolean hasImageMagicNumber(byte[] bytes) {
+        if (bytes == null || bytes.length < 12) {
+            return false;
+        }
+        if ((bytes[0] & 0xFF) == 0xFF && (bytes[1] & 0xFF) == 0xD8 && (bytes[2] & 0xFF) == 0xFF) {
+            return true;
+        }
+        if (bytes[0] == (byte) 0x89 && bytes[1] == 'P' && bytes[2] == 'N' && bytes[3] == 'G') {
+            return true;
+        }
+        return bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' && bytes[3] == 'F'
+                && bytes[8] == 'W' && bytes[9] == 'E' && bytes[10] == 'B' && bytes[11] == 'P';
+    }
+
+    /**
+     * Story 10.8: 一次性载入 sidecar 阶段状态并按 mediaId 索引 (幂等跳过双校验的权威侧)。
+     * 读取异常软失败返回空 map (按未命中处理, 退化为重新下载校验, 不阻断归档)。
+     */
+    private Map<String, TweetMedia> loadSidecarStateById(String tweetId, LocalDateTime publishedAt) {
+        try {
+            Optional<MediaArchiveRecord> sidecar = archiveWriter.readSidecar(tweetId, publishedAt);
+            if (sidecar.isEmpty() || sidecar.get().getMedia() == null) {
+                return Map.of();
+            }
+            Map<String, TweetMedia> byId = new HashMap<>();
+            for (TweetMedia item : sidecar.get().getMedia()) {
+                if (item != null && StringUtils_hasText(item.getId())) {
+                    byId.putIfAbsent(item.getId(), item);
+                }
+            }
+            return byId;
+        } catch (RuntimeException e) {
+            log.warn("读取 sidecar 阶段状态失败(按未命中处理, 不阻断下载): tweetId={}, cause={}",
+                    tweetId, TextTruncateUtil.truncateForLog(TextTruncateUtil.getRootMessage(e), 200));
+            return Map.of();
+        }
+    }
+
+    /**
+     * 更新 sidecar: 下载成功, 设置 localPath + downloadStatus=DOWNLOADED,
+     * 并直写三阶段 {@code download=SUCCEEDED} (Story 10.8: 不再依赖写盘投影,
+     * 幂等跳过依据 sidecar 权威阶段状态)。
      *
      * @param publishedAt 推文发布时间,可为 null(null 时使用当前时刻)
      */
     private void updateSidecarSuccess(String tweetId, LocalDateTime publishedAt,
                                           TweetMedia media, String mediaId, int mediaIndex, String localPath) {
         updateSidecar(tweetId, publishedAt, media, mediaId, mediaIndex,
-                original -> original.toBuilder()
-                .id(mediaId)
-                .localPath(localPath)
-                .downloadStatus(MediaDownloadStatus.DOWNLOADED)
-                .build());
+                original -> {
+                    TweetMedia updated = original.toBuilder()
+                            .id(mediaId)
+                            .localPath(localPath)
+                            .downloadStatus(MediaDownloadStatus.DOWNLOADED)
+                            .build();
+                    int prevAttempt = original.getDownload() != null
+                            ? Math.max(original.getDownload().getAttempt(), 0) : 0;
+                    updated.setDownload(MediaPhaseState.builder()
+                            .status(MediaPhaseStatus.SUCCEEDED)
+                            .attempt(prevAttempt + 1)
+                            .nextRetryAt(null)
+                            .updatedAt(LocalDateTime.now())
+                            .build());
+                    return updated;
+                });
     }
 
     /**

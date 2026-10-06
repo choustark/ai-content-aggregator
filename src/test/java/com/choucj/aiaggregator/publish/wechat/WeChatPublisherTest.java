@@ -166,17 +166,33 @@ class WeChatPublisherTest {
     }
 
     @Test
-    void shouldThrowNonRetryableOnOtherErrcode() throws WxErrorException {
+    void shouldThrowRetryableOnRateLimitErrcode() throws WxErrorException {
+        // Story 10.8: 45009 限流独立分类 — Retryable(WECHAT_RATE_LIMITED), 复用 task.retry.* 窗口
         Article article = sampleArticle();
         when(converter.convert(article)).thenReturn(sampleWxArticle("html"));
         when(wxMpService.getDraftService()).thenReturn(wxMpDraftService);
         when(wxMpDraftService.addDraft(any(WxMpAddDraft.class))).thenThrow(wxError(45009, "quota limit"));
 
         assertThatThrownBy(() -> publisher.publish(article))
+                .isInstanceOf(RetryableException.class)
+                .satisfies(ex -> assertThat(((AggregatorException) ex).getErrorCode())
+                        .isEqualTo(ErrorCode.WECHAT_RATE_LIMITED))
+                .hasMessageContaining("errcode=45009");
+    }
+
+    @Test
+    void shouldThrowNonRetryableOnUnknownErrcodeDefaultBranch() throws WxErrorException {
+        // Story 10.8 default 分支: 未知 errcode 仍归 NonRetryable(WECHAT_API_ERROR)
+        Article article = sampleArticle();
+        when(converter.convert(article)).thenReturn(sampleWxArticle("html"));
+        when(wxMpService.getDraftService()).thenReturn(wxMpDraftService);
+        when(wxMpDraftService.addDraft(any(WxMpAddDraft.class))).thenThrow(wxError(47001, "unknown"));
+
+        assertThatThrownBy(() -> publisher.publish(article))
                 .isInstanceOf(NonRetryableException.class)
                 .satisfies(ex -> assertThat(((AggregatorException) ex).getErrorCode())
                         .isEqualTo(ErrorCode.WECHAT_API_ERROR))
-                .hasMessageContaining("errcode=45009");
+                .hasMessageContaining("errcode=47001");
     }
 
     @Test

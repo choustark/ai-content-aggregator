@@ -1,9 +1,12 @@
 package com.choucj.aiaggregator.processor;
 
+import com.choucj.aiaggregator.common.exception.AggregatorException;
+import com.choucj.aiaggregator.common.exception.ArticleDeliveryRetryableException;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.Article;
 import com.choucj.aiaggregator.common.model.ContentGenerationMode;
+import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.common.util.TextTruncateUtil;
 import com.choucj.aiaggregator.content.rewriter.ContentRewriter;
 import com.choucj.aiaggregator.content.rewriter.SingleModelRewriter;
@@ -11,6 +14,7 @@ import com.choucj.aiaggregator.publish.storage.MediaArchiveRecord;
 import com.choucj.aiaggregator.publish.storage.TweetMediaArchiveWriter;
 import com.choucj.aiaggregator.publish.status.DeliveryFailureCoordinator;
 import com.choucj.aiaggregator.publish.wechat.converter.MarkdownMediaInserter;
+import com.choucj.aiaggregator.publish.wechat.media.MediaPreparationResult;
 import com.choucj.aiaggregator.publish.wechat.media.WeChatMediaPreparer;
 import com.choucj.aiaggregator.source.twitter.media.TweetMediaArchiver;
 import com.choucj.aiaggregator.source.twitter.media.TweetPublishabilityGate;
@@ -18,6 +22,7 @@ import com.choucj.aiaggregator.source.twitter.model.PublishabilityStatus;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
+import com.choucj.aiaggregator.task.queue.RetryPolicyProperties;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -84,7 +89,10 @@ public class MediaAwareRewriteArticleGenerator implements MediaAwareRewriteGener
 
     private final MarkdownMediaInserter markdownMediaInserter;
     private final Optional<DeliveryFailureCoordinator> deliveryFailureCoordinator;
+    /** Story 10.8: task.retry.* — RETRY_SCHEDULED 证据退避与重试上限唯一来源. */
+    private final RetryPolicyProperties retryPolicy;
 
+    /** Story 10.8 起的 Spring 装构造器 (新增 {@link RetryPolicyProperties} 注入). */
     @Autowired
     public MediaAwareRewriteArticleGenerator(ContentRewriter contentRewriter,
                                              Optional<TweetMediaArchiver> tweetMediaArchiver,
@@ -92,7 +100,8 @@ public class MediaAwareRewriteArticleGenerator implements MediaAwareRewriteGener
                                              WeChatMediaPreparer weChatMediaPreparer,
                                              Optional<TweetMediaArchiveWriter> tweetMediaArchiveWriter,
                                              MarkdownMediaInserter markdownMediaInserter,
-                                             Optional<DeliveryFailureCoordinator> deliveryFailureCoordinator) {
+                                             Optional<DeliveryFailureCoordinator> deliveryFailureCoordinator,
+                                             RetryPolicyProperties retryPolicy) {
         this.contentRewriter = contentRewriter;
         this.tweetMediaArchiver = tweetMediaArchiver;
         this.tweetPublishabilityGate = tweetPublishabilityGate;
@@ -100,8 +109,23 @@ public class MediaAwareRewriteArticleGenerator implements MediaAwareRewriteGener
         this.tweetMediaArchiveWriter = tweetMediaArchiveWriter;
         this.markdownMediaInserter = markdownMediaInserter;
         this.deliveryFailureCoordinator = deliveryFailureCoordinator;
+        this.retryPolicy = retryPolicy;
     }
 
+    /** Story 10.8 前签名 (兼容): coordinator 缺失 + 默认 task.retry.*. */
+    public MediaAwareRewriteArticleGenerator(ContentRewriter contentRewriter,
+                                             Optional<TweetMediaArchiver> tweetMediaArchiver,
+                                             Optional<TweetPublishabilityGate> tweetPublishabilityGate,
+                                             WeChatMediaPreparer weChatMediaPreparer,
+                                             Optional<TweetMediaArchiveWriter> tweetMediaArchiveWriter,
+                                             MarkdownMediaInserter markdownMediaInserter,
+                                             Optional<DeliveryFailureCoordinator> deliveryFailureCoordinator) {
+        this(contentRewriter, tweetMediaArchiver, tweetPublishabilityGate, weChatMediaPreparer,
+                tweetMediaArchiveWriter, markdownMediaInserter, deliveryFailureCoordinator,
+                new RetryPolicyProperties());
+    }
+
+    /** Story 10.8 前签名 (兼容): coordinator 与 retryPolicy 均取默认. */
     public MediaAwareRewriteArticleGenerator(ContentRewriter contentRewriter,
                                              Optional<TweetMediaArchiver> tweetMediaArchiver,
                                              Optional<TweetPublishabilityGate> tweetPublishabilityGate,
@@ -195,9 +219,48 @@ public class MediaAwareRewriteArticleGenerator implements MediaAwareRewriteGener
         if (hasMedia) {
             TweetMediaArchiveWriter archiveWriter = requireBean(
                     tweetMediaArchiveWriter, "TweetMediaArchiveWriter", "twitter.media.enabled", tweetId);
+            // Story 10.8 分流 (镜像 PreserveOriginalArticleGenerator): 终态失败(NonRetryable,
+            // 含 40164) → preparer 已写终态证据, 立即四层收敛; 可重试失败(Retryable, 含 45009) →
+            // 写 RETRY_SCHEDULED 阶段证据, 文章快照保持 MEDIA_PROCESSING, 不立即收敛 —
+            // 走任务级延迟重试 (AC4), 耗尽由调度器钩子按 state.articleId 收敛。
+            MediaPreparationResult preparation;
             try {
-                callExternal(tweetId, "prepareMedia", () ->
+                preparation = callExternal(tweetId, "prepareMedia", () ->
                         weChatMediaPreparer.prepareMedia(tweetId, publishedAt, media));
+            } catch (NonRetryableException failure) {
+                Article failed = failedRewriteArticle(rewritten, List.of());
+                convergeFailure(tweetId, failed, "WECHAT_PREPARE", "MEDIA_PREPARE_FAILED", "媒体微信准备失败");
+                throw failure;
+            } catch (RuntimeException failure) {
+                tweetMediaArchiveWriter.ifPresent(writer ->
+                        WeChatMediaPreparer.markSidecarPrepareRetryScheduled(writer, tweetId, publishedAt,
+                                retryPolicy, errorCodeOf(failure), failure.getMessage()));
+                // Story 10.8: 重抛必须携带 articleId (rewritten.getId()) — 否则调度器 instanceof
+                // 判否, state.articleId 永不写入, RETRY_SCHEDULED 证据在耗尽后无收敛。
+                throw new ArticleDeliveryRetryableException(rewritten.getId(),
+                        "媒体微信准备失败(可重试): tweetId=" + tweetId + ", root="
+                                + failure.getMessage(),
+                        failure);
+            }
+            // Story 10.8: prepare 结果升级 — 空状态/未分类不升级 (保持 sidecar 重读既有语义)。
+            if (preparation.failCount() > 0 && preparation.hasTerminalFailure()) {
+                // 终态分支前把混合失败中遗留的 RETRY_SCHEDULED 媒体一并终态化,
+                // 避免陈旧 nextRetryAt 证据误导 Runbook 阅读
+                tweetMediaArchiveWriter.ifPresent(writer ->
+                        writer.markWechatPrepareExhausted(rewritten.getId(),
+                                "MEDIA_PREPARE_FAILED", "媒体微信准备失败"));
+                Article failed = failedRewriteArticle(rewritten, List.of());
+                convergeFailure(tweetId, failed, "WECHAT_PREPARE", "MEDIA_PREPARE_FAILED", "媒体微信准备失败");
+                throw new NonRetryableException("媒体微信准备失败(终态): tweetId=" + tweetId);
+            }
+            if (preparation.failCount() > 0 && preparation.hasRetryableFailure()) {
+                throw new ArticleDeliveryRetryableException(rewritten.getId(),
+                        ErrorCode.WECHAT_RATE_LIMITED,
+                        "媒体微信准备失败(可重试, wechatPrepare=RETRY_SCHEDULED): tweetId=" + tweetId
+                                + ", failCount=" + preparation.failCount());
+            }
+            // sidecar 重读失败保持既有收敛语义 (WECHAT_PREPARE/MEDIA_PREPARE_FAILED)
+            try {
                 MediaArchiveRecord sidecar = callExternal(tweetId, "readSidecar", () ->
                                 archiveWriter.readSidecar(tweetId, publishedAt))
                         .orElseThrow(() -> new RetryableException("媒体感知改写生成失败: tweetId=" + tweetId
@@ -272,6 +335,14 @@ public class MediaAwareRewriteArticleGenerator implements MediaAwareRewriteGener
                 "DeliveryFailureCoordinator", "archive.enabled", tweetId);
         var result = coordinator.converge(article, stage, code, summary);
         if (!result.converged()) throw new RetryableException("媒体交付失败状态未收敛: tweetId=" + tweetId);
+    }
+
+    /** Story 10.8: 阶段证据 errorCode 来源 — AggregatorException 取枚举名, 其余取异常类简名 (N4). */
+    private static String errorCodeOf(Throwable failure) {
+        if (failure instanceof AggregatorException aggregator && aggregator.getErrorCode() != null) {
+            return aggregator.getErrorCode().name();
+        }
+        return failure.getClass().getSimpleName();
     }
 
     /** 有媒体但依赖 Bean 缺失 → 配置不一致 fail-fast (AC 9, message 含 tweetId + 缺失开关名)。 */

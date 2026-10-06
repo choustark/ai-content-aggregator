@@ -1,5 +1,6 @@
 package com.choucj.aiaggregator.publish.wechat.media;
 
+import com.choucj.aiaggregator.common.exception.AggregatorException;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
@@ -7,11 +8,15 @@ import com.choucj.aiaggregator.common.util.TextTruncateUtil;
 import com.choucj.aiaggregator.publish.storage.MediaArchiveRecord;
 import com.choucj.aiaggregator.publish.storage.TweetMediaArchiveWriter;
 import com.choucj.aiaggregator.source.twitter.model.MediaDownloadStatus;
+import com.choucj.aiaggregator.source.twitter.model.MediaPhaseState;
+import com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus;
 import com.choucj.aiaggregator.source.twitter.model.MediaUploadStatus;
 import com.choucj.aiaggregator.source.twitter.model.PublishabilityStatus;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
+import com.choucj.aiaggregator.task.queue.RetryPolicyProperties;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 
@@ -96,18 +101,30 @@ public class WeChatMediaPreparer {
 
     private final WeChatBodyImageUploadProbe uploadProbe;
     private final Optional<TweetMediaArchiveWriter> archiveWriter;
+    /** Story 10.8: task.retry.* 重试策略 (重试上限唯一来源, 不新增第二套重试配置). */
+    private final RetryPolicyProperties retryPolicy;
 
     /**
-     * 构造器注入依赖.
+     * 构造器注入依赖 (Story 10.8 起含 {@link RetryPolicyProperties}).
      *
      * @param uploadProbe   微信正文图片上传探针 (Story 8.1，同 wechat.mp.enabled 开关，必共存)
      * @param archiveWriter sidecar 写入器 (twitter.media.enabled 独立开关，可能未注册；
      *                      缺失时 prepareMedia 显式 fail-fast)
+     * @param retryPolicy   task.retry.* 既有重试策略 (RETRY_SCHEDULED 的 nextRetryAt 退避来源)
      */
+    @Autowired
     public WeChatMediaPreparer(WeChatBodyImageUploadProbe uploadProbe,
-                               Optional<TweetMediaArchiveWriter> archiveWriter) {
+                               Optional<TweetMediaArchiveWriter> archiveWriter,
+                               RetryPolicyProperties retryPolicy) {
         this.uploadProbe = uploadProbe;
         this.archiveWriter = archiveWriter;
+        this.retryPolicy = retryPolicy;
+    }
+
+    /** Story 10.8 前签名 (测试兼容): 默认 task.retry.* (max-attempts=3, 60s-600s 指数退避). */
+    public WeChatMediaPreparer(WeChatBodyImageUploadProbe uploadProbe,
+                               Optional<TweetMediaArchiveWriter> archiveWriter) {
+        this(uploadProbe, archiveWriter, new RetryPolicyProperties());
     }
 
     /**
@@ -183,7 +200,7 @@ public class WeChatMediaPreparer {
                     log.info("媒体已上传，幂等跳过微信图片准备: tweetId={}, mediaId={}", tweetId, mediaId);
                     statuses.add(new MediaPreparationResult.MediaPreparationStatus(
                             mediaId, MediaUploadStatus.SKIPPED,
-                            sidecarState.getWechatUrl(), "已上传，幂等跳过", false));
+                            sidecarState.getWechatUrl(), "已上传，幂等跳过", false, null));
                     skipCount++;
                     continue;
                 }
@@ -229,13 +246,18 @@ public class WeChatMediaPreparer {
                 statuses.add(MediaPreparationResult.MediaPreparationStatus.uploaded(mediaId, wechatUrl));
                 successCount++;
             } catch (Exception e) {
-                // AD-5: 单媒体失败降级 — 只回写该媒体 FAILED，继续处理后续媒体
+                // AD-5: 单媒体失败降级 — 只回写该媒体 FAILED，继续处理后续媒体。
+                // Story 10.8: 分类升级为四分类并写 wechatPrepare 阶段证据 (RETRY_SCHEDULED 或终态),
+                // 供生成器分流: 可重试 → 任务级延迟重试; 终态 → 立即四层收敛。
                 String reason = truncateReason(e);
-                boolean retryable = e instanceof RetryableException;
-                log.warn("微信正文图片准备失败(单媒体降级): tweetId={}, mediaId={}, retryable={}, reason={}",
-                        tweetId, mediaId, retryable, reason);
-                safeWriteBackFailed(writer, tweetId, effectivePublishedAt, ref, mediaId, reason);
-                statuses.add(MediaPreparationResult.MediaPreparationStatus.failed(mediaId, reason, retryable));
+                MediaPreparationResult.FailureClass failureClass = classifyFailure(e);
+                String errorCode = errorCodeOf(e);
+                log.warn("微信正文图片准备失败(单媒体降级): tweetId={}, mediaId={}, failureClass={}, errorCode={}, reason={}",
+                        tweetId, mediaId, failureClass, errorCode, reason);
+                safeWriteBackFailed(writer, tweetId, effectivePublishedAt, ref, mediaId,
+                        reason, failureClass, errorCode);
+                statuses.add(MediaPreparationResult.MediaPreparationStatus.failed(
+                        mediaId, reason, failureClass));
                 failCount++;
             }
         }
@@ -347,20 +369,157 @@ public class WeChatMediaPreparer {
         return writer.updateMediaAtIndex(tweetId, effectivePublishedAt, ref.actualIndex(), mutation);
     }
 
-    /** 失败路径的 FAILED 回写软失败: 回写异常只告警，不掩盖原始失败原因 (镜像 Archiver.logFailedDownload). */
+    /**
+     * 失败路径的 FAILED 回写软失败: 回写异常只告警，不掩盖原始失败原因 (镜像 Archiver.logFailedDownload)。
+     *
+     * <p>Story 10.8: 同时直写 {@code wechatPrepare} 阶段证据 — 可重试分类写
+     * {@code RETRY_SCHEDULED}(attempt/nextRetryAt/errorClass=RETRYABLE), 终态分类写
+     * {@code FAILED_TERMINAL}/{@code ENVIRONMENT_BLOCKED}(errorClass=TERMINAL/nextRetryAt=null)。
+     */
     private void safeWriteBackFailed(TweetMediaArchiveWriter writer, String tweetId,
                                      LocalDateTime effectivePublishedAt, SidecarRef ref,
-                                     String mediaId, String reason) {
+                                     String mediaId, String reason,
+                                     MediaPreparationResult.FailureClass failureClass, String errorCode) {
         try {
             writeBack(writer, tweetId, effectivePublishedAt, ref,
                     original -> original.toBuilder()
                             .uploadStatus(MediaUploadStatus.FAILED)
                             .failureReason(reason)
+                            .wechatPrepare(applyPrepareFailurePhase(original, failureClass,
+                                    errorCode, reason))
                             .build());
         } catch (Exception e) {
             log.warn("回写失败状态到 sidecar 失败: tweetId={}, mediaId={}, cause={}",
                     tweetId, mediaId, truncateReason(e));
         }
+    }
+
+    /** Story 10.8: 异常 → 四分类 (Retryable→RETRYABLE/仅 45009→RATE_LIMITED; NonRetryable 仅 40164→ENVIRONMENT_BLOCKED; 其余→PERMANENT). */
+    private static MediaPreparationResult.FailureClass classifyFailure(Exception e) {
+        if (e instanceof RetryableException r) {
+            return r.getErrorCode() == ErrorCode.WECHAT_RATE_LIMITED
+                    ? MediaPreparationResult.FailureClass.RATE_LIMITED
+                    : MediaPreparationResult.FailureClass.RETRYABLE;
+        }
+        if (e instanceof NonRetryableException n) {
+            return n.getErrorCode() == ErrorCode.WECHAT_ENVIRONMENT_BLOCKED
+                    ? MediaPreparationResult.FailureClass.ENVIRONMENT_BLOCKED
+                    : MediaPreparationResult.FailureClass.PERMANENT;
+        }
+        return MediaPreparationResult.FailureClass.PERMANENT;
+    }
+
+    /** Story 10.8: 阶段证据 errorCode 来源 — AggregatorException 取枚举名, 其余取异常类简名 (不含原始 message, N4). */
+    private static String errorCodeOf(Exception e) {
+        if (e instanceof AggregatorException a && a.getErrorCode() != null) {
+            return a.getErrorCode().name();
+        }
+        return e.getClass().getSimpleName();
+    }
+
+    /**
+     * Story 10.8: 基于既有阶段状态计算失败后的 {@code wechatPrepare} 证据.
+     *
+     * <p>attempt 单调递增 (max(prev,0)+1); 可重试分类 (RETRYABLE/RATE_LIMITED) 写
+     * {@code RETRY_SCHEDULED} + {@code nextRetryAt=now+delayForAttempt(attempt)} (退避来源
+     * {@code task.retry.*}, 不新增第二套配置); 终态分类 (ENVIRONMENT_BLOCKED/PERMANENT) 写
+     * {@code ENVIRONMENT_BLOCKED}/{@code FAILED_TERMINAL} + nextRetryAt=null + errorClass=TERMINAL。
+     */
+    private MediaPhaseState applyPrepareFailurePhase(TweetMedia original,
+                                                     MediaPreparationResult.FailureClass failureClass,
+                                                     String errorCode, String safeSummary) {
+        MediaPhaseState prev = original.getWechatPrepare() != null
+                ? original.getWechatPrepare() : MediaPhaseState.notStarted();
+        int attempt = Math.max(prev.getAttempt(), 0) + 1;
+        LocalDateTime now = LocalDateTime.now();
+        MediaPhaseState.MediaPhaseStateBuilder builder = MediaPhaseState.builder()
+                .attempt(attempt)
+                .errorCode(errorCode)
+                .errorSummary(safeSummary)
+                .updatedAt(now);
+        if (failureClass == MediaPreparationResult.FailureClass.RETRYABLE
+                || failureClass == MediaPreparationResult.FailureClass.RATE_LIMITED) {
+            return builder.status(MediaPhaseStatus.RETRY_SCHEDULED)
+                    .nextRetryAt(now.plus(retryPolicy.delayForAttempt(attempt), java.time.temporal.ChronoUnit.MILLIS))
+                    .errorClass("RETRYABLE")
+                    .build();
+        }
+        return builder.status(failureClass == MediaPreparationResult.FailureClass.ENVIRONMENT_BLOCKED
+                        ? MediaPhaseStatus.ENVIRONMENT_BLOCKED
+                        : MediaPhaseStatus.FAILED_TERMINAL)
+                .nextRetryAt(null)
+                .errorClass("TERMINAL")
+                .build();
+    }
+
+    /**
+     * Story 10.8: 生成器级 {@code RETRY_SCHEDULED} 阶段证据回写 (静态, 供两个媒体感知生成器复用).
+     *
+     * <p>覆盖 preparer 逐媒体 catch 之外的路径 (如 preparer 级崩溃异常逃逸): 读取 canonical
+     * sidecar, 对所有「PHOTO 且 wechatPrepare 尚未进入 SUCCEEDED/终态」的媒体软失败回写
+     * RETRY_SCHEDULED 证据。回写异常只告警不抛出 — 证据落账不得阻断任务级延迟重试本身。
+     *
+     * @return 是否至少回写了一个媒体 (测试与调度器观测用)
+     */
+    public static boolean markSidecarPrepareRetryScheduled(TweetMediaArchiveWriter writer,
+                                                           String tweetId, LocalDateTime publishedAt,
+                                                           RetryPolicyProperties retryPolicy,
+                                                           String errorCode, String rawSummary) {
+        LocalDateTime effectivePublishedAt = publishedAt != null ? publishedAt : LocalDateTime.now();
+        String safeSummary = sanitizeReason(rawSummary);
+        try {
+            Optional<MediaArchiveRecord> sidecar = writer.readSidecar(tweetId, effectivePublishedAt);
+            if (sidecar.isEmpty() || sidecar.get().getMedia() == null) {
+                return false;
+            }
+            boolean mutated = false;
+            for (TweetMedia m : sidecar.get().getMedia()) {
+                if (m == null || !hasText(m.getId()) || m.getType() != TweetMediaType.PHOTO) {
+                    continue;
+                }
+                MediaPhaseState prev = m.getWechatPrepare() != null
+                        ? m.getWechatPrepare() : MediaPhaseState.notStarted();
+                // 已是 RETRY_SCHEDULED 的媒体跳过: preparer 已写证据且更具体,
+                // 重写会 attempt 双计、nextRetryAt 重置并覆盖细粒度 failureReason
+                if (prev.getStatus() == MediaPhaseStatus.SUCCEEDED
+                        || prev.getStatus() == MediaPhaseStatus.RETRY_SCHEDULED
+                        || prev.getStatus() == MediaPhaseStatus.FAILED_TERMINAL
+                        || prev.getStatus() == MediaPhaseStatus.ENVIRONMENT_BLOCKED) {
+                    continue;
+                }
+                MediaPhaseState phase = retryPhaseFor(m, retryPolicy, errorCode, safeSummary);
+                boolean updated = writer.updateMedia(tweetId, effectivePublishedAt, m.getId(),
+                        original -> original.toBuilder()
+                                .uploadStatus(MediaUploadStatus.FAILED)
+                                .failureReason(safeSummary)
+                                .wechatPrepare(phase)
+                                .build());
+                mutated = mutated || updated;
+            }
+            return mutated;
+        } catch (Exception e) {
+            log.warn("RETRY_SCHEDULED 阶段证据回写失败(不阻断任务级重试): tweetId={}, cause={}",
+                    tweetId, TextTruncateUtil.getRootMessage(e));
+            return false;
+        }
+    }
+
+    /** Story 10.8: 无实例状态的 RETRY_SCHEDULED 阶段计算 (静态 helper 复用, 退避来源 task.retry.*). */
+    private static MediaPhaseState retryPhaseFor(TweetMedia original, RetryPolicyProperties retryPolicy,
+                                                 String errorCode, String safeSummary) {
+        MediaPhaseState prev = original.getWechatPrepare() != null
+                ? original.getWechatPrepare() : MediaPhaseState.notStarted();
+        int attempt = Math.max(prev.getAttempt(), 0) + 1;
+        LocalDateTime now = LocalDateTime.now();
+        return MediaPhaseState.builder()
+                .status(MediaPhaseStatus.RETRY_SCHEDULED)
+                .attempt(attempt)
+                .nextRetryAt(now.plus(retryPolicy.delayForAttempt(attempt), java.time.temporal.ChronoUnit.MILLIS))
+                .errorClass("RETRYABLE")
+                .errorCode(errorCode)
+                .errorSummary(safeSummary)
+                .updatedAt(now)
+                .build();
     }
 
     /**

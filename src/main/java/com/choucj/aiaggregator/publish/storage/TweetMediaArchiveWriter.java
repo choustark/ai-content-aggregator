@@ -400,6 +400,60 @@ public class TweetMediaArchiveWriter {
         return true;
     }
 
+    /**
+     * Story 10.8: 重试耗尽收敛钩子的 sidecar 终态化 — 把 canonical sidecar 中所有
+     * {@code wechatPrepare=RETRY_SCHEDULED} 的媒体置为 {@code FAILED_TERMINAL}
+     * (保留本次 attempt, nextRetryAt=null, errorClass=TERMINAL, errorCode/errorSummary 为
+     * 安全摘要) + {@code uploadStatus=FAILED}。
+     *
+     * <p>仅处理仍处于 RETRY_SCHEDULED 的媒体: 已 SUCCEEDED (本轮重试已成功) 或已终态
+     * (ENVIRONMENT_BLOCKED 等) 的证据不被覆盖。articleId 遵循 {@code tw-{tweetId}} 约定;
+     * canonical date 索引缺失、sidecar 缺失或无可终态化媒体时返回 false (钩子侧只记日志)。
+     */
+    public boolean markWechatPrepareExhausted(String articleId, String errorCode, String safeSummary) {
+        if (articleId == null || !articleId.startsWith("tw-") || articleId.length() <= 3) {
+            return false;
+        }
+        String tweetId = articleId.substring(3);
+        Optional<LocalDate> indexed = readCanonicalDateIndex(tweetId);
+        if (indexed.isEmpty()) {
+            return false;
+        }
+        Path dir = resolveArchiveDirForDate(tweetId, indexed.get());
+        synchronized (dirLock(dir)) {
+            Optional<MediaArchiveRecord> existing = readCanonicalSidecar(tweetId);
+            if (existing.isEmpty() || existing.get().getMedia() == null) {
+                return false;
+            }
+            MediaArchiveRecord record = existing.get();
+            LocalDateTime now = LocalDateTime.now();
+            boolean mutated = false;
+            for (TweetMedia media : record.getMedia()) {
+                if (media == null || media.getWechatPrepare() == null
+                        || media.getWechatPrepare().getStatus() != MediaPhaseStatus.RETRY_SCHEDULED) {
+                    continue;
+                }
+                media.setWechatPrepare(MediaPhaseState.builder()
+                        .status(MediaPhaseStatus.FAILED_TERMINAL)
+                        .attempt(Math.max(media.getWechatPrepare().getAttempt(), 0))
+                        .nextRetryAt(null)
+                        .errorClass("TERMINAL")
+                        .errorCode(errorCode != null ? TextTruncateUtil.truncateForLog(errorCode, 64) : null)
+                        .errorSummary(safeSummary)
+                        .updatedAt(now)
+                        .build());
+                media.setUploadStatus(MediaUploadStatus.FAILED);
+                mutated = true;
+            }
+            if (mutated) {
+                writeSidecar(tweetId, record.getCanonicalArchiveDate().atStartOfDay(), record.getMedia());
+                log.info("wechatPrepare 重试耗尽已终态化: tweetId={}, errorCode={}",
+                        tweetId, TextTruncateUtil.truncateForLog(errorCode, 64));
+            }
+            return mutated;
+        }
+    }
+
     private Path resolveArchiveDirForDate(String tweetId, LocalDate date) {
         validateTweetId(tweetId);
         String datePart = date.format(dateFormatter);

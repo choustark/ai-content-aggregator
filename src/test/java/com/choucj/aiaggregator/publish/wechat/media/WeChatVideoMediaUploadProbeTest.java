@@ -190,7 +190,7 @@ class WeChatVideoMediaUploadProbeTest {
         assertThatThrownBy(() -> probe.uploadTempVideo(video))
                 .isInstanceOf(NonRetryableException.class)
                 .satisfies(ex -> assertThat(((AggregatorException) ex).getErrorCode())
-                        .isEqualTo(ErrorCode.WECHAT_API_ERROR))
+                        .isEqualTo(ErrorCode.WECHAT_ENVIRONMENT_BLOCKED))
                 .hasMessageContaining("微信 mediaUpload(video) 失败")
                 .hasMessageContaining("errcode=40164");
     }

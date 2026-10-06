@@ -83,18 +83,20 @@ class WxJavaWeChatClientTest {
         assertWechatException(RetryableException.class, ErrorCode.WECHAT_TOKEN_EXPIRED, 40014);
     }
 
+    /** Story 10.8: 40164 环境阻塞独立分类 — NonRetryable 终态(不再与 default 同桶 WECHAT_API_ERROR)。 */
     @Test
     void getAccessTokenThrowsNonRetryableOnIpWhitelist() throws WxErrorException {
         when(wxMpService.getAccessToken()).thenThrow(wxError(40164, "invalid ip"));
 
-        assertWechatException(NonRetryableException.class, ErrorCode.WECHAT_API_ERROR, 40164);
+        assertWechatException(NonRetryableException.class, ErrorCode.WECHAT_ENVIRONMENT_BLOCKED, 40164);
     }
 
+    /** Story 10.8: 45009 限流独立分类 — Retryable(复用 task.retry.* 既有重试窗口)。 */
     @Test
-    void getAccessTokenThrowsNonRetryableOnRateLimit() throws WxErrorException {
+    void getAccessTokenThrowsRetryableOnRateLimit() throws WxErrorException {
         when(wxMpService.getAccessToken()).thenThrow(wxError(45009, "reach max api daily quota limit"));
 
-        assertWechatException(NonRetryableException.class, ErrorCode.WECHAT_API_ERROR, 45009);
+        assertWechatException(RetryableException.class, ErrorCode.WECHAT_RATE_LIMITED, 45009);
     }
 
     @Test

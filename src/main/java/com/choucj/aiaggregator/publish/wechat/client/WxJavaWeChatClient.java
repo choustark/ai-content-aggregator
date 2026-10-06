@@ -91,11 +91,14 @@ public class WxJavaWeChatClient implements WeChatClient {
         String base = "微信 " + operation + " 失败: errcode=" + errcode
                 + ", errmsg=" + SingleModelRewriter.truncateForLog(errmsg, 200);
 
+        // Story 10.8: 40164/45009 独立分类 — 40164 环境阻塞为终态证据(立即四层收敛),
+        // 45009 限流为 Retryable(复用 task.retry.* 既有窗口, 不新增第二套重试配置)。
         return switch (errcode) {
             case 40014 -> new RetryableException(ErrorCode.WECHAT_TOKEN_EXPIRED, base, e);
             case -1 -> new RetryableException(ErrorCode.WECHAT_API_ERROR, base, e);
             case 40001 -> new NonRetryableException(ErrorCode.WECHAT_INVALID_CREDENTIAL, base, e);
-            case 40164, 45009 -> new NonRetryableException(ErrorCode.WECHAT_API_ERROR, base, e);
+            case 40164 -> new NonRetryableException(ErrorCode.WECHAT_ENVIRONMENT_BLOCKED, base, e);
+            case 45009 -> new RetryableException(ErrorCode.WECHAT_RATE_LIMITED, base, e);
             default -> new NonRetryableException(ErrorCode.WECHAT_API_ERROR, base, e);
         };
     }

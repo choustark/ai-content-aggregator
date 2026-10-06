@@ -535,6 +535,154 @@ class WeChatMediaPreparerTest {
         assertThat(sidecarMedia.getWechatUrl()).isEqualTo(WECHAT_URL);
     }
 
+    // ===== Story 10.8: 45009/40164 独立分类 + wechatPrepare 阶段证据 =====
+
+    /** Story 10.8 (I/O 矩阵「45009/临时错误」): 限流分类 RETRYABLE/RATE_LIMITED + RETRY_SCHEDULED 阶段证据. */
+    @Test
+    void should_write_retry_scheduled_phase_when_probe_throws_rate_limited_45009() throws IOException {
+        writeFile("photo1.png");
+        TweetMedia photo = photo("media-1", "photo1.png").build();
+        writer.writeSidecar(TWEET_ID, PUBLISHED_AT, List.of(photo));
+
+        when(uploadProbe.upload(any(Path.class))).thenThrow(new RetryableException(
+                ErrorCode.WECHAT_RATE_LIMITED,
+                "微信 mediaImgUpload 失败: errcode=45009 reach max api daily quota limit"));
+
+        MediaPreparationResult result = preparer.prepareMedia(TWEET_ID, PUBLISHED_AT, List.of(photo));
+
+        assertThat(result.failCount()).isEqualTo(1);
+        assertThat(result.hasRetryableFailure()).isTrue();
+        assertThat(result.hasTerminalFailure()).isFalse();
+        assertThat(result.mediaStatuses().get(0).retryable()).isTrue();
+        assertThat(result.mediaStatuses().get(0).failureClass())
+                .isEqualTo(MediaPreparationResult.FailureClass.RATE_LIMITED);
+
+        TweetMedia sidecarMedia = readSidecarMedia("media-1");
+        assertThat(sidecarMedia.getUploadStatus()).isEqualTo(MediaUploadStatus.FAILED);
+        assertThat(sidecarMedia.getWechatPrepare()).isNotNull();
+        assertThat(sidecarMedia.getWechatPrepare().getStatus())
+                .isEqualTo(com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus.RETRY_SCHEDULED);
+        assertThat(sidecarMedia.getWechatPrepare().getAttempt()).isEqualTo(1);
+        assertThat(sidecarMedia.getWechatPrepare().getNextRetryAt()).isNotNull();
+        assertThat(sidecarMedia.getWechatPrepare().getErrorClass()).isEqualTo("RETRYABLE");
+        assertThat(sidecarMedia.getWechatPrepare().getErrorCode()).isEqualTo("WECHAT_RATE_LIMITED");
+        assertThat(sidecarMedia.getWechatPrepare().getErrorSummary()).contains("45009");
+    }
+
+    /** Story 10.8 (I/O 矩阵「40164 环境阻塞」): 终态 ENVIRONMENT_BLOCKED 证据 + nextRetryAt=null. */
+    @Test
+    void should_write_environment_blocked_phase_when_probe_throws_ip_whitelist_40164() throws IOException {
+        writeFile("photo1.png");
+        TweetMedia photo = photo("media-1", "photo1.png").build();
+        writer.writeSidecar(TWEET_ID, PUBLISHED_AT, List.of(photo));
+
+        when(uploadProbe.upload(any(Path.class))).thenThrow(new NonRetryableException(
+                ErrorCode.WECHAT_ENVIRONMENT_BLOCKED,
+                "微信 mediaImgUpload 失败: errcode=40164 invalid ip, not in whitelist"));
+
+        MediaPreparationResult result = preparer.prepareMedia(TWEET_ID, PUBLISHED_AT, List.of(photo));
+
+        assertThat(result.failCount()).isEqualTo(1);
+        assertThat(result.hasTerminalFailure()).isTrue();
+        assertThat(result.hasRetryableFailure()).isFalse();
+        assertThat(result.mediaStatuses().get(0).retryable()).isFalse();
+        assertThat(result.mediaStatuses().get(0).failureClass())
+                .isEqualTo(MediaPreparationResult.FailureClass.ENVIRONMENT_BLOCKED);
+
+        TweetMedia sidecarMedia = readSidecarMedia("media-1");
+        assertThat(sidecarMedia.getWechatPrepare()).isNotNull();
+        assertThat(sidecarMedia.getWechatPrepare().getStatus())
+                .isEqualTo(com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus.ENVIRONMENT_BLOCKED);
+        assertThat(sidecarMedia.getWechatPrepare().getAttempt()).isEqualTo(1);
+        assertThat(sidecarMedia.getWechatPrepare().getNextRetryAt()).isNull();
+        assertThat(sidecarMedia.getWechatPrepare().getErrorClass()).isEqualTo("TERMINAL");
+        assertThat(sidecarMedia.getWechatPrepare().getErrorCode()).isEqualTo("WECHAT_ENVIRONMENT_BLOCKED");
+    }
+
+    /** Story 10.8: attempt 单调递增 — 二次失败 attempt=2 且 nextRetryAt 按新 attempt 退避. */
+    @Test
+    void should_increment_attempt_on_repeated_retryable_failure() throws IOException {
+        writeFile("photo1.png");
+        TweetMedia photo = photo("media-1", "photo1.png").build();
+        writer.writeSidecar(TWEET_ID, PUBLISHED_AT, List.of(photo));
+        when(uploadProbe.upload(any(Path.class))).thenThrow(new RetryableException(
+                ErrorCode.WECHAT_RATE_LIMITED, "errcode=45009"));
+
+        preparer.prepareMedia(TWEET_ID, PUBLISHED_AT, List.of(photo));
+        MediaPreparationResult second = preparer.prepareMedia(TWEET_ID, PUBLISHED_AT, List.of(photo));
+
+        assertThat(second.failCount()).isEqualTo(1);
+        TweetMedia sidecarMedia = readSidecarMedia("media-1");
+        assertThat(sidecarMedia.getWechatPrepare().getStatus())
+                .isEqualTo(com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus.RETRY_SCHEDULED);
+        assertThat(sidecarMedia.getWechatPrepare().getAttempt()).isEqualTo(2);
+        assertThat(sidecarMedia.getWechatPrepare().getNextRetryAt()).isNotNull();
+    }
+
+    /**
+     * Story 10.8: 生成器级静态 helper — preparer 级崩溃路径的 RETRY_SCHEDULED 回写,
+     * 只对「PHOTO 且未进入 SUCCEEDED/终态」的媒体落证据, 已成功媒体不被覆盖。
+     */
+    @Test
+    void should_mark_sidecar_prepare_retry_scheduled_only_for_pending_photos() throws IOException {
+        writeFile("photo1.png");
+        writeFile("photo2.png");
+        TweetMedia pending = photo("media-pending", "photo1.png").build();
+        TweetMedia succeeded = photo("media-succeeded", "photo2.png")
+                .uploadStatus(MediaUploadStatus.UPLOADED)
+                .wechatUrl(WECHAT_URL)
+                .build();
+        writer.writeSidecar(TWEET_ID, PUBLISHED_AT, List.of(pending, succeeded));
+
+        boolean mutated = WeChatMediaPreparer.markSidecarPrepareRetryScheduled(
+                writer, TWEET_ID, PUBLISHED_AT,
+                new com.choucj.aiaggregator.task.queue.RetryPolicyProperties(),
+                "WECHAT_RATE_LIMITED", "errcode=45009 quota");
+
+        assertThat(mutated).isTrue();
+        TweetMedia pendingSidecar = readSidecarMedia("media-pending");
+        assertThat(pendingSidecar.getWechatPrepare().getStatus())
+                .isEqualTo(com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus.RETRY_SCHEDULED);
+        assertThat(pendingSidecar.getWechatPrepare().getAttempt()).isEqualTo(1);
+        assertThat(pendingSidecar.getWechatPrepare().getNextRetryAt()).isNotNull();
+        // 已成功上传的媒体不被覆盖: wechatPrepare 仍为 SUCCEEDED 投影, uploadStatus 保持 UPLOADED
+        assertThat(readSidecarMedia("media-succeeded").getWechatPrepare().getStatus())
+                .isEqualTo(com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus.SUCCEEDED);
+        assertThat(readSidecarMedia("media-succeeded").getUploadStatus())
+                .isEqualTo(MediaUploadStatus.UPLOADED);
+    }
+
+    /** Story 10.8: 已处于 RETRY_SCHEDULED 的媒体不被 helper 重写 (attempt 不双计, 证据不被覆盖). */
+    @Test
+    void should_skip_retry_scheduled_media_in_mark_sidecar_prepare_retry_scheduled() throws IOException {
+        writeFile("photo1.png");
+        TweetMedia scheduled = photo("media-1", "photo1.png")
+                .uploadStatus(MediaUploadStatus.FAILED)
+                .failureReason("preparer 细粒度原因")
+                .wechatPrepare(com.choucj.aiaggregator.source.twitter.model.MediaPhaseState.builder()
+                        .status(com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus.RETRY_SCHEDULED)
+                        .attempt(2)
+                        .nextRetryAt(PUBLISHED_AT.plusMinutes(1))
+                        .errorClass("RETRYABLE")
+                        .errorCode("WECHAT_RATE_LIMITED")
+                        .errorSummary("preparer 已写证据")
+                        .updatedAt(PUBLISHED_AT)
+                        .build())
+                .build();
+        writer.writeSidecar(TWEET_ID, PUBLISHED_AT, List.of(scheduled));
+
+        boolean mutated = WeChatMediaPreparer.markSidecarPrepareRetryScheduled(
+                writer, TWEET_ID, PUBLISHED_AT,
+                new com.choucj.aiaggregator.task.queue.RetryPolicyProperties(),
+                "WECHAT_RATE_LIMITED", "生成器级覆盖原因");
+
+        assertThat(mutated).isFalse();
+        TweetMedia sidecarMedia = readSidecarMedia("media-1");
+        assertThat(sidecarMedia.getWechatPrepare().getAttempt()).isEqualTo(2);
+        assertThat(sidecarMedia.getWechatPrepare().getErrorSummary()).isEqualTo("preparer 已写证据");
+        assertThat(sidecarMedia.getFailureReason()).isEqualTo("preparer 细粒度原因");
+    }
+
     // ===== helpers =====
 
     private TweetMedia.TweetMediaBuilder photo(String id, String filename) {

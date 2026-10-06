@@ -81,15 +81,32 @@ public enum ErrorCode {
      *
      * <p>Story 3.1 引入,用于包装微信公众号 API 的通用错误:
      * <ul>
-     *   <li>{@code errcode=40164} — IP 白名单未配置,不可重试</li>
-     *   <li>{@code errcode=45009} — 接口调用次数达上限,不可重试</li>
      *   <li>{@code errcode=-1} — 微信系统繁忙,可重试</li>
      *   <li>未知 {@code errcode} — 保守按不可重试处理</li>
      * </ul>
      *
+     * <p>Story 10.8 起 {@code 40164}/{@code 45009} 拆分为独立错误码
+     * ({@link #WECHAT_ENVIRONMENT_BLOCKED} / {@link #WECHAT_RATE_LIMITED}), 不再与本码同桶.
+     *
      * <p>区分可重试语义由 {@code RetryableException} / {@code NonRetryableException} 承担.
      */
     WECHAT_API_ERROR,
+
+    /**
+     * 微信环境阻塞(不可重试终态).
+     *
+     * <p>Story 10.8 引入,用于包装 {@code errcode=40164}(IP 白名单未配置等环境问题) —
+     * 人工修正环境前重试必然复现,按终态证据处理并立即四层收敛.
+     */
+    WECHAT_ENVIRONMENT_BLOCKED,
+
+    /**
+     * 微信接口限流(可重试).
+     *
+     * <p>Story 10.8 引入,用于包装 {@code errcode=45009}(接口调用次数达上限) —
+     * 按 Retryable 处理,复用 {@code task.retry.*} 既有重试窗口与上限,不新增第二套重试配置.
+     */
+    WECHAT_RATE_LIMITED,
 
     /**
      * 微信 access_token 过期或无效(可重试场景).

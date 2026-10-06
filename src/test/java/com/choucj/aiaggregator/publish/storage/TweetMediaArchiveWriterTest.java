@@ -6,6 +6,7 @@ import com.choucj.aiaggregator.source.twitter.config.TwitterMediaConfig;
 import com.choucj.aiaggregator.source.twitter.config.TwitterMediaProperties;
 import com.choucj.aiaggregator.source.twitter.model.MediaDownloadStatus;
 import com.choucj.aiaggregator.source.twitter.model.MediaUploadStatus;
+import com.choucj.aiaggregator.source.twitter.model.MediaPhaseState;
 import com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus;
 import com.choucj.aiaggregator.source.twitter.model.PublishabilityStatus;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
@@ -74,6 +75,60 @@ class TweetMediaArchiveWriterTest {
                 .order(0)
                 .provider("scraper")
                 .build();
+    }
+
+    // Story 10.8: wechatPrepare RETRY_SCHEDULED 持久化往返 + 耗尽终态化
+    @Test
+    void shouldTerminalizeRetryScheduledPhaseOnMarkWechatPrepareExhausted() {
+        LocalDateTime when = LocalDateTime.of(2026, 8, 2, 10, 0);
+        LocalDateTime nextRetryAt = when.plusMinutes(1);
+        TweetMedia pending = samplePhotoMedia("m1", "https://x.com/p1.jpg")
+                .toBuilder()
+                .uploadStatus(MediaUploadStatus.FAILED)
+                .wechatPrepare(MediaPhaseState.builder()
+                        .status(MediaPhaseStatus.RETRY_SCHEDULED)
+                        .attempt(2)
+                        .nextRetryAt(nextRetryAt)
+                        .errorClass("RETRYABLE")
+                        .errorCode("WECHAT_RATE_LIMITED")
+                        .errorSummary("errcode=45009")
+                        .updatedAt(when)
+                        .build())
+                .build();
+        TweetMedia untouched = samplePhotoMedia("m2", "https://x.com/p2.jpg");
+        writer.writeSidecar("2083", when, List.of(pending, untouched));
+
+        boolean mutated = writer.markWechatPrepareExhausted(
+                "tw-2083", "WECHAT_RATE_LIMITED", "尝试耗尽");
+
+        assertThat(mutated).isTrue();
+        Optional<MediaArchiveRecord> read = writer.readSidecar("2083", when);
+        assertThat(read).isPresent();
+        TweetMedia exhausted = read.get().getMedia().get(0);
+        assertThat(exhausted.getWechatPrepare().getStatus()).isEqualTo(MediaPhaseStatus.FAILED_TERMINAL);
+        assertThat(exhausted.getWechatPrepare().getAttempt()).isEqualTo(2);
+        assertThat(exhausted.getWechatPrepare().getNextRetryAt()).isNull();
+        assertThat(exhausted.getWechatPrepare().getErrorClass()).isEqualTo("TERMINAL");
+        assertThat(exhausted.getWechatPrepare().getErrorCode()).isEqualTo("WECHAT_RATE_LIMITED");
+        assertThat(exhausted.getUploadStatus()).isEqualTo(MediaUploadStatus.FAILED);
+        // 无 RETRY_SCHEDULED 阶段的媒体不被触碰
+        TweetMedia other = read.get().getMedia().get(1);
+        assertThat(other.getWechatPrepare().getStatus()).isEqualTo(MediaPhaseStatus.NOT_STARTED);
+        assertThat(other.getUploadStatus()).isEqualTo(MediaUploadStatus.PENDING);
+
+        // 幂等: 再次调用无可终态化媒体 → false
+        assertThat(writer.markWechatPrepareExhausted("tw-2083", "WECHAT_RATE_LIMITED", "尝试耗尽"))
+                .isFalse();
+    }
+
+    // Story 10.8: articleId 非法/未知 → 不误写, 返回 false
+    @Test
+    void shouldReturnFalseWhenMarkWechatPrepareExhaustedGetsInvalidArticleId() {
+        LocalDateTime when = LocalDateTime.of(2026, 8, 2, 10, 0);
+        writer.writeSidecar("2083", when, List.of(samplePhotoMedia("m1", "https://x.com/p1.jpg")));
+
+        assertThat(writer.markWechatPrepareExhausted("not-tw-2083", "CODE", "summary")).isFalse();
+        assertThat(writer.markWechatPrepareExhausted("tw-absent", "CODE", "summary")).isFalse();
     }
 
     // AC1: 目录确定性

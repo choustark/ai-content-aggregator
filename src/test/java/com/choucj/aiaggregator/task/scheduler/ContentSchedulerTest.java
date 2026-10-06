@@ -1,5 +1,6 @@
 package com.choucj.aiaggregator.task.scheduler;
 
+import com.choucj.aiaggregator.common.exception.ArticleDeliveryRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
@@ -10,6 +11,8 @@ import com.choucj.aiaggregator.processor.GitHubProcessor;
 import com.choucj.aiaggregator.processor.TwitterProcessor;
 import com.choucj.aiaggregator.processor.config.ProcessorProperties;
 import com.choucj.aiaggregator.publish.status.ArticleDeliveryReplayExecutor;
+import com.choucj.aiaggregator.publish.status.DeliveryFailureCoordinator;
+import com.choucj.aiaggregator.publish.storage.TweetMediaArchiveWriter;
 import com.choucj.aiaggregator.task.queue.RetryPolicyProperties;
 import com.choucj.aiaggregator.task.queue.TaskQueue;
 import com.choucj.aiaggregator.task.queue.TaskRecoveryRunner;
@@ -90,6 +93,8 @@ class ContentSchedulerTest {
     @Mock
     private TaskMetrics taskMetrics;
     @Mock private ArticleDeliveryReplayExecutor deliveryReplayExecutor;
+    @Mock private DeliveryFailureCoordinator deliveryFailureCoordinator;
+    @Mock private TweetMediaArchiveWriter archiveWriter;
 
     @BeforeEach
     void setUp() {
@@ -606,6 +611,127 @@ class ContentSchedulerTest {
 
         verify(taskMetrics).recordRetry(TaskMetrics.RetryMetricOutcome.EXHAUSTED);
         verify(taskMetrics, never()).recordRetry(TaskMetrics.RetryMetricOutcome.SCHEDULED);
+    }
+
+    // ===== Story 10.8: 媒体交付可重试失败的耗尽收敛钩子 =====
+
+    /** Story 10.8 (AC4): RETRY_SCHEDULED 时把 articleId 记入 state Hash — 耗尽时刻定位依据. */
+    @Test
+    void should_record_delivery_retry_context_when_article_failure_retry_scheduled() {
+        ContentScheduler observed = scheduler(Optional.empty(), Optional.of(taskMetrics));
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter:retryable", null);
+        doThrow(new ArticleDeliveryRetryableException("tw-2083615699260313955",
+                "媒体微信准备失败(可重试): errcode=45009"))
+                .when(twitterProcessor).process();
+        when(taskQueue.recordRetryableFailure(anyString(), anyString(), anyString(),
+                any(RetryPolicyProperties.class)))
+                .thenReturn(TaskQueue.RetryAdvance.scheduled(1, System.currentTimeMillis()));
+
+        observed.processContent();
+
+        verify(taskQueue).recordDeliveryRetryContext("twitter:retryable", "tw-2083615699260313955");
+        verify(taskMetrics).recordRetry(TaskMetrics.RetryMetricOutcome.SCHEDULED);
+    }
+
+    /** Story 10.8: articleId 上下文写入失败只降级告警 — SCHEDULED 指标与审计日志必然执行. */
+    @Test
+    void should_still_record_scheduled_metric_when_delivery_retry_context_write_throws() {
+        ContentScheduler observed = scheduler(Optional.empty(), Optional.of(taskMetrics));
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter:retryable", null);
+        doThrow(new ArticleDeliveryRetryableException("tw-2083615699260313955",
+                "媒体微信准备失败(可重试): errcode=45009"))
+                .when(twitterProcessor).process();
+        when(taskQueue.recordRetryableFailure(anyString(), anyString(), anyString(),
+                any(RetryPolicyProperties.class)))
+                .thenReturn(TaskQueue.RetryAdvance.scheduled(1, System.currentTimeMillis()));
+        doThrow(new IllegalStateException("redis hset broken"))
+                .when(taskQueue).recordDeliveryRetryContext("twitter:retryable",
+                        "tw-2083615699260313955");
+
+        observed.processContent();
+
+        verify(taskMetrics).recordRetry(TaskMetrics.RetryMetricOutcome.SCHEDULED);
+        verify(taskMetrics).recordProcessed(TaskMetrics.Source.TWITTER,
+                TaskMetrics.Outcome.RETRYABLE_FAILURE);
+    }
+
+    /** Story 10.8: 非媒体交付类 RetryableException 不写 articleId 上下文 (无 getArticleId). */
+    @Test
+    void should_not_record_delivery_retry_context_for_plain_retryable_exception() {
+        ContentScheduler observed = scheduler(Optional.empty(), Optional.of(taskMetrics));
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter:retryable", null);
+        doThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "temporary"))
+                .when(twitterProcessor).process();
+        when(taskQueue.recordRetryableFailure(anyString(), anyString(), anyString(),
+                any(RetryPolicyProperties.class)))
+                .thenReturn(TaskQueue.RetryAdvance.scheduled(1, System.currentTimeMillis()));
+
+        observed.processContent();
+
+        verify(taskQueue, never()).recordDeliveryRetryContext(anyString(), anyString());
+    }
+
+    /** Story 10.8 (AC4): 重试耗尽落死信后 — 终态化 sidecar + 四层收敛 (state.articleId 驱动). */
+    @Test
+    void should_converge_exhausted_prepare_after_dead_letter_when_article_context_present() {
+        ContentScheduler observed = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
+                Optional.of(githubProcessor), processorProperties, Optional.empty(),
+                Optional.of(taskMetrics), Optional.empty(),
+                Optional.of(deliveryFailureCoordinator), Optional.of(archiveWriter),
+                new RetryPolicyProperties(), true, FIXED_CLOCK);
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter:retryable", null);
+        doThrow(new ArticleDeliveryRetryableException("tw-2083615699260313955",
+                "媒体微信准备失败(可重试): errcode=45009"))
+                .when(twitterProcessor).process();
+        when(taskQueue.recordRetryableFailure(anyString(), anyString(), anyString(),
+                any(RetryPolicyProperties.class)))
+                .thenReturn(TaskQueue.RetryAdvance.deadLettered(3));
+        when(taskQueue.readStateArticleId("twitter:retryable"))
+                .thenReturn(Optional.of("tw-2083615699260313955"));
+        when(archiveWriter.markWechatPrepareExhausted(eq("tw-2083615699260313955"),
+                anyString(), anyString())).thenReturn(true);
+        when(deliveryFailureCoordinator.converge(eq("tw-2083615699260313955"),
+                eq("twitter:retryable"), eq("WECHAT_PREPARE"), anyString(), anyString()))
+                .thenReturn(new DeliveryFailureCoordinator.ConvergenceResult(true,
+                        DeliveryFailureCoordinator.Layer.COMPLETE));
+
+        observed.processContent();
+
+        // 先终态化 wechatPrepare 证据, 再四层收敛 (stage=WECHAT_PREPARE)
+        verify(archiveWriter).markWechatPrepareExhausted(eq("tw-2083615699260313955"),
+                anyString(), anyString());
+        verify(deliveryFailureCoordinator).converge(eq("tw-2083615699260313955"),
+                eq("twitter:retryable"), eq("WECHAT_PREPARE"), anyString(), anyString());
+        verify(taskMetrics).recordRetry(TaskMetrics.RetryMetricOutcome.EXHAUSTED);
+    }
+
+    /** Story 10.8: state 无 articleId (非媒体交付失败) 时耗尽钩子不收敛. */
+    @Test
+    void should_not_converge_exhausted_prepare_without_article_context() {
+        ContentScheduler observed = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
+                Optional.of(githubProcessor), processorProperties, Optional.empty(),
+                Optional.of(taskMetrics), Optional.empty(),
+                Optional.of(deliveryFailureCoordinator), Optional.of(archiveWriter),
+                new RetryPolicyProperties(), true, FIXED_CLOCK);
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter:retryable", null);
+        doThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "temporary"))
+                .when(twitterProcessor).process();
+        when(taskQueue.recordRetryableFailure(anyString(), anyString(), anyString(),
+                any(RetryPolicyProperties.class)))
+                .thenReturn(TaskQueue.RetryAdvance.deadLettered(3));
+        when(taskQueue.readStateArticleId("twitter:retryable")).thenReturn(Optional.empty());
+
+        observed.processContent();
+
+        verify(taskQueue, never()).recordDeliveryRetryContext(anyString(), anyString());
+        verify(archiveWriter, never()).markWechatPrepareExhausted(anyString(), anyString(), anyString());
+        verify(deliveryFailureCoordinator, never()).converge(
+                anyString(), anyString(), anyString(), anyString(), anyString());
     }
 
     @Test

@@ -1,5 +1,6 @@
 package com.choucj.aiaggregator.processor;
 
+import com.choucj.aiaggregator.common.exception.ArticleDeliveryRetryableException;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.Article;
@@ -157,6 +158,30 @@ class TwitterProcessorTest {
 
         // 第 1 条失败但第 2 条继续处理 — per-article 隔离生效
         verify(contentPublisher, times(1)).publish(any());
+    }
+
+    /**
+     * Story 10.8 AC4 回归: 媒体交付可重试异常不得被 per-article 隔离吞掉 —
+     * 默认 fault-isolation-enabled=true 下原样透传 (走任务级延迟重试), 且 fail-fast
+     * 中止本批, 避免后续文章覆盖 state.articleId 单槽。
+     */
+    @Test
+    void shouldPropagateArticleDeliveryRetryableExceptionDespiteFaultIsolation() {
+        Tweet t1 = tweet("id-1", "content-1");
+        Tweet t2 = tweet("id-2", "content-2");
+        when(twitterSource.fetch()).thenReturn(List.of(t1, t2));
+        when(commentFilterDelegate.filter(any())).thenReturn(List.of(t1, t2));
+        when(innovationFilterDelegate.filter(any())).thenReturn(List.of(t1, t2));
+        when(contentRewriter.rewrite(t1))
+                .thenThrow(new ArticleDeliveryRetryableException("tw-id-1",
+                        "媒体微信准备失败(可重试): errcode=45009"));
+
+        assertThatThrownBy(() -> processor.process())
+                .isInstanceOf(ArticleDeliveryRetryableException.class)
+                .satisfies(e -> assertThat(((ArticleDeliveryRetryableException) e).getArticleId())
+                        .isEqualTo("tw-id-1"));
+        // fail-fast: 第 2 条不再处理, publisher 零调用
+        verify(contentPublisher, never()).publish(any());
     }
 
     @Test

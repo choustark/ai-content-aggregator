@@ -1,5 +1,6 @@
 package com.choucj.aiaggregator.processor;
 
+import com.choucj.aiaggregator.common.exception.ArticleDeliveryRetryableException;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.Article;
@@ -352,6 +353,10 @@ class PreserveOriginalArticleGeneratorTest {
 
     // ===== W1+W2: 意外 RuntimeException 包装为 RetryableException =====
 
+    /**
+     * Story 10.8 (AC4): preparer 意外 RuntimeException 属可重试失败 (草稿未创建) —
+     * 写 RETRY_SCHEDULED 证据后走任务级延迟重试, 不立即四层收敛。
+     */
     @Test
     void should_wrap_unexpected_runtime_exception_as_retryable() {
         Tweet tweet = tweetWithOneUploadedPhoto();
@@ -360,13 +365,96 @@ class PreserveOriginalArticleGeneratorTest {
         when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
         when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
                 .thenThrow(new IllegalStateException("connection reset"));
+        // helper 回写路径: sidecar 中存在未进入 SUCCEEDED/终态的 PHOTO → 写 RETRY_SCHEDULED 证据
+        when(writer.readSidecar(TWEET_ID, PUBLISHED_AT)).thenReturn(Optional.of(
+                MediaArchiveRecord.builder().tweetId(TWEET_ID)
+                        .media(List.of(pendingPhotoMedia())).build()));
 
         assertThatThrownBy(() -> generator.generate(tweet))
                 .isInstanceOf(RetryableException.class)
                 .hasMessageContaining(TWEET_ID)
                 .hasMessageContaining("connection reset");
+        verify(writer).updateMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyString(), any());
+        verifyNoInteractions(deliveryFailureCoordinator);
+    }
+
+    /** 未上传、未进入任何微信准备终态的 PHOTO 媒体 (helper 回写目标). */
+    private static TweetMedia pendingPhotoMedia() {
+        return TweetMedia.builder()
+                .id("media-pending")
+                .type(TweetMediaType.PHOTO)
+                .downloadStatus(MediaDownloadStatus.DOWNLOADED)
+                .uploadStatus(MediaUploadStatus.PENDING)
+                .build();
+    }
+
+    /** Story 10.8: preparer 返回终态分类 (PERMANENT/ENVIRONMENT_BLOCKED) → 立即四层收敛. */
+    @Test
+    void should_converge_immediately_when_prepare_result_has_terminal_failure() {
+        Tweet tweet = tweetWithOneUploadedPhoto();
+        when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+                .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
+        when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+                .thenReturn(terminalPrepareFailure("errcode=40164 invalid ip",
+                        MediaPreparationResult.FailureClass.ENVIRONMENT_BLOCKED));
+
+        assertThatThrownBy(() -> generator.generate(tweet))
+                .isInstanceOf(NonRetryableException.class)
+                .hasMessageContaining(TWEET_ID);
         verify(deliveryFailureCoordinator).converge(any(Article.class), eq("WECHAT_PREPARE"),
                 eq("MEDIA_PREPARE_FAILED"), anyString());
+    }
+
+    /** Story 10.8: preparer 返回可重试分类 (RATE_LIMITED) → ArticleDeliveryRetryableException + 不收敛. */
+    @Test
+    void should_throw_article_delivery_retryable_when_prepare_result_has_rate_limited_failure() {
+        Tweet tweet = tweetWithOneUploadedPhoto();
+        when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+                .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
+        when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+                .thenReturn(terminalPrepareFailure("errcode=45009 quota",
+                        MediaPreparationResult.FailureClass.RATE_LIMITED));
+
+        assertThatThrownBy(() -> generator.generate(tweet))
+                .isInstanceOf(ArticleDeliveryRetryableException.class)
+                .hasMessageContaining(TWEET_ID)
+                .satisfies(e -> assertThat(((ArticleDeliveryRetryableException) e).getArticleId())
+                        .isEqualTo("tw-" + TWEET_ID));
+        verifyNoInteractions(deliveryFailureCoordinator);
+    }
+
+    /** 构造单媒体失败分类的 prepare 结果 (record 公开构造器, 跨包可用). */
+    private static MediaPreparationResult terminalPrepareFailure(String reason,
+                                                                 MediaPreparationResult.FailureClass failureClass) {
+        boolean retryable = failureClass == MediaPreparationResult.FailureClass.RETRYABLE
+                || failureClass == MediaPreparationResult.FailureClass.RATE_LIMITED;
+        return new MediaPreparationResult(0, 0, 1, List.of(
+                new MediaPreparationResult.MediaPreparationStatus(
+                        "media-fail", MediaUploadStatus.FAILED, null, reason, retryable, failureClass)));
+    }
+
+    /**
+     * Story 10.8: writer Bean 缺失 (Optional.empty) — prepareMedia 前的配置预检
+     * requireBean 即 fail-fast (NonRetryable), 崩溃回写路径不可达, 全程无 NPE。
+     */
+    @Test
+    void should_fail_fast_without_npe_when_writer_missing_before_prepare() {
+        PreserveOriginalArticleGenerator noWriter = new PreserveOriginalArticleGenerator(
+                Optional.of(archiver), Optional.of(gate), preparer, Optional.empty(),
+                new OriginalPostRenderer(), Optional.of(deliveryFailureCoordinator));
+        Tweet tweet = tweetWithOneUploadedPhoto();
+        when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+                .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
+        when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
+
+        assertThatThrownBy(() -> noWriter.generate(tweet))
+                .isInstanceOf(NonRetryableException.class)
+                .hasMessageContaining(TWEET_ID)
+                .hasMessageContaining("TweetMediaArchiveWriter");
+        verify(preparer, never()).prepareMedia(anyString(), any(), anyList());
+        verifyNoInteractions(deliveryFailureCoordinator);
     }
 
     // ===== 媒体审计 failureReason 截断 (N2/R3-1 + AC4 ≤120) =====

@@ -192,6 +192,7 @@ class ModelSmokeTest {
         assertThat(response.getCode()).isEqualTo(ErrorCode.RETRYABLE_ERROR);
         assertThat(response.getMessage()).isEqualTo("Network timeout");
         // Story 3.1 delta: 明确锁定枚举语义与顺序, 避免新增项时只报 size 变化而看不出语义漂移.
+        // Story 10.8: 新增 WECHAT_ENVIRONMENT_BLOCKED(40164) / WECHAT_RATE_LIMITED(45009)
         assertThat(ErrorCode.values())
                 .containsExactly(
                         ErrorCode.RETRYABLE_ERROR,
@@ -202,6 +203,8 @@ class ModelSmokeTest {
                         ErrorCode.REDIS_DATA_ERROR,
                         ErrorCode.EXTERNAL_API_ERROR,
                         ErrorCode.WECHAT_API_ERROR,
+                        ErrorCode.WECHAT_ENVIRONMENT_BLOCKED,
+                        ErrorCode.WECHAT_RATE_LIMITED,
                         ErrorCode.WECHAT_TOKEN_EXPIRED,
                         ErrorCode.WECHAT_INVALID_CREDENTIAL);
     }

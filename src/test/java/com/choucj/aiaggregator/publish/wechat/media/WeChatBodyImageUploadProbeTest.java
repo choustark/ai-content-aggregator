@@ -123,7 +123,7 @@ class WeChatBodyImageUploadProbeTest {
         assertThatThrownBy(() -> probe.upload(image))
                 .isInstanceOf(NonRetryableException.class)
                 .satisfies(ex -> assertThat(((AggregatorException) ex).getErrorCode())
-                        .isEqualTo(ErrorCode.WECHAT_API_ERROR))
+                        .isEqualTo(ErrorCode.WECHAT_ENVIRONMENT_BLOCKED))
                 .hasMessageContaining("微信 mediaImgUpload 失败")
                 .hasMessageContaining("errcode=40164");
     }
