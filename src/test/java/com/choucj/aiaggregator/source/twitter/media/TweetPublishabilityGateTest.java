@@ -182,6 +182,36 @@ public class TweetPublishabilityGateTest {
     }
 
     @Test
+    void shouldPublishVideoMedia_when_downloadedAndFileExists() {
+        // Story 10.10 新可达状态: VIDEO 本地归档下载化后 downloadStatus=DOWNLOADED + 文件非零
+        // → M2 PUBLISHABLE（不再是 M4 SKIPPED+VIDEO 的 DEGRADED）
+        String tweetId = "test-tweet-video-ok";
+        Tweet tweet = createTweetWithText(tweetId, "测试推文");
+        String localPath = "media/twitter/2026-08-15/test-tweet-video-ok/video.mp4";
+        createNonEmptyFile(localPath);
+        MediaRuntimeItem item = MediaRuntimeItem.builder()
+                .mediaId("video-ok-1")
+                .type(TweetMediaType.VIDEO)
+                .downloadStatus(MediaDownloadStatus.DOWNLOADED)
+                .localPath(localPath)
+                .failureReason(null)
+                .retryable(false)
+                .build();
+
+        when(mockRecoveryService.getMediaStates(eq(tweetId), any(LocalDateTime.class)))
+                .thenReturn(List.of(item));
+
+        PublishabilityResult result = gate.evaluate(tweet);
+
+        assertThat(result.getMediaDecisions()).hasSize(1);
+        MediaPublishabilityDecision decision = result.getMediaDecisions().get(0);
+        assertThat(decision.getStatus()).isEqualTo(PublishabilityStatus.PUBLISHABLE);
+        assertThat(decision.getReason()).isNull();
+        // 推文级: 文本可用 + 媒体 PUBLISHABLE → 推文 PUBLISHABLE（非 DEGRADED）
+        assertThat(result.getTweetStatus()).isEqualTo(PublishabilityStatus.PUBLISHABLE);
+    }
+
+    @Test
     void shouldDegradeMedia_when_skippedWithOtherReason() {
         // M5: SKIPPED + 其他原因 → DEGRADED（沿用 failureReason）
         String tweetId = "test-tweet-5";

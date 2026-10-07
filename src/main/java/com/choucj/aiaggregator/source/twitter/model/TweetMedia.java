@@ -111,6 +111,18 @@ public class TweetMedia {
     @Builder.Default
     private MediaPhaseState articleReference = MediaPhaseState.notStarted();
 
+    /**
+     * 下载成功后的本地文件大小 (bytes)；仅 download=SUCCEEDED 时有值 (Story 10.10 VIDEO 证据字段)。
+     * <p>旧 sidecar 缺失该字段时反序列化为 null (向后兼容，读取容错)。
+     */
+    private Long fileSizeBytes;
+
+    /**
+     * 下载成功后的 HTTP 响应实际 Content-Type；仅 download=SUCCEEDED 时有值 (Story 10.10 证据字段)。
+     * <p>旧 sidecar 缺失该字段时反序列化为 null (向后兼容，读取容错)。
+     */
+    private String downloadedContentType;
+
     /** GIF 延后处理时保留原文链接，非 GIF 时为 null。 */
     private String originalPostUrl;
 

@@ -37,7 +37,7 @@ import java.util.Locale;
  *   <li>4xx (除 429) → {@link NonRetryableException} — 客户端错误, 重试无意义</li>
  *   <li>429 → {@link RetryableException} — 限流, 上层可重试</li>
  *   <li>5xx / 连接错误 / 超时 → {@link RetryableException} — 临时性故障</li>
- *   <li>文件大小超限 → {@link NonRetryableException} — 不应重试</li>
+ *   <li>文件大小超限 / 响应无 Content-Length (未知大小, Story 10.10) → {@link NonRetryableException} — 不应重试</li>
  * </ul>
  *
  * <p><b>日志 (W11/N4):</b> 成功 log.info 含 URL 截断 + 字节数 + 耗时; 失败含 HTTP 状态 + 截断根因.
@@ -84,7 +84,8 @@ public class MediaDownloadClient {
      * @param tweetId  业务标识符 (日志用, W11)
      * @param mediaId  媒体标识符 (日志用, W11)
      * @return 下载结果 (字节数组 + contentType)
-     * @throws NonRetryableException 4xx (除 429) / 文件过大 / 内容为 null
+     * @throws NonRetryableException 4xx (除 429) / 文件过大 / 响应无 Content-Length(未知大小,
+     *                               Story 10.10) / 内容为 null
      * @throws RetryableException    5xx / 429 / 连接错误 / 超时
      */
     public DownloadResult downloadBinary(String url, String tweetId, String mediaId) {
@@ -193,8 +194,16 @@ public class MediaDownloadClient {
         }
     }
 
+    /**
+     * Story 10.10: Content-Length 严格预检 — 响应无 Content-Length = 未知大小 = NonRetryable 终态
+     * (严格口径, readBounded 仅作兜底保护); Content-Length 超上限 = NonRetryable 终态 (Story 7.2 既有)。
+     */
     private void rejectOversizedContentLength(HttpHeaders headers, String tweetId, String mediaId) {
         long contentLength = headers.getContentLength();
+        if (contentLength < 0) {
+            throw new NonRetryableException("媒体响应无 Content-Length(未知大小): tweetId=" + tweetId
+                    + " mediaId=" + mediaId, null);
+        }
         if (contentLength > maxFileSizeBytes) {
             throw new NonRetryableException("媒体文件超过大小限制: tweetId=" + tweetId
                     + " mediaId=" + mediaId + " contentLength=" + contentLength

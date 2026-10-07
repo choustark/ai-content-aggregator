@@ -68,11 +68,32 @@ class MediaDownloadClientTest {
         server.verify();
     }
 
+    /**
+     * Story 10.10 (未知大小终态): 响应无 Content-Length = 未知大小 = NonRetryable 终态,
+     * 不读取响应体 (严格口径, readBounded 仅作兜底保护)。
+     */
     @Test
-    void shouldRejectOversizedBody_whenContentLengthMissing() {
+    void shouldRejectUnknownSize_whenContentLengthMissing() {
         server.expect(once(), requestTo(URL))
                 .andExpect(method(HttpMethod.GET))
                 .andRespond(withSuccess(new byte[11], MediaType.IMAGE_JPEG));
+
+        assertThatThrownBy(() -> downloadClient.downloadBinary(URL, "tweet-1", "media-1"))
+                .isInstanceOf(NonRetryableException.class)
+                .hasMessageContaining("无 Content-Length(未知大小)");
+        server.verify();
+    }
+
+    /**
+     * Story 10.10 (readBounded 兜底保留): Content-Length 谎报小于实际 (预检通过),
+     * 实际响应体超上限 → readBounded 硬上限兜底拒绝。
+     */
+    @Test
+    void shouldRejectOversizedBody_whenContentLengthLiesSmaller() {
+        server.expect(once(), requestTo(URL))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess(new byte[11], MediaType.IMAGE_JPEG)
+                        .header("Content-Length", "3"));
 
         assertThatThrownBy(() -> downloadClient.downloadBinary(URL, "tweet-1", "media-1"))
                 .isInstanceOf(NonRetryableException.class)
@@ -122,5 +143,46 @@ class MediaDownloadClientTest {
         assertThatThrownBy(() -> downloadClient.downloadBinary("not a url", "tweet-1", "media-1"))
                 .isInstanceOf(NonRetryableException.class)
                 .hasMessageContaining("URL 非法");
+    }
+
+    /**
+     * Story 10.10 review patch: 生产默认 cap 口径 (twitter.media.max-file-size-mb 默认 10MB,
+     * 即 TwitterMediaProperties#maxFileSizeMb=10) — Content-Length = 10MB+1 时预检拒绝
+     * (仅看响应头, 不读响应体)。
+     */
+    @Test
+    void shouldRejectContentLengthJustOverProductionCap_beforeReadingBody() {
+        long productionCapBytes = 10L * 1024 * 1024;
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer prodServer = MockRestServiceServer.bindTo(builder).build();
+        MediaDownloadClient prodClient = new MediaDownloadClient(builder.build(), productionCapBytes,
+                Duration.ZERO, TestSlowOperationRecorder.create());
+        prodServer.expect(once(), requestTo(URL))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess(new byte[0], MediaType.APPLICATION_OCTET_STREAM)
+                        .header("Content-Length", String.valueOf(productionCapBytes + 1)));
+
+        assertThatThrownBy(() -> prodClient.downloadBinary(URL, "tweet-1", "media-1"))
+                .isInstanceOf(NonRetryableException.class)
+                .hasMessageContaining("contentLength=" + (productionCapBytes + 1));
+        prodServer.verify();
+    }
+
+    /** Story 10.10 review patch: 生产默认 cap 口径 — 无 Content-Length → NonRetryable (未知大小终态). */
+    @Test
+    void shouldRejectUnknownSizeWithProductionCap_whenContentLengthMissing() {
+        long productionCapBytes = 10L * 1024 * 1024;
+        RestClient.Builder builder = RestClient.builder();
+        MockRestServiceServer prodServer = MockRestServiceServer.bindTo(builder).build();
+        MediaDownloadClient prodClient = new MediaDownloadClient(builder.build(), productionCapBytes,
+                Duration.ZERO, TestSlowOperationRecorder.create());
+        prodServer.expect(once(), requestTo(URL))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess(new byte[16], MediaType.APPLICATION_OCTET_STREAM));
+
+        assertThatThrownBy(() -> prodClient.downloadBinary(URL, "tweet-1", "media-1"))
+                .isInstanceOf(NonRetryableException.class)
+                .hasMessageContaining("无 Content-Length(未知大小)");
+        prodServer.verify();
     }
 }

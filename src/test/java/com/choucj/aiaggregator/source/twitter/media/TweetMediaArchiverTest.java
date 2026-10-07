@@ -346,8 +346,12 @@ class TweetMediaArchiverTest {
                 .containsExactly(true, false);
     }
 
+    /**
+     * Story 10.10: VIDEO 走严格下载主链路 — variant 选择 + ftyp 校验落盘 + download=SUCCEEDED
+     * + 证据字段 (原 Story 7.3 元数据跳过行为已由 VIDEO 下载化取代)。
+     */
     @Test
-    void shouldSkipVideoWithMetadataArchiveAndSpecifiedReason() {
+    void shouldDownloadVideoAndUpdateSidecar() {
         TweetMedia video = TweetMedia.builder()
                 .id("video-1")
                 .type(TweetMediaType.VIDEO)
@@ -366,26 +370,36 @@ class TweetMediaArchiverTest {
                                 .build()))
                 .build();
         writer.writeSidecar("tweet-5", PUBLISHED_AT, List.of(video));
+        byte[] mp4Bytes = new byte[]{0, 0, 0, 24, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm', 0, 0, 0, 0};
+        when(downloadClient.downloadBinary(eq("https://example.com/video.mp4"), eq("tweet-5"), eq("video-1")))
+                .thenReturn(new MediaDownloadClient.DownloadResult(mp4Bytes, "video/mp4"));
 
         TweetMediaArchiver.ArchiveResult result = archiver.archiveMedia("tweet-5", PUBLISHED_AT, List.of(video));
 
-        assertThat(result.skipCount()).isEqualTo(1);
+        assertThat(result.successCount()).isEqualTo(1);
+        assertThat(result.skipCount()).isZero();
         assertThat(result.mediaStatuses()).singleElement()
-                .satisfies(status -> assertThat(status.failureReason())
-                        .isEqualTo("video 元数据已归档，variantCount=1，下载待 Story 8.2 spike"));
-        verify(downloadClient, never()).downloadBinary(eq(video.getSourceUrl()), eq("tweet-5"), eq("video-1"));
+                .satisfies(status -> {
+                    assertThat(status.status()).isEqualTo(MediaDownloadStatus.DOWNLOADED);
+                    assertThat(status.localPath()).startsWith("media/twitter/2026-08-02/tweet-5/video-1-");
+                });
         MediaArchiveRecord record = writer.readSidecar("tweet-5", PUBLISHED_AT).orElseThrow();
         TweetMedia archived = record.getMedia().get(0);
-        assertThat(archived.getDownloadStatus()).isEqualTo(MediaDownloadStatus.SKIPPED);
-        assertThat(archived.getFailureReason()).isEqualTo("视频/GIF 复现路径待 Story 8.2 spike 决定，暂不下载");
-        // AC1: 元数据保留
+        assertThat(archived.getDownloadStatus()).isEqualTo(MediaDownloadStatus.DOWNLOADED);
+        assertThat(archived.getDownload().getStatus()).isEqualTo(MediaPhaseStatus.SUCCEEDED);
+        // 证据字段 (Story 10.10)
+        assertThat(archived.getFileSizeBytes()).isEqualTo((long) mp4Bytes.length);
+        assertThat(archived.getDownloadedContentType()).isEqualTo("video/mp4");
+        // 元数据保留
         assertThat(archived.getPreviewImageUrl()).isEqualTo("https://example.com/thumb.jpg");
         assertThat(archived.getWidth()).isEqualTo(1440);
         assertThat(archived.getHeight()).isEqualTo(2560);
         assertThat(archived.getVariants()).hasSize(1);
-        // AC4: 码率/格式摘要写入 providerRawSummary, 不含 URL
+        // 码率/格式摘要写入 providerRawSummary, 不含 URL
         assertThat(archived.getProviderRawSummary()).isEqualTo(
                 "video:variants=1,maxBitrate=832000,formats=video/mp4");
+        // 归档文件真实落盘
+        assertThat(Files.exists(tempDir.resolve(archived.getLocalPath()))).isTrue();
     }
 
     @Test
@@ -440,7 +454,7 @@ class TweetMediaArchiverTest {
         TweetMediaArchiver.ArchiveResult result = archiver.archiveMedia("tweet-r1", PUBLISHED_AT, List.of(photo, video));
 
         assertThat(result.successCount()).isEqualTo(1);
-        assertThat(result.skipCount()).isEqualTo(1);
+        assertThat(result.failCount()).isEqualTo(1);
         @SuppressWarnings("unchecked")
         org.mockito.ArgumentCaptor<List<com.choucj.aiaggregator.source.twitter.media.model.MediaRuntimeItem>> captor =
                 org.mockito.ArgumentCaptor.forClass(List.class);
@@ -455,12 +469,12 @@ class TweetMediaArchiverTest {
             assertThat(item.getDownloadStatus()).isEqualTo(MediaDownloadStatus.DOWNLOADED);
             assertThat(item.getLocalPath()).startsWith("media/twitter/2026-08-02/tweet-r1/");
         });
-        // VIDEO: SKIPPED + failureReason + type 对齐
+        // Story 10.10: VIDEO 无合法候选 (variants 空) → FAILED + 终态失败原因
         assertThat(snapshot).anySatisfy(item -> {
             assertThat(item.getMediaId()).isEqualTo("video-r1");
             assertThat(item.getType()).isEqualTo(TweetMediaType.VIDEO);
-            assertThat(item.getDownloadStatus()).isEqualTo(MediaDownloadStatus.SKIPPED);
-            assertThat(item.getFailureReason()).contains("Story 8.2");
+            assertThat(item.getDownloadStatus()).isEqualTo(MediaDownloadStatus.FAILED);
+            assertThat(item.getFailureReason()).contains("无合法 mp4 下载候选");
         });
     }
 

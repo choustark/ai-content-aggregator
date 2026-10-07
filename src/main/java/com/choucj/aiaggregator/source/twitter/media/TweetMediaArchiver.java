@@ -34,19 +34,27 @@ import java.util.stream.Collectors;
 /**
  * Story 7.2/7.3: X 推文媒体下载与归档编排器.
  *
- * <p>PHOTO 类型下载图片到本地 + sidecar 回写 (Story 7.2); VIDEO/GIF 类型只归档元数据到 sidecar
- * (previewImageUrl + variants + width/height + 码率摘要), 标记 {@link MediaDownloadStatus#SKIPPED},
- * <b>不下载二进制</b> (复现路径待 Story 8.2 spike 决定); UNKNOWN 类型直接 SKIPPED (Story 7.3).
+ * <p>PHOTO 类型下载图片到本地 + sidecar 回写 (Story 7.2); <b>Story 10.10: VIDEO 从 GIF 元数据分支
+ * 拆出</b> — variants 先按 MIME 白名单 (video/mp4) 过滤, 再确定性选最高码率候选
+ * ({@link VideoVariantSelector}), 经 {@link MediaDownloadClient} 严格下载 (Content-Length 预检 +
+ * readBounded 硬上限), mp4 {@code ftyp} 魔数校验通过后落盘并回写 {@code download=SUCCEEDED} 与
+ * 文件证据字段 (fileSizeBytes/downloadedContentType); 任何"无合法候选/未知大小/超限/不可访问/校验失败"
+ * 一律 FAILED_TERMINAL 终态、不自动重试, 经 failCount → 10.7 文章失败收敛。GIF 保持元数据归档
+ * (DEFERRED 语义零变化); UNKNOWN 类型直接 SKIPPED (Story 7.3).
  * 每个媒体独立 try-catch, 单个失败不阻塞其他媒体处理 (AD-5 单媒体失败降级).
  *
  * <p><b>关键设计:</b>
  * <ul>
- *   <li><b>确定性文件名</b> — {@code {sanitizedMediaId}.{extFromUrl}}, ext 从 sourceUrl 路径段提取, fallback jpg</li>
- *   <li><b>幂等跳过 (Story 10.8 双校验)</b> — 本地文件存在非零 <b>且</b> sidecar download 阶段
- *       SUCCEEDED 才跳过 HTTP 下载 (sidecar 与归档文件不变); 下载内容校验非空 + JPEG/PNG/WebP 魔数</li>
+ *   <li><b>确定性文件名</b> — PHOTO {@code {sanitizedMediaId}.{extFromUrl}}, ext 从 sourceUrl 路径段提取,
+ *       fallback jpg; VIDEO 统一 {@code .mp4} (内容已经 ftyp 校验)</li>
+ *   <li><b>幂等跳过 (Story 10.8/10.10 双校验)</b> — 本地文件存在非零 <b>且</b> sidecar download 阶段
+ *       SUCCEEDED 才跳过 HTTP 下载 (sidecar 与归档文件不变); PHOTO 内容校验非空 + JPEG/PNG/WebP 魔数,
+ *       VIDEO 内容校验非空 + mp4 ftyp 魔数 (offset 4-7)</li>
  *   <li><b>sidecar 回写</b> — 通过 {@link TweetMediaArchiveWriter#updateMedia} 增量回写, 不覆盖其他字段</li>
- *   <li><b>VIDEO/GIF 元数据归档</b> — 写 previewImageUrl/variants/width/height/order/码率摘要,
- *       downloadStatus=SKIPPED, 不调用 MediaDownloadClient (Story 7.3, AD-6)</li>
+ *   <li><b>GIF 元数据归档</b> — 写 previewImageUrl/variants/width/height/order/码率摘要,
+ *       downloadStatus=SKIPPED, 不调用 MediaDownloadClient (Story 7.3, AD-6; 行为零变化)</li>
+ *   <li><b>VIDEO 选择一次性确定</b> — 选择在下载前完成, 选中候选失败不回退次优候选
+ *       (Story 10.10 OQ1 裁定: 可确定性重放 + 失败可见性最高)</li>
  *   <li><b>集成开关</b> — 复用 {@code twitter.media.enabled}, 与 TweetMediaArchiveWriter 同生同灭</li>
  *   <li><b>Redis 运行时快照</b> — 归档完成后聚合状态摘要写入 {@code tweet:{id}:media} (Story 7.4,
  *       软失败不阻塞归档; sidecar 是权威源, Redis 是运行时恢复辅助源)</li>
@@ -65,8 +73,8 @@ public class TweetMediaArchiver {
     private static final int MEDIA_ID_MAX_LENGTH = 80;
     private static final int HASH_LENGTH = 8;
 
-    /** Story 7.3: VIDEO/GIF 复现路径待 Spike 决定的固定跳过原因. */
-    private static final String VIDEO_GIF_SKIP_REASON = "视频/GIF 复现路径待 Story 8.2 spike 决定，暂不下载";
+    /** Story 7.3: GIF 复现路径待 Spike 决定的固定跳过原因 (Story 10.10: GIF 行为零变化, 文案不变). */
+    private static final String GIF_SKIP_REASON = "视频/GIF 复现路径待 Story 8.2 spike 决定，暂不下载";
 
     /** Story 7.3: variant 摘要 code point 上限 (N2 + R3-1). */
     private static final int VARIANT_SUMMARY_MAX_LENGTH = 200;
@@ -109,13 +117,15 @@ public class TweetMediaArchiver {
     }
 
     /**
-     * 归档推文媒体: 下载所有 PHOTO 类型图片到本地, 更新 sidecar 状态.
+     * 归档推文媒体: 下载 PHOTO 图片与 VIDEO mp4 候选到本地, 更新 sidecar 状态.
      *
-     * <p>处理逻辑:
+     * <p>处理逻辑 (Story 10.10):
      * <ol>
-     *   <li>过滤 PHOTO + allowDownload=true 的媒体</li>
-     *   *li>非 PHOTO → SKIPPED (Story 7.3 处理)</li>
-     *   <li>每个 PHOTO 独立 try-catch, 下载并保存文件</li>
+     *   <li>PHOTO + allowDownload=true → 严格下载 + 图片魔数校验 (Story 10.8)</li>
+     *   <li>VIDEO → variant 确定性选择 + 严格下载 + mp4 ftyp 校验 (Story 10.10)</li>
+     *   <li>GIF → 元数据归档, 不下载 (Story 7.3, 行为零变化)</li>
+     *   <li>UNKNOWN 等其他类型 → SKIPPED</li>
+     *   <li>每个媒体独立 try-catch, 单个失败不阻塞其他媒体 (AD-5)</li>
      *   <li>通过 {@link TweetMediaArchiveWriter#updateMedia} 回写 sidecar</li>
      * </ol>
      *
@@ -149,11 +159,33 @@ public class TweetMediaArchiver {
                 continue;
             }
 
-            if (m.getType() == TweetMediaType.VIDEO || m.getType() == TweetMediaType.GIF) {
-                // Story 7.3: VIDEO/GIF 归档元数据到 sidecar, 不下载二进制
+            if (m.getType() == TweetMediaType.VIDEO) {
+                // Story 10.10: VIDEO 走「幂等双校验 → 选择 → 严格下载 → ftyp 校验 → 落盘 → 证据回写」主链路,
+                // 失败经 logFailedDownload 终态 (FAILED_TERMINAL, 不自动重试)
                 String mediaId = effectiveMediaId(tweetId, m, mediaIndex);
                 try {
-                    archiveVideoOrGifMetadata(tweetId, effectivePublishedAt, m, mediaId, mediaIndex);
+                    String localPath = downloadAndSaveVideo(tweetId, effectivePublishedAt, archiveDir, m,
+                            mediaId, mediaIndex, sidecarStateById.get(mediaId));
+                    statuses.add(MediaArchiveStatus.downloaded(mediaId, localPath));
+                    successCount.incrementAndGet();
+                    saveRuntimeSnapshot(tweetId, buildRuntimeItems(tweetId, media, statuses));
+                } catch (RuntimeException e) {
+                    // AC5: 单个 VIDEO 失败不阻塞同推文其他媒体 (AD-5); 所有失败 (含网络 Retryable)
+                    // 一律终态、不重试, 经 failCount → 10.7 文章失败收敛
+                    // (受检异常已在内层全部包装为 RuntimeException, 口径与 PHOTO/GIF 分支一致)
+                    failCount.incrementAndGet();
+                    String reason = logFailedDownload(tweetId, effectivePublishedAt, m, mediaId, mediaIndex, e);
+                    statuses.add(MediaArchiveStatus.failed(mediaId, reason, e instanceof RetryableException));
+                    saveRuntimeSnapshot(tweetId, buildRuntimeItems(tweetId, media, statuses));
+                }
+                continue;
+            }
+
+            if (m.getType() == TweetMediaType.GIF) {
+                // Story 7.3: GIF 归档元数据到 sidecar, 不下载二进制 (Story 10.10: 行为零变化)
+                String mediaId = effectiveMediaId(tweetId, m, mediaIndex);
+                try {
+                    archiveGifMetadata(tweetId, effectivePublishedAt, m, mediaId, mediaIndex);
                     int variantCount = sanitizedVariants(m.getVariants()).size();
                     String reason = m.getType().name().toLowerCase()
                             + " 元数据已归档，variantCount=" + variantCount + "，下载待 Story 8.2 spike";
@@ -161,16 +193,13 @@ public class TweetMediaArchiver {
                     skipCount.incrementAndGet();
                     saveRuntimeSnapshot(tweetId, buildRuntimeItems(tweetId, media, statuses));
                 } catch (RuntimeException e) {
-                    // AC5: 单个 VIDEO/GIF 元数据写入失败不阻塞同推文其他媒体 (AD-5)
-                    log.warn("VIDEO/GIF 元数据归档失败, 继续处理后续媒体: tweetId={}, mediaId={}, reason={}",
+                    // AC5: 单个 GIF 元数据写入失败不阻塞同推文其他媒体 (AD-5)
+                    log.warn("GIF 元数据归档失败, 继续处理后续媒体: tweetId={}, mediaId={}, reason={}",
                             tweetId, mediaId,
                             TextTruncateUtil.truncateForLog(TextTruncateUtil.getRootMessage(e), 200));
                     statuses.add(MediaArchiveStatus.failed(mediaId,
                             TextTruncateUtil.truncateForLog(TextTruncateUtil.getRootMessage(e), 200),
                             e instanceof RetryableException));
-                    if (m.getType() == TweetMediaType.VIDEO) {
-                        failCount.incrementAndGet();
-                    }
                     saveRuntimeSnapshot(tweetId, buildRuntimeItems(tweetId, media, statuses));
                 }
                 continue;
@@ -373,6 +402,168 @@ public class TweetMediaArchiver {
         return localPath;
     }
 
+    /**
+     * Story 10.10: 下载单个 VIDEO 候选并保存到本地, 然后回写 download=SUCCEEDED + 文件证据字段.
+     *
+     * <p>主链路: 幂等双校验前置 (本地文件非零 + sidecar download=SUCCEEDED 才跳过, 与 PHOTO 同口径;
+     * 即使 variants 退化为空/全非 mp4, 已成功媒体仍须幂等跳过) → variant 确定性选择
+     * (MIME 过滤 + bitrate 降序 + URL tie-break, 一次性确定不回退) →
+     * {@link MediaDownloadClient} 严格下载 (Content-Length 预检含未知大小终态 + readBounded 硬上限)
+     * → 非空 + mp4 {@code ftyp} 魔数校验 (先校验后落盘) → .tmp + atomic move 落盘
+     * → sidecar 回写 localPath/fileSizeBytes/downloadedContentType/码率摘要 + download=SUCCEEDED
+     * (回写未命中时删除已落盘文件并终态失败, 对齐 GIF 回写未命中口径)。
+     *
+     * <p>任何环节失败抛异常交由调用方 {@code logFailedDownload} 终态化 (FAILED_TERMINAL/attempt=1/
+     * nextRetryAt=null, 不自动重试)。残留口径: 校验失败不落盘 (无文件/.tmp); 写入/move 失败清理
+     * .tmp; sidecar 回写未命中删除已落盘最终文件。
+     */
+    private String downloadAndSaveVideo(String tweetId, LocalDateTime publishedAt,
+                                        Path archiveDir, TweetMedia media, String mediaId, int mediaIndex,
+                                        TweetMedia sidecarState) {
+        long startNanos = System.nanoTime();
+        // 幂等双校验前置 (与 PHOTO 同口径): 文件名不依赖选中候选, 可在 select 之前判定 —
+        // 文件存在非零 + sidecar download=SUCCEEDED → 跳过下载, sidecar 与归档文件不变
+        // (不回退既有成功字段); 文件缺失/零字节/阶段非 SUCCEEDED → 重新下载
+        String filename = resolveVideoFilename(mediaId, mediaIndex);
+        Path filePath = archiveDir.resolve(filename);
+        String localPath = resolveLocalPath(tweetId, publishedAt, filename);
+        try {
+            if (Files.exists(filePath) && Files.size(filePath) > 0) {
+                if (downloadPhaseSucceeded(sidecarState)) {
+                    log.info("VIDEO 已校验(文件非零+download=SUCCEEDED),幂等跳过下载: tweetId={}, mediaId={}, file={}",
+                            tweetId, mediaId, filePath.getFileName());
+                    return localPath;
+                }
+                log.info("本地 VIDEO 文件存在但 download 阶段非 SUCCEEDED, 重新下载校验: tweetId={}, mediaId={}",
+                        tweetId, mediaId);
+            }
+        } catch (IOException e) {
+            log.warn("幂等检查 VIDEO 文件状态失败, 继续尝试下载: tweetId={}, mediaId={}, file={}",
+                    tweetId, mediaId, filePath.getFileName());
+        }
+
+        // 选择在下载前一次性确定; 选中候选失败不回退次优候选 (Story 10.10 OQ1 裁定)
+        TweetMediaVariant selected = VideoVariantSelector.select(media.getVariants())
+                .orElseThrow(() -> new NonRetryableException("VIDEO 无合法 mp4 下载候选: tweetId=" + tweetId
+                        + " mediaId=" + mediaId
+                        + " variantCount=" + (media.getVariants() == null ? 0 : media.getVariants().size())
+                        + " (仅 video/mp4 可作为候选)", null));
+
+        try {
+            Files.createDirectories(archiveDir);
+        } catch (IOException e) {
+            throw new NonRetryableException("媒体归档目录创建失败: tweetId=" + tweetId
+                    + " dir=" + archiveDir, e);
+        }
+
+        MediaDownloadClient.DownloadResult result =
+                downloadClient.downloadBinary(selected.getUrl(), tweetId, mediaId);
+        // 先校验后落盘 — 损坏字节不污染归档目录
+        if (result.bytes() == null || result.bytes().length == 0) {
+            throw new NonRetryableException("VIDEO 下载内容为空: tweetId=" + tweetId
+                    + " mediaId=" + mediaId);
+        }
+        if (!hasMp4MagicNumber(result.bytes())) {
+            throw new NonRetryableException("VIDEO 下载内容校验失败(非 mp4 ftyp 魔数): tweetId="
+                    + tweetId + " mediaId=" + mediaId + " sizeBytes=" + result.bytes().length);
+        }
+        Path tmpFile = archiveDir.resolve(filename + ".tmp");
+        try {
+            Files.write(tmpFile, result.bytes());
+            Files.move(tmpFile, filePath, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        } catch (IOException e) {
+            // 写入/move 失败清理残留 .tmp (清理失败不掩盖原始写入异常)
+            try {
+                Files.deleteIfExists(tmpFile);
+            } catch (IOException cleanupEx) {
+                log.warn("VIDEO 写入失败后 .tmp 清理失败: tweetId={}, mediaId={}, tmp={}",
+                        tweetId, mediaId, tmpFile);
+            }
+            throw new NonRetryableException("VIDEO 文件写入失败: tweetId=" + tweetId
+                    + " mediaId=" + mediaId + " file=" + filePath, e);
+        }
+
+        boolean sidecarUpdated = updateVideoSidecarSuccess(tweetId, publishedAt, media, mediaId, mediaIndex,
+                localPath, (long) result.bytes().length, result.contentType());
+        if (!sidecarUpdated) {
+            // 回写未命中 (sidecar 缺失/mediaId 未命中): 删除已落盘最终文件, 不留无 sidecar 证据的孤儿文件
+            try {
+                Files.deleteIfExists(filePath);
+            } catch (IOException cleanupEx) {
+                log.warn("VIDEO sidecar 回写未命中后文件清理失败: tweetId={}, mediaId={}, file={}",
+                        tweetId, mediaId, filePath);
+            }
+            throw new NonRetryableException("VIDEO sidecar 回写未命中: tweetId=" + tweetId
+                    + " mediaId=" + mediaId + " mediaIndex=" + mediaIndex, null);
+        }
+        long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
+        log.info("VIDEO 保存成功: tweetId={}, mediaId={}, variantUrl={}, fileSize={}bytes, "
+                        + "contentType={}, localPath={}, 耗时={}ms",
+                tweetId, mediaId,
+                TextTruncateUtil.truncateForLog(selected.getUrl(), URL_LOG_MAX_LENGTH),
+                result.bytes().length, result.contentType(), localPath, elapsedMs);
+        return localPath;
+    }
+
+    /**
+     * Story 10.10: VIDEO 成功回写 — 元数据保真 (previewImageUrl/variants/width/height/order/码率摘要)
+     * + localPath + downloadStatus=DOWNLOADED + 证据字段 (fileSizeBytes/downloadedContentType)
+     * + 三阶段 download=SUCCEEDED (幂等跳过权威依据) + failureReason 清空 (fail-then-succeed 不留残留)。
+     *
+     * @return true 回写命中; false sidecar 缺失或 mediaId 未命中 (调用方须删除已落盘文件并终态失败)
+     */
+    private boolean updateVideoSidecarSuccess(String tweetId, LocalDateTime publishedAt,
+                                              TweetMedia media, String mediaId, int mediaIndex, String localPath,
+                                              long fileSizeBytes, String downloadedContentType) {
+        return updateSidecar(tweetId, publishedAt, media, mediaId, mediaIndex,
+                original -> {
+                    TweetMedia updated = original.toBuilder()
+                            .id(mediaId)
+                            .type(media.getType())
+                            .previewImageUrl(media.getPreviewImageUrl())
+                            .variants(media.getVariants() != null ? media.getVariants() : List.of())
+                            .width(media.getWidth())
+                            .height(media.getHeight())
+                            .order(media.getOrder())
+                            .providerRawSummary(buildVariantSummary(media.getType(), media.getVariants()))
+                            .localPath(localPath)
+                            .fileSizeBytes(fileSizeBytes)
+                            .downloadedContentType(downloadedContentType)
+                            .downloadStatus(MediaDownloadStatus.DOWNLOADED)
+                            .failureReason(null)
+                            .build();
+                    int prevAttempt = original.getDownload() != null
+                            ? Math.max(original.getDownload().getAttempt(), 0) : 0;
+                    updated.setDownload(MediaPhaseState.builder()
+                            .status(MediaPhaseStatus.SUCCEEDED)
+                            .attempt(prevAttempt + 1)
+                            .nextRetryAt(null)
+                            .updatedAt(LocalDateTime.now())
+                            .build());
+                    return updated;
+                });
+    }
+
+    /**
+     * Story 10.10: VIDEO 确定性文件名 — {@code {sanitizedMediaId}-{shortHash}.mp4}。
+     * 统一 .mp4 扩展: 白名单仅 video/mp4 且内容已经 ftyp 校验, 不信任 variant URL 扩展。
+     */
+    private String resolveVideoFilename(String mediaId, int mediaIndex) {
+        String safeId = sanitizeFilename(mediaId);
+        return truncateBasename(safeId) + "-" + shortHash(mediaId + "|" + mediaIndex) + ".mp4";
+    }
+
+    /**
+     * Story 10.10: mp4 魔数识别 — ISO BMFF {@code ftyp} box 位于字节 4-7 (offset 0-3 为 box size),
+     * 校验前 12 字节足够 (Design Notes)。最短识别长度 12 字节, 与图片魔数口径一致。
+     */
+    static boolean hasMp4MagicNumber(byte[] bytes) {
+        if (bytes == null || bytes.length < 12) {
+            return false;
+        }
+        return bytes[4] == 'f' && bytes[5] == 't' && bytes[6] == 'y' && bytes[7] == 'p';
+    }
+
     /** Story 10.8: sidecar download 阶段权威判据 — 阶段对象存在且 status=SUCCEEDED. */
     private static boolean downloadPhaseSucceeded(TweetMedia sidecarState) {
         return sidecarState != null
@@ -451,7 +642,7 @@ public class TweetMediaArchiver {
     }
 
     /**
-     * Story 7.3: 归档 VIDEO/GIF 元数据到 sidecar.
+     * Story 7.3: 归档 GIF 元数据到 sidecar (Story 10.10: VIDEO 已拆出, GIF 行为零变化).
      *
      * <p>构造 mutation 写入 previewImageUrl/variants/width/height/order/providerRawSummary(码率摘要) +
      * downloadStatus=SKIPPED + failureReason (Story 8.2 spike 决定复现路径). 不调用 MediaDownloadClient,
@@ -460,8 +651,8 @@ public class TweetMediaArchiver {
      *
      * @param publishedAt 推文发布时间,可为 null(null 时使用当前时刻)
      */
-    private void archiveVideoOrGifMetadata(String tweetId, LocalDateTime publishedAt,
-                                            TweetMedia media, String mediaId, int mediaIndex) {
+    private void archiveGifMetadata(String tweetId, LocalDateTime publishedAt,
+                                    TweetMedia media, String mediaId, int mediaIndex) {
         String variantSummary = buildVariantSummary(media.getType(), media.getVariants());
         int variantCount = media.getVariants() == null ? 0 : media.getVariants().size();
         Long maxBitrate = maxBitrate(media.getVariants());
@@ -478,15 +669,15 @@ public class TweetMediaArchiver {
                         .order(media.getOrder())
                         .providerRawSummary(variantSummary)
                         .downloadStatus(MediaDownloadStatus.SKIPPED)
-                        .failureReason(VIDEO_GIF_SKIP_REASON)
+                        .failureReason(GIF_SKIP_REASON)
                         .build());
         if (!updated) {
-            throw new NonRetryableException("VIDEO/GIF sidecar 回写未命中: tweetId=" + tweetId
+            throw new NonRetryableException("GIF sidecar 回写未命中: tweetId=" + tweetId
                     + " mediaId=" + mediaId + " mediaIndex=" + mediaIndex, null);
         }
 
         // W11: 仅输出标识符 + 摘要, 不含完整 variant URL / previewImageUrl 全文 (AC8, N4)
-        log.info("VIDEO/GIF 元数据已归档: tweetId={}, mediaId={}, type={}, variantCount={}, maxBitrate={}, hasPreview={}",
+        log.info("GIF 元数据已归档: tweetId={}, mediaId={}, type={}, variantCount={}, maxBitrate={}, hasPreview={}",
                 tweetId, mediaId, media.getType(), variantCount,
                 maxBitrate != null ? maxBitrate : 0L, hasPreview);
     }
@@ -681,6 +872,10 @@ public class TweetMediaArchiver {
                         TweetMedia failed = original.toBuilder()
                                 .id(mediaId)
                                 .failureReason(failureReason)
+                                // Story 10.10 review patch: succeed-then-fail 清空文件证据字段,
+                                // 不留指向已失效/不存在文件的证据 (PHOTO 恒为 null, 无副作用)
+                                .fileSizeBytes(null)
+                                .downloadedContentType(null)
                                 .build();
                         String errorClass = e instanceof RetryableException
                                 ? "RETRYABLE" : e instanceof NonRetryableException ? "TERMINAL" : "UNKNOWN";
