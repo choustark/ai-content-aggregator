@@ -73,6 +73,14 @@ public record MediaPreparationResult(int successCount, int skipCount, int failCo
             return new MediaPreparationStatus(mediaId, MediaUploadStatus.UPLOADED, wechatUrl, null, false, null);
         }
 
+        /**
+         * Story 10.11: VIDEO 永久素材上传成功 — mediaId 经 sidecar {@code wechatVideoMediaId}
+         * 落盘, 状态复用 UPLOADED 通道供生成器既有 successCount/terminal 分流消费。
+         */
+        static MediaPreparationStatus uploadedVideo(String mediaId) {
+            return new MediaPreparationStatus(mediaId, MediaUploadStatus.UPLOADED, null, null, false, null);
+        }
+
         static MediaPreparationStatus skipped(String mediaId, String reason) {
             return new MediaPreparationStatus(mediaId, MediaUploadStatus.SKIPPED, null, reason, false, null);
         }

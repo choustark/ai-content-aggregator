@@ -99,6 +99,13 @@ public class TweetMedia {
      */
     private String wechatMediaId;
 
+    /**
+     * 微信永久视频素材 media_id；仅 VIDEO 且 wechatPrepare=SUCCEEDED 时有值 (Story 10.11 填)。
+     * <p>不复用 PHOTO 的 {@code wechatUrl}（值语义不同：mediaId vs 正文图片 URL），装配嵌入谓词
+     * 按本字段判定，避免误伤 PHOTO。旧 sidecar 缺该字段时反序列化为 null（向后兼容，读取容错）。
+     */
+    private String wechatVideoMediaId;
+
     /** 下载阶段权威状态；旧 sidecar 缺失时由 Writer 兼容回填。 */
     @Builder.Default
     private MediaPhaseState download = MediaPhaseState.notStarted();

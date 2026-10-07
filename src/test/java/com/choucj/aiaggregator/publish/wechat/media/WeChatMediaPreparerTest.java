@@ -6,6 +6,7 @@ import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.publish.storage.TweetMediaArchiveWriter;
 import com.choucj.aiaggregator.publish.storage.config.ArchiverProperties;
 import com.choucj.aiaggregator.publish.storage.MediaArchiveRecord;
+import com.choucj.aiaggregator.publish.wechat.config.WeChatProperties;
 import com.choucj.aiaggregator.source.twitter.config.TwitterMediaProperties;
 import com.choucj.aiaggregator.source.twitter.model.MediaDownloadStatus;
 import com.choucj.aiaggregator.source.twitter.model.MediaUploadStatus;
@@ -32,6 +33,7 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -56,6 +58,12 @@ class WeChatMediaPreparerTest {
 
     @Mock
     WeChatBodyImageUploadProbe uploadProbe;
+
+    @Mock
+    WeChatVideoMediaAdapter videoAdapter;
+
+    /** Story 10.11 测试用: VIDEO 永久素材 media_id (前 6 位以内落日志, 测试内为固定假值). */
+    private static final String VIDEO_MEDIA_ID = "wxvid001-media-id";
 
     TweetMediaArchiveWriter writer;
     WeChatMediaPreparer preparer;
@@ -683,7 +691,278 @@ class WeChatMediaPreparerTest {
         assertThat(sidecarMedia.getFailureReason()).isEqualTo("preparer 细粒度原因");
     }
 
+    // ===== Story 10.11: VIDEO 永久素材生产分支 (I/O 矩阵) =====
+
+    /** I/O 矩阵「正常上传引用」: 上传成功 → mediaId 写回 + wechatPrepare=SUCCEEDED. */
+    @Test
+    void should_upload_video_and_writeback_media_id_when_local_file_ready() throws IOException {
+        writeFile("video.mp4");
+        TweetMedia video = video("media-v", "video.mp4").build();
+        writer.writeSidecar(TWEET_ID, PUBLISHED_AT, List.of(video));
+        WeChatMediaPreparer videoPreparer = videoPreparer();
+        when(videoAdapter.uploadPermanentVideo(any(Path.class), anyString(), anyString()))
+                .thenReturn(uploadedVideo());
+
+        MediaPreparationResult result = videoPreparer.prepareMedia(
+                TWEET_ID, PUBLISHED_AT, List.of(video), "测试文章标题", "测试文章简介");
+
+        assertThat(result.successCount()).isEqualTo(1);
+        assertThat(result.skipCount()).isZero();
+        assertThat(result.failCount()).isZero();
+        assertThat(result.mediaStatuses().get(0).status()).isEqualTo(MediaUploadStatus.UPLOADED);
+
+        // OQ1: title = 文章标题 + tweetId 后缀; description = 文章简介
+        org.mockito.ArgumentCaptor<String> title = org.mockito.ArgumentCaptor.forClass(String.class);
+        org.mockito.ArgumentCaptor<String> description = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(videoAdapter).uploadPermanentVideo(any(Path.class), title.capture(), description.capture());
+        assertThat(title.getValue()).contains("测试文章标题").contains("tw-" + TWEET_ID);
+        assertThat(description.getValue()).isEqualTo("测试文章简介");
+
+        TweetMedia sidecarMedia = readSidecarMedia("media-v");
+        assertThat(sidecarMedia.getUploadStatus()).isEqualTo(MediaUploadStatus.UPLOADED);
+        assertThat(sidecarMedia.getWechatVideoMediaId()).isEqualTo(VIDEO_MEDIA_ID);
+        assertThat(sidecarMedia.getWechatUrl()).isNull();
+        assertThat(sidecarMedia.getFailureReason()).isNull();
+        assertThat(sidecarMedia.getWechatPrepare()).isNotNull();
+        assertThat(sidecarMedia.getWechatPrepare().getStatus())
+                .isEqualTo(com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus.SUCCEEDED);
+        assertThat(sidecarMedia.getWechatPrepare().getAttempt()).isEqualTo(1);
+        assertThat(sidecarMedia.getWechatPrepare().getNextRetryAt()).isNull();
+    }
+
+    /** I/O 矩阵「幂等跳过」: 已有 mediaId + wechatPrepare=SUCCEEDED → 零上传请求, 成功字段不回退. */
+    @Test
+    void should_skip_video_upload_idempotently_when_sidecar_already_prepared() throws IOException {
+        writeFile("video.mp4");
+        TweetMedia video = video("media-v", "video.mp4")
+                .uploadStatus(MediaUploadStatus.UPLOADED)
+                .wechatVideoMediaId(VIDEO_MEDIA_ID)
+                .wechatPrepare(com.choucj.aiaggregator.source.twitter.model.MediaPhaseState.builder()
+                        .status(com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus.SUCCEEDED)
+                        .attempt(1)
+                        .updatedAt(PUBLISHED_AT)
+                        .build())
+                .build();
+        writer.writeSidecar(TWEET_ID, PUBLISHED_AT, List.of(video));
+
+        MediaPreparationResult result = videoPreparer().prepareMedia(
+                TWEET_ID, PUBLISHED_AT, List.of(video), null, null);
+
+        assertThat(result.skipCount()).isEqualTo(1);
+        assertThat(result.successCount()).isZero();
+        verifyNoInteractions(videoAdapter);
+        assertThat(result.mediaStatuses().get(0).failureReason()).contains("幂等跳过");
+        // 既有成功字段不回退
+        TweetMedia sidecarMedia = readSidecarMedia("media-v");
+        assertThat(sidecarMedia.getWechatVideoMediaId()).isEqualTo(VIDEO_MEDIA_ID);
+        assertThat(sidecarMedia.getWechatPrepare().getStatus())
+                .isEqualTo(com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus.SUCCEEDED);
+        assertThat(sidecarMedia.getUploadStatus()).isEqualTo(MediaUploadStatus.UPLOADED);
+    }
+
+    /** I/O 矩阵「环境阻断」: 40164 → ENVIRONMENT_BLOCKED 终态, 不重试. */
+    @Test
+    void should_write_environment_blocked_phase_when_video_adapter_throws_40164() throws IOException {
+        writeFile("video.mp4");
+        TweetMedia video = video("media-v", "video.mp4").build();
+        writer.writeSidecar(TWEET_ID, PUBLISHED_AT, List.of(video));
+        when(videoAdapter.uploadPermanentVideo(any(Path.class), anyString(), anyString()))
+                .thenThrow(new NonRetryableException(ErrorCode.WECHAT_ENVIRONMENT_BLOCKED,
+                        "微信 materialFileUpload(video) 失败: errcode=40164 invalid ip"));
+
+        MediaPreparationResult result = videoPreparer().prepareMedia(
+                TWEET_ID, PUBLISHED_AT, List.of(video), null, null);
+
+        assertThat(result.failCount()).isEqualTo(1);
+        assertThat(result.hasTerminalFailure()).isTrue();
+        assertThat(result.mediaStatuses().get(0).failureClass())
+                .isEqualTo(MediaPreparationResult.FailureClass.ENVIRONMENT_BLOCKED);
+        TweetMedia sidecarMedia = readSidecarMedia("media-v");
+        assertThat(sidecarMedia.getWechatPrepare().getStatus())
+                .isEqualTo(com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus.ENVIRONMENT_BLOCKED);
+        assertThat(sidecarMedia.getWechatPrepare().getNextRetryAt()).isNull();
+        assertThat(sidecarMedia.getWechatVideoMediaId()).isNull();
+    }
+
+    /** I/O 矩阵「临时错误」: Retryable (45009/网络) → RETRY_SCHEDULED + nextRetryAt 有限重试. */
+    @Test
+    void should_write_retry_scheduled_phase_when_video_adapter_throws_retryable() throws IOException {
+        writeFile("video.mp4");
+        TweetMedia video = video("media-v", "video.mp4").build();
+        writer.writeSidecar(TWEET_ID, PUBLISHED_AT, List.of(video));
+        when(videoAdapter.uploadPermanentVideo(any(Path.class), anyString(), anyString()))
+                .thenThrow(new RetryableException(ErrorCode.WECHAT_RATE_LIMITED,
+                        "微信 materialFileUpload(video) 失败: errcode=45009 reach max api daily quota limit"));
+
+        MediaPreparationResult result = videoPreparer().prepareMedia(
+                TWEET_ID, PUBLISHED_AT, List.of(video), null, null);
+
+        assertThat(result.failCount()).isEqualTo(1);
+        assertThat(result.hasRetryableFailure()).isTrue();
+        assertThat(result.mediaStatuses().get(0).retryable()).isTrue();
+        TweetMedia sidecarMedia = readSidecarMedia("media-v");
+        assertThat(sidecarMedia.getWechatPrepare().getStatus())
+                .isEqualTo(com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus.RETRY_SCHEDULED);
+        assertThat(sidecarMedia.getWechatPrepare().getAttempt()).isEqualTo(1);
+        assertThat(sidecarMedia.getWechatPrepare().getNextRetryAt()).isNotNull();
+        assertThat(sidecarMedia.getWechatPrepare().getErrorClass()).isEqualTo("RETRYABLE");
+        assertThat(sidecarMedia.getWechatVideoMediaId()).isNull();
+    }
+
+    /** I/O 矩阵「本地前置失败」: 文件缺失 → 不发起上传, FAILED_TERMINAL (NonRetryable). */
+    @Test
+    void should_mark_video_terminal_when_local_file_missing() {
+        TweetMedia video = video("media-v", "missing.mp4").build();
+        writer.writeSidecar(TWEET_ID, PUBLISHED_AT, List.of(video));
+
+        MediaPreparationResult result = videoPreparer().prepareMedia(
+                TWEET_ID, PUBLISHED_AT, List.of(video), null, null);
+
+        assertThat(result.failCount()).isEqualTo(1);
+        verifyNoInteractions(videoAdapter);
+        TweetMedia sidecarMedia = readSidecarMedia("media-v");
+        assertThat(sidecarMedia.getUploadStatus()).isEqualTo(MediaUploadStatus.FAILED);
+        assertThat(sidecarMedia.getFailureReason()).contains("local file missing");
+        assertThat(sidecarMedia.getWechatPrepare().getStatus())
+                .isEqualTo(com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus.FAILED_TERMINAL);
+        assertThat(sidecarMedia.getWechatPrepare().getErrorClass()).isEqualTo("TERMINAL");
+    }
+
+    /** I/O 矩阵「回写未命中」防御口径: sidecar 未命中该媒体 → 不记成功, FAILED + 可诊断原因. */
+    @Test
+    void should_mark_video_failed_defensively_when_sidecar_misses_media() throws IOException {
+        writeFile("video.mp4");
+        // sidecar 只有 photo 项 (已幂等成功), 传入 video 下标越界 → ref null → 本地就绪预检失败 (不调上传)
+        TweetMedia sidecarPhoto = photo("media-1", "photo1.png")
+                .uploadStatus(MediaUploadStatus.UPLOADED)
+                .wechatUrl(WECHAT_URL)
+                .build();
+        writer.writeSidecar(TWEET_ID, PUBLISHED_AT, List.of(sidecarPhoto));
+        TweetMedia inputVideo = video("media-v", "video.mp4").build();
+
+        MediaPreparationResult result = videoPreparer().prepareMedia(
+                TWEET_ID, PUBLISHED_AT, List.of(sidecarPhoto, inputVideo), null, null);
+
+        assertThat(result.failCount()).isEqualTo(1);
+        verifyNoInteractions(videoAdapter);
+        assertThat(result.mediaStatuses().get(1).failureReason()).contains("sidecar");
+    }
+
+    /** wechat.mp.video.enabled=false → VIDEO 保持 10.8 降级语义 (SKIPPED + video_embed_unverified). */
+    @Test
+    void should_fall_back_to_legacy_skip_when_video_preparation_disabled() {
+        TweetMedia video = video("media-v", "video.mp4").build();
+        writer.writeSidecar(TWEET_ID, PUBLISHED_AT, List.of(video));
+
+        MediaPreparationResult result = videoPreparerDisabled().prepareMedia(
+                TWEET_ID, PUBLISHED_AT, List.of(video), null, null);
+
+        assertThat(result.skipCount()).isEqualTo(1);
+        assertThat(result.failCount()).isZero();
+        verifyNoInteractions(videoAdapter);
+        assertThat(readSidecarMedia("media-v").getUploadStatus()).isEqualTo(MediaUploadStatus.SKIPPED);
+        assertThat(readSidecarMedia("media-v").getFailureReason()).contains("video_embed_unverified");
+    }
+
+    /** AC3 冻结: enabled=false 也不得盖写已 SUCCEEDED+mediaId 的 VIDEO — 幂等预检先于 enabled gate. */
+    @Test
+    void should_skip_video_idempotently_even_when_preparation_disabled() throws IOException {
+        writeFile("video.mp4");
+        TweetMedia video = video("media-v", "video.mp4")
+                .uploadStatus(MediaUploadStatus.UPLOADED)
+                .wechatVideoMediaId(VIDEO_MEDIA_ID)
+                .wechatPrepare(com.choucj.aiaggregator.source.twitter.model.MediaPhaseState.builder()
+                        .status(com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus.SUCCEEDED)
+                        .attempt(1)
+                        .updatedAt(PUBLISHED_AT)
+                        .build())
+                .build();
+        writer.writeSidecar(TWEET_ID, PUBLISHED_AT, List.of(video));
+
+        MediaPreparationResult result = videoPreparerDisabled().prepareMedia(
+                TWEET_ID, PUBLISHED_AT, List.of(video), null, null);
+
+        // 幂等跳过 + 零写回: SKIPPED 降级分支不得盖写 uploadStatus/failureReason
+        assertThat(result.skipCount()).isEqualTo(1);
+        verifyNoInteractions(videoAdapter);
+        assertThat(result.mediaStatuses().get(0).failureReason()).contains("幂等跳过");
+        TweetMedia sidecarMedia = readSidecarMedia("media-v");
+        assertThat(sidecarMedia.getUploadStatus()).isEqualTo(MediaUploadStatus.UPLOADED);
+        assertThat(sidecarMedia.getFailureReason()).isNull();
+        assertThat(sidecarMedia.getWechatVideoMediaId()).isEqualTo(VIDEO_MEDIA_ID);
+        assertThat(sidecarMedia.getWechatPrepare().getStatus())
+                .isEqualTo(com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus.SUCCEEDED);
+    }
+
+    /** OQ1: 长标题截断后 tw-{tweetId} 锚点必须完整保留 (不产出残段). */
+    @Test
+    void should_preserve_tweet_anchor_suffix_when_title_exceeds_limit() throws IOException {
+        writeFile("video.mp4");
+        TweetMedia video = video("media-v", "video.mp4").build();
+        writer.writeSidecar(TWEET_ID, PUBLISHED_AT, List.of(video));
+        when(videoAdapter.uploadPermanentVideo(any(Path.class), anyString(), anyString()))
+                .thenReturn(uploadedVideo());
+        String longTitle = "很长的文章标题".repeat(12);
+
+        videoPreparer().prepareMedia(TWEET_ID, PUBLISHED_AT, List.of(video), longTitle, "简介");
+
+        org.mockito.ArgumentCaptor<String> title = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(videoAdapter).uploadPermanentVideo(any(Path.class), title.capture(), anyString());
+        String value = title.getValue();
+        assertThat(value.endsWith("tw-" + TWEET_ID)).isTrue();
+        assertThat(value.codePoints().count()).isLessThanOrEqualTo(64);
+        assertThat(value).startsWith("很长的文章标题");
+    }
+
+    /** 10.11: 生成器级静态 helper 同步覆盖 VIDEO — 未成功 VIDEO 落 RETRY_SCHEDULED, GIF 仍不进入. */
+    @Test
+    void should_mark_sidecar_prepare_retry_scheduled_for_pending_video_not_gif() throws IOException {
+        writeFile("video.mp4");
+        TweetMedia pendingVideo = video("media-v", "video.mp4").build();
+        TweetMedia gif = TweetMedia.builder().id("media-g").type(TweetMediaType.GIF)
+                .downloadStatus(MediaDownloadStatus.SKIPPED).build();
+        writer.writeSidecar(TWEET_ID, PUBLISHED_AT, List.of(pendingVideo, gif));
+
+        boolean mutated = WeChatMediaPreparer.markSidecarPrepareRetryScheduled(
+                writer, TWEET_ID, PUBLISHED_AT,
+                new com.choucj.aiaggregator.task.queue.RetryPolicyProperties(),
+                "WECHAT_API_ERROR", "网络超时");
+
+        assertThat(mutated).isTrue();
+        assertThat(readSidecarMedia("media-v").getWechatPrepare().getStatus())
+                .isEqualTo(com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus.RETRY_SCHEDULED);
+        // GIF 保持 DEFERRED 语义不被触碰
+        assertThat(readSidecarMedia("media-g").getWechatPrepare().getStatus())
+                .isEqualTo(com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus.DEFERRED);
+    }
+
     // ===== helpers =====
+
+    private WeChatMediaPreparer videoPreparer() {
+        return new WeChatMediaPreparer(uploadProbe, Optional.of(writer),
+                new com.choucj.aiaggregator.task.queue.RetryPolicyProperties(),
+                videoAdapter, new WeChatProperties());
+    }
+
+    private WeChatMediaPreparer videoPreparerDisabled() {
+        WeChatProperties properties = new WeChatProperties();
+        properties.getVideo().setEnabled(false);
+        return new WeChatMediaPreparer(uploadProbe, Optional.of(writer),
+                new com.choucj.aiaggregator.task.queue.RetryPolicyProperties(),
+                videoAdapter, properties);
+    }
+
+    private TweetMedia.TweetMediaBuilder video(String id, String filename) {
+        return TweetMedia.builder()
+                .id(id)
+                .type(TweetMediaType.VIDEO)
+                .downloadStatus(MediaDownloadStatus.DOWNLOADED)
+                .localPath("media/twitter/2026-08-23/" + TWEET_ID + "/" + filename);
+    }
+
+    private static WeChatVideoMediaAdapter.UploadedVideo uploadedVideo() {
+        return new WeChatVideoMediaAdapter.UploadedVideo(VIDEO_MEDIA_ID, "video.mp4", 3, true, 1);
+    }
 
     private TweetMedia.TweetMediaBuilder photo(String id, String filename) {
         return TweetMedia.builder()

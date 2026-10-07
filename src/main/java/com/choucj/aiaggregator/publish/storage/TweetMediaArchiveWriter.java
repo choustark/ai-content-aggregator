@@ -382,12 +382,22 @@ public class TweetMediaArchiveWriter {
         if (allDeferredGif) {
             return true;
         }
-        boolean evidenceComplete = !required.isEmpty() && required.stream().allMatch(media ->
-                media.getDownload() != null && media.getWechatPrepare() != null
-                        && media.getDownload().getStatus() == MediaPhaseStatus.SUCCEEDED
-                        && media.getWechatPrepare().getStatus() == MediaPhaseStatus.SUCCEEDED
-                        && StringUtils.hasText(media.getWechatUrl())
-                        && renderedContent.contains(media.getWechatUrl()));
+        boolean evidenceComplete = !required.isEmpty() && required.stream().allMatch(media -> {
+            if (media.getDownload() == null || media.getWechatPrepare() == null
+                    || media.getDownload().getStatus() != MediaPhaseStatus.SUCCEEDED
+                    || media.getWechatPrepare().getStatus() != MediaPhaseStatus.SUCCEEDED) {
+                return false;
+            }
+            if (media.getType() == TweetMediaType.VIDEO) {
+                // Story 10.11: VIDEO 引用完整性 = renderedContent 包含该媒体的
+                // wechatVideoMediaId (候选 A 纯文本直嵌); 缺失/未嵌入 → fail-closed,
+                // articleReference 不推进, readiness gate 持续阻断, 草稿 0。
+                return StringUtils.hasText(media.getWechatVideoMediaId())
+                        && renderedContent.contains(media.getWechatVideoMediaId());
+            }
+            return StringUtils.hasText(media.getWechatUrl())
+                    && renderedContent.contains(media.getWechatUrl());
+        });
         if (!evidenceComplete) {
             return false;
         }

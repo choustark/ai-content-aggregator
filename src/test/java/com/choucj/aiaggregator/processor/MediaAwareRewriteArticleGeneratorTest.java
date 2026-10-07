@@ -110,7 +110,7 @@ class MediaAwareRewriteArticleGeneratorTest {
         var result = generator.generate(tweet);
 
         assertThat(result.article().getContent()).isEqualTo(REWRITTEN_MARKDOWN);
-        verify(preparer, never()).prepareMedia(anyString(), any(), anyList());
+        verify(preparer, never()).prepareMedia(anyString(), any(), anyList(), any(), any());
         verify(deliveryFailureCoordinator).converge(any(Article.class), eq("MEDIA_DOWNLOAD"),
                 eq("MEDIA_DOWNLOAD_FAILED"), anyString());
     }
@@ -124,7 +124,7 @@ class MediaAwareRewriteArticleGeneratorTest {
         when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
                 .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
         when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
-        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList(), any(), any()))
                 .thenReturn(new MediaPreparationResult(1, 0, 0, List.of()));
         when(writer.readSidecar(TWEET_ID, PUBLISHED_AT))
                 .thenReturn(Optional.of(MediaArchiveRecord.builder()
@@ -152,8 +152,14 @@ class MediaAwareRewriteArticleGeneratorTest {
         order.verify(contentRewriter).rewrite(any(Tweet.class));
         order.verify(archiver).archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList());
         order.verify(gate).evaluate(any(Tweet.class));
-        order.verify(preparer).prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList());
+        // Story 10.11: REWRITE 路径 title/digest 传参 = 改写产物字段 (第 4/5 参观察)
+        org.mockito.ArgumentCaptor<String> titleHint = org.mockito.ArgumentCaptor.forClass(String.class);
+        org.mockito.ArgumentCaptor<String> digestHint = org.mockito.ArgumentCaptor.forClass(String.class);
+        order.verify(preparer).prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList(),
+                titleHint.capture(), digestHint.capture());
         order.verify(writer).readSidecar(TWEET_ID, PUBLISHED_AT);
+        assertThat(titleHint.getValue()).isEqualTo("改写标题");
+        assertThat(digestHint.getValue()).isNull();
     }
 
     @Test
@@ -163,7 +169,7 @@ class MediaAwareRewriteArticleGeneratorTest {
         when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
                 .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
         when(gate.evaluate(any())).thenReturn(publishableResult());
-        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList(), any(), any()))
                 .thenReturn(new MediaPreparationResult(1, 0, 0, List.of()));
         when(writer.readSidecar(TWEET_ID, PUBLISHED_AT)).thenReturn(Optional.of(
                 MediaArchiveRecord.builder().tweetId(TWEET_ID).media(List.of(uploadedSidecarPhoto())).build()));
@@ -183,7 +189,7 @@ class MediaAwareRewriteArticleGeneratorTest {
         when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
                 .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
         when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
-        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList(), any(), any()))
                 .thenReturn(new MediaPreparationResult(1, 0, 0, List.of()));
         when(writer.readSidecar(TWEET_ID, PUBLISHED_AT))
                 .thenReturn(Optional.of(MediaArchiveRecord.builder()
@@ -287,7 +293,7 @@ class MediaAwareRewriteArticleGeneratorTest {
                 .isInstanceOf(NonRetryableException.class)
                 .hasMessageContaining(TWEET_ID)
                 .hasMessageContaining("twitter.media.enabled");
-        verify(preparer, never()).prepareMedia(anyString(), any(), anyList());
+        verify(preparer, never()).prepareMedia(anyString(), any(), anyList(), any(), any());
     }
 
     @Test
@@ -304,7 +310,7 @@ class MediaAwareRewriteArticleGeneratorTest {
                 .hasMessageContaining(TWEET_ID)
                 .hasMessageContaining("BLOCKED");
         // 推文级 BLOCKED 阻断整篇草稿: 无微信上传 (AC 8)
-        verify(preparer, never()).prepareMedia(anyString(), any(), anyList());
+        verify(preparer, never()).prepareMedia(anyString(), any(), anyList(), any(), any());
         verifyNoInteractions(writer);
     }
 
@@ -333,7 +339,7 @@ class MediaAwareRewriteArticleGeneratorTest {
         when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
                 .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
         when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
-        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList(), any(), any()))
                 .thenReturn(new MediaPreparationResult(0, 0, 1, List.of()));
         when(writer.readSidecar(TWEET_ID, PUBLISHED_AT)).thenReturn(Optional.empty());
 
@@ -350,7 +356,7 @@ class MediaAwareRewriteArticleGeneratorTest {
         when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
                 .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
         when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
-        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList(), any(), any()))
                 .thenReturn(new MediaPreparationResult(0, 1, 0, List.of()));
         when(writer.readSidecar(TWEET_ID, PUBLISHED_AT))
                 .thenReturn(Optional.of(MediaArchiveRecord.builder()
@@ -378,7 +384,7 @@ class MediaAwareRewriteArticleGeneratorTest {
                 .hasMessageContaining(TWEET_ID)
                 .hasMessageContaining("TweetPublishabilityGate")
                 .hasMessageContaining("twitter.media.enabled");
-        verify(preparer, never()).prepareMedia(anyString(), any(), anyList());
+        verify(preparer, never()).prepareMedia(anyString(), any(), anyList(), any(), any());
         verify(writer, never()).readSidecar(anyString(), any());
     }
 
@@ -391,7 +397,7 @@ class MediaAwareRewriteArticleGeneratorTest {
         when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
                 .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
         when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
-        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList(), any(), any()))
                 .thenThrow(new IllegalStateException("connection reset"));
         // helper 回写路径: sidecar 中存在未进入 SUCCEEDED/终态的 PHOTO → 写 RETRY_SCHEDULED 证据
         when(writer.readSidecar(TWEET_ID, PUBLISHED_AT)).thenReturn(Optional.of(
@@ -424,7 +430,7 @@ class MediaAwareRewriteArticleGeneratorTest {
         when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
                 .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
         when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
-        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList(), any(), any()))
                 .thenReturn(rateLimitedPrepareFailure());
 
         assertThatThrownBy(() -> generator.generate(tweet))
@@ -449,7 +455,7 @@ class MediaAwareRewriteArticleGeneratorTest {
         when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
                 .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
         when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
-        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList(), any(), any()))
                 .thenReturn(classifiedPrepareFailure("errcode=40164 invalid ip",
                         MediaPreparationResult.FailureClass.ENVIRONMENT_BLOCKED));
 
@@ -479,7 +485,7 @@ class MediaAwareRewriteArticleGeneratorTest {
                 .isInstanceOf(NonRetryableException.class)
                 .hasMessageContaining(TWEET_ID)
                 .hasMessageContaining("TweetMediaArchiveWriter");
-        verify(preparer, never()).prepareMedia(anyString(), any(), anyList());
+        verify(preparer, never()).prepareMedia(anyString(), any(), anyList(), any(), any());
         verifyNoInteractions(deliveryFailureCoordinator);
     }
 

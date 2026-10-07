@@ -1,6 +1,8 @@
 package com.choucj.aiaggregator.publish.wechat.converter;
 
 import com.choucj.aiaggregator.source.twitter.model.MediaDownloadStatus;
+import com.choucj.aiaggregator.source.twitter.model.MediaPhaseState;
+import com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus;
 import com.choucj.aiaggregator.source.twitter.model.MediaUploadStatus;
 import com.choucj.aiaggregator.source.twitter.model.PublishabilityStatus;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
@@ -213,6 +215,105 @@ class MarkdownMediaInserterTest {
         assertThat(result.degradedCount()).isEqualTo(1);
     }
 
+    // ===== Story 10.11: VIDEO 候选 A 纯文本 mediaId 嵌入 =====
+
+    @Test
+    void should_append_video_media_id_as_plain_text_when_video_prepared() {
+        MarkdownMediaInserter.MarkdownMediaInsertionResult result =
+                inserter.insert("正文", List.of(preparedVideo("m2", "wxvid001mediaid")));
+
+        // 候选 A 形态: 纯文本 mediaId 追加, 不输出 Markdown image/iframe/raw img
+        assertThat(result.content()).isEqualTo("正文\n\n视频素材: wxvid001mediaid");
+        assertThat(result.embeddedCount()).isEqualTo(1);
+        assertThat(result.degradedCount()).isZero();
+    }
+
+    @Test
+    void should_keep_photo_and_video_order_when_mixed() {
+        List<TweetMedia> sidecar = List.of(
+                embeddablePhoto("m1", "https://mmbiz.qpic.cn/a.jpg"),
+                preparedVideo("m2", "wxvid001mediaid"));
+
+        MarkdownMediaInserter.MarkdownMediaInsertionResult result =
+                inserter.insert("正文", sidecar);
+
+        assertThat(result.content()).isEqualTo(
+                "正文\n\n![原帖图片-1](https://mmbiz.qpic.cn/a.jpg)"
+                        + "\n\n视频素材: wxvid001mediaid");
+        assertThat(result.embeddedCount()).isEqualTo(2);
+    }
+
+    /** PHOTO alt 序号用独立计数 — PHOTO/VIDEO 混排不断号 (embeddedCount 仍为总嵌入数). */
+    @Test
+    void should_number_photo_alt_by_photo_only_counter_when_mixed() {
+        List<TweetMedia> sidecar = List.of(
+                embeddablePhoto("m1", "https://mmbiz.qpic.cn/a.jpg"),
+                preparedVideo("m2", "wxvid001mediaid"),
+                embeddablePhoto("m3", "https://mmbiz.qpic.cn/b.jpg"));
+
+        MarkdownMediaInserter.MarkdownMediaInsertionResult result =
+                inserter.insert("正文", sidecar);
+
+        assertThat(result.content()).isEqualTo(
+                "正文\n\n![原帖图片-1](https://mmbiz.qpic.cn/a.jpg)"
+                        + "\n\n视频素材: wxvid001mediaid"
+                        + "\n\n![原帖图片-2](https://mmbiz.qpic.cn/b.jpg)");
+        assertThat(result.embeddedCount()).isEqualTo(3);
+    }
+
+    @Test
+    void should_not_embed_video_when_prepare_not_succeeded() {
+        TweetMedia unprepared = preparedVideo("m2", "wxvid001mediaid").toBuilder()
+                .wechatPrepare(MediaPhaseState.builder()
+                        .status(MediaPhaseStatus.RETRY_SCHEDULED).attempt(1).build())
+                .build();
+
+        MarkdownMediaInserter.MarkdownMediaInsertionResult result =
+                inserter.insert("正文", List.of(unprepared));
+
+        assertThat(result.content()).isEqualTo("正文");
+        assertThat(result.embeddedCount()).isZero();
+        assertThat(result.degradedCount()).isEqualTo(1);
+    }
+
+    @Test
+    void should_not_embed_video_when_media_id_missing() {
+        TweetMedia noMediaId = preparedVideo("m2", null);
+
+        MarkdownMediaInserter.MarkdownMediaInsertionResult result =
+                inserter.insert("正文", List.of(noMediaId));
+
+        assertThat(result.content()).isEqualTo("正文");
+        assertThat(result.embeddedCount()).isZero();
+        assertThat(result.degradedCount()).isEqualTo(1);
+    }
+
+    @Test
+    void should_not_embed_blocked_video_even_when_prepared() {
+        TweetMedia blocked = preparedVideo("m2", "wxvid001mediaid").toBuilder()
+                .publishability(PublishabilityStatus.BLOCKED)
+                .build();
+
+        MarkdownMediaInserter.MarkdownMediaInsertionResult result =
+                inserter.insert("正文", List.of(blocked));
+
+        assertThat(result.content()).isEqualTo("正文");
+        assertThat(result.embeddedCount()).isZero();
+        assertThat(result.degradedCount()).isEqualTo(1);
+    }
+
+    @Test
+    void should_deduplicate_prepared_video_by_id_keeping_first() {
+        MarkdownMediaInserter.MarkdownMediaInsertionResult result =
+                inserter.insert("正文", List.of(
+                        preparedVideo("m2", "wxvid001mediaid"),
+                        preparedVideo("m2", "wxvid002mediaid")));
+
+        assertThat(result.content()).isEqualTo("正文\n\n视频素材: wxvid001mediaid");
+        assertThat(result.embeddedCount()).isEqualTo(1);
+        assertThat(result.degradedCount()).isEqualTo(1);
+    }
+
     // ===== fixtures =====
 
     private static TweetMedia embeddablePhoto(String id, String wechatUrl) {
@@ -263,6 +364,21 @@ class MarkdownMediaInserterTest {
                 .uploadStatus(MediaUploadStatus.UPLOADED)
                 .publishability(PublishabilityStatus.PUBLISHABLE)
                 .wechatUrl("https://mmbiz.qpic.cn/" + id + ".jpg")
+                .build();
+    }
+
+    /** Story 10.11: 已完成微信准备的 VIDEO (wechatPrepare=SUCCEEDED + mediaId 有值). */
+    private static TweetMedia preparedVideo(String id, String wechatVideoMediaId) {
+        return TweetMedia.builder()
+                .id(id)
+                .type(TweetMediaType.VIDEO)
+                .sourceUrl("https://video.twimg.com/" + id + ".mp4")
+                .downloadStatus(MediaDownloadStatus.DOWNLOADED)
+                .uploadStatus(MediaUploadStatus.UPLOADED)
+                .publishability(PublishabilityStatus.PUBLISHABLE)
+                .wechatVideoMediaId(wechatVideoMediaId)
+                .wechatPrepare(MediaPhaseState.builder()
+                        .status(MediaPhaseStatus.SUCCEEDED).attempt(1).build())
                 .build();
     }
 }

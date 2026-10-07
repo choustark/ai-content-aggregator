@@ -676,4 +676,84 @@ class TweetMediaArchiveWriterTest {
         TweetMedia stored = writer.readCanonicalSidecar("gif-only").orElseThrow().getMedia().getFirst();
         assertThat(stored.getArticleReference().getStatus()).isEqualTo(MediaPhaseStatus.DEFERRED);
     }
+
+    // ===== Story 10.11: VIDEO 引用完整性 (renderedContent contains wechatVideoMediaId) =====
+
+    @Test
+    void should_mark_video_article_reference_succeeded_when_content_contains_media_id() {
+        LocalDateTime when = LocalDateTime.of(2026, 8, 2, 10, 0);
+        TweetMedia video = TweetMedia.builder().id("v").type(TweetMediaType.VIDEO)
+                .downloadStatus(MediaDownloadStatus.DOWNLOADED)
+                .uploadStatus(MediaUploadStatus.UPLOADED)
+                .wechatVideoMediaId("wxvid001mediaid")
+                .build();
+        writer.writeSidecar("video-ref-1", when, List.of(video));
+
+        // 兼容投影已把 download/wechatPrepare 补为 SUCCEEDED; 正文包含 mediaId → 引用成功
+        assertThat(writer.markArticleReferencesSucceeded(
+                "video-ref-1", "正文 视频素材: wxvid001mediaid")).isTrue();
+        TweetMedia stored = writer.readCanonicalSidecar("video-ref-1").orElseThrow().getMedia().getFirst();
+        assertThat(stored.getArticleReference().getStatus()).isEqualTo(MediaPhaseStatus.SUCCEEDED);
+        assertThat(stored.getWechatPrepare().getStatus()).isEqualTo(MediaPhaseStatus.SUCCEEDED);
+    }
+
+    @Test
+    void should_reject_video_reference_when_sidecar_media_id_missing() {
+        LocalDateTime when = LocalDateTime.of(2026, 8, 2, 10, 0);
+        // 装配缺 mediaId: wechatPrepare 投影成功但 mediaId 缺失 → fail-closed 不推进
+        TweetMedia video = TweetMedia.builder().id("v").type(TweetMediaType.VIDEO)
+                .downloadStatus(MediaDownloadStatus.DOWNLOADED)
+                .uploadStatus(MediaUploadStatus.UPLOADED)
+                .build();
+        writer.writeSidecar("video-ref-2", when, List.of(video));
+
+        assertThat(writer.markArticleReferencesSucceeded(
+                "video-ref-2", "正文 视频素材: wxvid001mediaid")).isFalse();
+        TweetMedia stored = writer.readCanonicalSidecar("video-ref-2").orElseThrow().getMedia().getFirst();
+        assertThat(stored.getArticleReference().getStatus()).isEqualTo(MediaPhaseStatus.NOT_STARTED);
+    }
+
+    @Test
+    void should_reject_video_reference_when_rendered_content_lacks_media_id() {
+        LocalDateTime when = LocalDateTime.of(2026, 8, 2, 10, 0);
+        TweetMedia video = TweetMedia.builder().id("v").type(TweetMediaType.VIDEO)
+                .downloadStatus(MediaDownloadStatus.DOWNLOADED)
+                .uploadStatus(MediaUploadStatus.UPLOADED)
+                .wechatVideoMediaId("wxvid001mediaid")
+                .build();
+        writer.writeSidecar("video-ref-3", when, List.of(video));
+
+        assertThat(writer.markArticleReferencesSucceeded("video-ref-3", "正文不含 mediaId")).isFalse();
+        assertThat(writer.markArticleReferencesSucceeded("video-ref-3", null)).isFalse();
+        TweetMedia stored = writer.readCanonicalSidecar("video-ref-3").orElseThrow().getMedia().getFirst();
+        assertThat(stored.getArticleReference().getStatus()).isEqualTo(MediaPhaseStatus.NOT_STARTED);
+    }
+
+    /** 10.11: 耗尽钩子 type 无关 — VIDEO 的 RETRY_SCHEDULED 同样收敛为 FAILED_TERMINAL. */
+    @Test
+    void should_terminalize_video_retry_scheduled_on_mark_wechat_prepare_exhausted() {
+        LocalDateTime when = LocalDateTime.of(2026, 8, 2, 10, 0);
+        TweetMedia video = TweetMedia.builder().id("v").type(TweetMediaType.VIDEO)
+                .uploadStatus(MediaUploadStatus.FAILED)
+                .wechatPrepare(MediaPhaseState.builder()
+                        .status(MediaPhaseStatus.RETRY_SCHEDULED)
+                        .attempt(3)
+                        .nextRetryAt(when.plusMinutes(1))
+                        .errorClass("RETRYABLE")
+                        .errorCode("WECHAT_RATE_LIMITED")
+                        .errorSummary("errcode=45009")
+                        .updatedAt(when)
+                        .build())
+                .build();
+        writer.writeSidecar("video-exhaust-1", when, List.of(video));
+
+        assertThat(writer.markWechatPrepareExhausted(
+                "tw-video-exhaust-1", "MEDIA_PREPARE_FAILED", "重试耗尽")).isTrue();
+        TweetMedia stored = writer.readCanonicalSidecar("video-exhaust-1").orElseThrow().getMedia().getFirst();
+        assertThat(stored.getWechatPrepare().getStatus()).isEqualTo(MediaPhaseStatus.FAILED_TERMINAL);
+        assertThat(stored.getWechatPrepare().getAttempt()).isEqualTo(3);
+        assertThat(stored.getWechatPrepare().getNextRetryAt()).isNull();
+        assertThat(stored.getWechatPrepare().getErrorClass()).isEqualTo("TERMINAL");
+        assertThat(stored.getUploadStatus()).isEqualTo(MediaUploadStatus.FAILED);
+    }
 }

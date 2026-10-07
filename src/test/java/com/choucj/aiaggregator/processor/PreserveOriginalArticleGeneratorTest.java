@@ -111,7 +111,7 @@ class PreserveOriginalArticleGeneratorTest {
         Article article = generator.generate(tweet);
 
         assertThat(article.getGenerationMode()).isEqualTo(ContentGenerationMode.PRESERVE_ORIGINAL);
-        verify(preparer, never()).prepareMedia(anyString(), any(), anyList());
+        verify(preparer, never()).prepareMedia(anyString(), any(), anyList(), any(), any());
         verify(deliveryFailureCoordinator).converge(any(Article.class), eq("MEDIA_DOWNLOAD"),
                 eq("MEDIA_DOWNLOAD_FAILED"), anyString());
     }
@@ -146,7 +146,7 @@ class PreserveOriginalArticleGeneratorTest {
         when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
                 .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
         when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
-        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList(), any(), any()))
                 .thenReturn(new MediaPreparationResult(1, 0, 0, List.of()));
         when(writer.readSidecar(TWEET_ID, PUBLISHED_AT))
                 .thenReturn(Optional.of(MediaArchiveRecord.builder()
@@ -178,8 +178,42 @@ class PreserveOriginalArticleGeneratorTest {
         InOrder order = inOrder(archiver, gate, preparer, writer);
         order.verify(archiver).archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList());
         order.verify(gate).evaluate(any(Tweet.class));
-        order.verify(preparer).prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList());
+        order.verify(preparer).prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList(), any(), any());
         order.verify(writer).readSidecar(TWEET_ID, PUBLISHED_AT);
+    }
+
+    /** Story 10.11: PRESERVE 路径 videoTitleHint = formattedText 首个非空行 (strip 后, 第 4 参观察). */
+    @Test
+    void should_pass_first_non_blank_text_line_as_video_title_hint() {
+        TweetMedia videoMedia = TweetMedia.builder()
+                .id("m-v")
+                .type(TweetMediaType.VIDEO)
+                .downloadStatus(MediaDownloadStatus.DOWNLOADED)
+                .uploadStatus(MediaUploadStatus.UPLOADED)
+                .publishability(PublishabilityStatus.PUBLISHABLE)
+                .localPath("media/twitter/2026-08-29/" + TWEET_ID + "/video-1.mp4")
+                .build();
+        Tweet tweet = pureTextTweet().toBuilder()
+                .formattedText("\n  视频推文首行  \n第二行")
+                .media(List.of(videoMedia))
+                .build();
+        when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+                .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
+        when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList(), any(), any()))
+                .thenReturn(new MediaPreparationResult(1, 0, 0, List.of()));
+        when(writer.readSidecar(TWEET_ID, PUBLISHED_AT))
+                .thenReturn(Optional.of(MediaArchiveRecord.builder()
+                        .tweetId(TWEET_ID)
+                        .media(List.of(videoMedia))
+                        .build()));
+
+        generator.generate(tweet);
+
+        org.mockito.ArgumentCaptor<String> titleHint = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(preparer).prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList(),
+                titleHint.capture(), any());
+        assertThat(titleHint.getValue()).isEqualTo("视频推文首行");
     }
 
     @Test
@@ -189,7 +223,7 @@ class PreserveOriginalArticleGeneratorTest {
         when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
                 .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
         when(gate.evaluate(any())).thenReturn(publishableResult());
-        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList(), any(), any()))
                 .thenReturn(new MediaPreparationResult(1, 0, 0, List.of()));
         when(writer.readSidecar(TWEET_ID, PUBLISHED_AT)).thenReturn(Optional.of(
                 MediaArchiveRecord.builder().tweetId(TWEET_ID).media(List.of(sidecarMedia)).build()));
@@ -206,7 +240,7 @@ class PreserveOriginalArticleGeneratorTest {
         when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
                 .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
         when(gate.evaluate(any())).thenReturn(publishableResult());
-        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList(), any(), any()))
                 .thenReturn(new MediaPreparationResult(1, 0, 0, List.of()));
         when(writer.readSidecar(TWEET_ID, PUBLISHED_AT)).thenReturn(Optional.empty());
 
@@ -222,7 +256,7 @@ class PreserveOriginalArticleGeneratorTest {
         when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
                 .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
         when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
-        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList(), any(), any()))
                 .thenReturn(new MediaPreparationResult(1, 0, 0, List.of()));
         when(writer.readSidecar(TWEET_ID, PUBLISHED_AT))
                 .thenReturn(Optional.of(MediaArchiveRecord.builder()
@@ -315,7 +349,7 @@ class PreserveOriginalArticleGeneratorTest {
                 .isInstanceOf(NonRetryableException.class)
                 .hasMessageContaining(TWEET_ID)
                 .hasMessageContaining("BLOCKED");
-        verify(preparer, never()).prepareMedia(anyString(), any(), anyList());
+        verify(preparer, never()).prepareMedia(anyString(), any(), anyList(), any(), any());
         verifyNoInteractions(writer);
     }
 
@@ -341,7 +375,7 @@ class PreserveOriginalArticleGeneratorTest {
         when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
                 .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
         when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
-        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList(), any(), any()))
                 .thenReturn(new MediaPreparationResult(0, 0, 1, List.of()));
         when(writer.readSidecar(TWEET_ID, PUBLISHED_AT)).thenReturn(Optional.empty());
 
@@ -363,7 +397,7 @@ class PreserveOriginalArticleGeneratorTest {
         when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
                 .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
         when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
-        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList(), any(), any()))
                 .thenThrow(new IllegalStateException("connection reset"));
         // helper 回写路径: sidecar 中存在未进入 SUCCEEDED/终态的 PHOTO → 写 RETRY_SCHEDULED 证据
         when(writer.readSidecar(TWEET_ID, PUBLISHED_AT)).thenReturn(Optional.of(
@@ -395,7 +429,7 @@ class PreserveOriginalArticleGeneratorTest {
         when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
                 .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
         when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
-        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList(), any(), any()))
                 .thenReturn(terminalPrepareFailure("errcode=40164 invalid ip",
                         MediaPreparationResult.FailureClass.ENVIRONMENT_BLOCKED));
 
@@ -413,7 +447,7 @@ class PreserveOriginalArticleGeneratorTest {
         when(archiver.archiveMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
                 .thenReturn(new TweetMediaArchiver.ArchiveResult(1, 0, 0, List.of()));
         when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
-        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList()))
+        when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList(), any(), any()))
                 .thenReturn(terminalPrepareFailure("errcode=45009 quota",
                         MediaPreparationResult.FailureClass.RATE_LIMITED));
 
@@ -453,7 +487,7 @@ class PreserveOriginalArticleGeneratorTest {
                 .isInstanceOf(NonRetryableException.class)
                 .hasMessageContaining(TWEET_ID)
                 .hasMessageContaining("TweetMediaArchiveWriter");
-        verify(preparer, never()).prepareMedia(anyString(), any(), anyList());
+        verify(preparer, never()).prepareMedia(anyString(), any(), anyList(), any(), any());
         verifyNoInteractions(deliveryFailureCoordinator);
     }
 

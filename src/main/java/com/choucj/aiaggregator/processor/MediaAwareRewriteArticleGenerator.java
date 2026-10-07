@@ -226,7 +226,8 @@ public class MediaAwareRewriteArticleGenerator implements MediaAwareRewriteGener
             MediaPreparationResult preparation;
             try {
                 preparation = callExternal(tweetId, "prepareMedia", () ->
-                        weChatMediaPreparer.prepareMedia(tweetId, publishedAt, media));
+                        weChatMediaPreparer.prepareMedia(tweetId, publishedAt, media,
+                                rewritten.getTitle(), rewritten.getDigest()));
             } catch (NonRetryableException failure) {
                 Article failed = failedRewriteArticle(rewritten, List.of());
                 convergeFailure(tweetId, failed, "WECHAT_PREPARE", "MEDIA_PREPARE_FAILED", "媒体微信准备失败");

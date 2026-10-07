@@ -470,8 +470,20 @@ wechat:
       #   PRESERVE_ORIGINAL  — 确定性原帖复现 HTML
       #   REWRITE_WITH_MEDIA — AI 改写 Markdown + 原帖 PHOTO 媒体归档/微信上传/正文图片嵌入
       # 仅在无 target urls 配置时全局生效 (有 target urls 时按 per-tweet 命中判定返回本值).
-      # VIDEO/GIF 不进入正文图片上传, 仅降级进本地媒体审计.
+      # GIF 不进入正文图片上传, 仅降级进本地媒体审计; VIDEO 走永久素材 materialFileUpload
+      # 上传 (Story 10.11, 见下方 video 配置块), 不走正文图片 uploadimg.
       default-mode: REWRITE_WITH_MEDIA
+    # Story 10.11: VIDEO 永久素材上传配置 (Spike 10.9 §8 契约落地).
+    # 唯一上传端点为永久 materialFileUpload(video), 唯一引用方式为候选 A mediaId 纯文本直嵌正文.
+    video:
+      # VIDEO 上传总开关 — false 时 VIDEO 回落 Story 10.8 降级语义 (预览图/原文链接), 零上传请求.
+      enabled: true
+      # 本地容量上限 (MB) — 微信永久端点超限表现为 Read timed out, 容量必须本地前置校验.
+      size-limit-mb: 10
+      # materialVideoInfo 回读尝试次数 (含首次, best-effort 证据, 失败仅 warn 不影响上传成功).
+      readback-attempts: 3
+      # 回读重试间隔 (毫秒) — Spike 10.9 实测 3 次 × 3s 形态.
+      readback-interval-ms: 3000
     # 草稿默认作者名 (微信公众号后台展示)
     default-author: "AI 内容聚合器"
     # 人工审核提醒日志开关 (Story 3.5) — 微信草稿创建成功后是否输出

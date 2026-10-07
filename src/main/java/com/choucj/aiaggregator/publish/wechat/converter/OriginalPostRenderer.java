@@ -4,6 +4,7 @@ import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.model.Article;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.common.util.TextTruncateUtil;
+import com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus;
 import com.choucj.aiaggregator.source.twitter.model.PublishabilityStatus;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
@@ -38,7 +39,8 @@ import java.util.regex.Pattern;
  *   <li>AC3 媒体按 preparedMedia 列表顺序渲染，每个媒体二选一: 嵌入或降级提示，
  *       无媒体静默消失 (NFR2)</li>
  *   <li>AC4 引用推 blockquote + 「查看引用推」链接；quotedTweetUrl 空时不渲染</li>
- *   <li>AC5 VIDEO/GIF/UNKNOWN 按 8.2 决策表降级文案 + 原文链接</li>
+ *   <li>AC5 VIDEO/GIF/UNKNOWN 按 8.2 决策表降级文案 + 原文链接；Story 10.11: 已上传 VIDEO
+ *       (wechatPrepare=SUCCEEDED + mediaId 非空) 改为候选 A mediaId 纯文本直嵌，不再降级</li>
  *   <li>AC6 PHOTO 无 wechatUrl 时人可读文案 + failureReason 摘要 (单行化 +
  *       truncateForLog 120cp + 转义；8.4 已脱敏，本渲染器不重复脱敏)</li>
  *   <li>AC7 推文级致命失败 (tweet null / id blank / accessStatus 受限 /
@@ -84,6 +86,9 @@ public class OriginalPostRenderer {
 
     /** 8.2 spike §9 视频降级推荐文案 (AC5)。 */
     private static final String VIDEO_DEGRADE_COPY = "视频内容暂不支持稳定内嵌，请到原文查看或在公众号后台人工插入。";
+
+    /** Story 10.11 (Spike 10.9 候选 A): VIDEO 以纯文本 mediaId 直嵌正文的段内标签。 */
+    private static final String VIDEO_EMBED_LABEL = "视频素材: ";
 
     /** 8.2 spike §9 GIF 降级推荐文案 (AC5)。 */
     private static final String GIF_DEGRADE_COPY = "动图暂不走正式图片接口，请查看原文或人工替换为静态预览。";
@@ -148,6 +153,13 @@ public class OriginalPostRenderer {
                         .append("\"/>\n");
                 embeddedImageCount++;
                 embeddedImageUrls.add(wechatUrl);
+            } else if (isEmbeddableVideo(media)) {
+                // Story 10.11 (候选 A): mediaId 纯文本直嵌 <p> — Spike 10.9 实测 addDraft 接受
+                // 且草稿回读幸存; 候选 B (iframe) 会被微信剥离, 绝不采用。
+                // 不计入 embeddedImageCount — mediaId 非图片 URL, 指标语义图片归图片 (CR Story 10.11)。
+                String videoMediaId = media.getWechatVideoMediaId().trim();
+                html.append("<p>").append(VIDEO_EMBED_LABEL)
+                        .append(ArticleToWxArticleConverter.escapeHtml(videoMediaId)).append("</p>\n");
             } else {
                 html.append(renderDegradedMedia(media, tweet.getUrl())).append('\n');
                 degradedMediaCount++;
@@ -375,6 +387,21 @@ public class OriginalPostRenderer {
         return media.getType() == TweetMediaType.PHOTO
                 && media.getWechatUrl() != null
                 && !media.getWechatUrl().isBlank();
+    }
+
+    /**
+     * Story 10.11: VIDEO 可嵌入判定 — 非 BLOCKED + wechatPrepare=SUCCEEDED + mediaId 非空
+     * (候选 A 嵌入谓词按 {@code wechatVideoMediaId} 判定, 不复用 PHOTO 的 wechatUrl,
+     * 避免误伤/误嵌)。未准备完成的 VIDEO 落入降级文案路径 (10.8 行为兜底)。
+     */
+    private static boolean isEmbeddableVideo(TweetMedia media) {
+        if (media == null || media.getPublishability() == PublishabilityStatus.BLOCKED) {
+            return false;
+        }
+        return media.getType() == TweetMediaType.VIDEO
+                && media.getWechatPrepare() != null
+                && media.getWechatPrepare().getStatus() == MediaPhaseStatus.SUCCEEDED
+                && !isBlank(media.getWechatVideoMediaId());
     }
 
     /**

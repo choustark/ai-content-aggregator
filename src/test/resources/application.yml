@@ -80,6 +80,13 @@ observability:
 wechat:
   mp:
     enabled: false
+    # Story 10.11: VIDEO 永久素材上传配置 — 默认套件显式关闭 (零外部访问),
+    # VIDEO 保持 10.8 降级语义。
+    video:
+      enabled: false
+      size-limit-mb: 10
+      readback-attempts: 3
+      readback-interval-ms: 3000
     publishing:
       batch-cron: "-"
 

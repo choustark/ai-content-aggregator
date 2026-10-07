@@ -2,6 +2,8 @@ package com.choucj.aiaggregator.publish.wechat.converter;
 
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.model.Article;
+import com.choucj.aiaggregator.source.twitter.model.MediaPhaseState;
+import com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus;
 import com.choucj.aiaggregator.source.twitter.model.MediaUploadStatus;
 import com.choucj.aiaggregator.source.twitter.model.PublishabilityStatus;
 import com.choucj.aiaggregator.source.twitter.model.Tweet;
@@ -299,6 +301,107 @@ class OriginalPostRendererTest {
         assertThat(result.html()).doesNotContain("<img");
         assertThat(result.embeddedImageCount()).isZero();
         assertThat(result.degradedMediaCount()).isEqualTo(1);
+    }
+
+    // ===== Story 10.11: 已上传 VIDEO 候选 A mediaId 纯文本直嵌 =====
+
+    @Test
+    void should_embed_video_media_id_as_plain_text_when_video_prepared() {
+        Tweet tweet = baseTweet().build();
+        TweetMedia video = TweetMedia.builder()
+                .id("m1")
+                .type(TweetMediaType.VIDEO)
+                .wechatVideoMediaId("wxvid001mediaid")
+                .wechatPrepare(MediaPhaseState.builder()
+                        .status(MediaPhaseStatus.SUCCEEDED).attempt(1).build())
+                .build();
+
+        OriginalPostRenderResult result = renderer.render(tweet, List.of(video));
+
+        // 候选 A 形态: <p>视频素材: mediaId</p>, 经 HTML 转义后纯文本幸存
+        assertThat(result.html()).contains("<p>视频素材: wxvid001mediaid</p>");
+        assertThat(result.html()).doesNotContain("<img");
+        assertThat(result.html()).doesNotContain("iframe");
+        assertThat(result.html()).doesNotContain("视频内容暂不支持稳定内嵌");
+        // mediaId 非图片 URL: 不污染「嵌入图片数」指标 (图片归图片)
+        assertThat(result.embeddedImageCount()).isZero();
+        assertThat(result.degradedMediaCount()).isZero();
+        // mediaId 不是图片 URL, 不进 embeddedImageUrls
+        assertThat(result.embeddedImageUrls()).isEmpty();
+    }
+
+    @Test
+    void should_escape_video_media_id_when_embedded() {
+        Tweet tweet = baseTweet().build();
+        TweetMedia video = TweetMedia.builder()
+                .id("m1")
+                .type(TweetMediaType.VIDEO)
+                .wechatVideoMediaId("<script>alert(1)</script>")
+                .wechatPrepare(MediaPhaseState.builder()
+                        .status(MediaPhaseStatus.SUCCEEDED).attempt(1).build())
+                .build();
+
+        OriginalPostRenderResult result = renderer.render(tweet, List.of(video));
+
+        assertThat(result.html()).doesNotContain("<script>");
+        assertThat(result.html()).contains("&lt;script&gt;");
+    }
+
+    @Test
+    void should_degrade_video_when_wechat_prepare_not_succeeded() {
+        Tweet tweet = baseTweet().build();
+        // wechatPrepare=RETRY_SCHEDULED (未准备完成) → 落 10.8 降级文案路径
+        TweetMedia video = TweetMedia.builder()
+                .id("m1")
+                .type(TweetMediaType.VIDEO)
+                .wechatVideoMediaId("wxvid001mediaid")
+                .wechatPrepare(MediaPhaseState.builder()
+                        .status(MediaPhaseStatus.RETRY_SCHEDULED).attempt(1).build())
+                .build();
+
+        OriginalPostRenderResult result = renderer.render(tweet, List.of(video));
+
+        assertThat(result.html()).contains("视频内容暂不支持稳定内嵌");
+        assertThat(result.html()).doesNotContain("wxvid001mediaid");
+        assertThat(result.embeddedImageCount()).isZero();
+        assertThat(result.degradedMediaCount()).isEqualTo(1);
+    }
+
+    @Test
+    void should_degrade_video_when_media_id_missing_despite_prepare_succeeded() {
+        Tweet tweet = baseTweet().build();
+        // wechatPrepare=SUCCEEDED 但 mediaId 缺失 → 不嵌入 (装配缺 mediaId fail-closed)
+        TweetMedia video = TweetMedia.builder()
+                .id("m1")
+                .type(TweetMediaType.VIDEO)
+                .wechatPrepare(MediaPhaseState.builder()
+                        .status(MediaPhaseStatus.SUCCEEDED).attempt(1).build())
+                .build();
+
+        OriginalPostRenderResult result = renderer.render(tweet, List.of(video));
+
+        assertThat(result.html()).contains("视频内容暂不支持稳定内嵌");
+        assertThat(result.embeddedImageCount()).isZero();
+        assertThat(result.degradedMediaCount()).isEqualTo(1);
+    }
+
+    @Test
+    void should_degrade_blocked_video_even_when_prepared() {
+        Tweet tweet = baseTweet().build();
+        TweetMedia video = TweetMedia.builder()
+                .id("m1")
+                .type(TweetMediaType.VIDEO)
+                .wechatVideoMediaId("wxvid001mediaid")
+                .publishability(PublishabilityStatus.BLOCKED)
+                .wechatPrepare(MediaPhaseState.builder()
+                        .status(MediaPhaseStatus.SUCCEEDED).attempt(1).build())
+                .build();
+
+        OriginalPostRenderResult result = renderer.render(tweet, List.of(video));
+
+        assertThat(result.html()).contains("该媒体不适宜自动呈现");
+        assertThat(result.html()).doesNotContain("wxvid001mediaid");
+        assertThat(result.embeddedImageCount()).isZero();
     }
 
     @Test

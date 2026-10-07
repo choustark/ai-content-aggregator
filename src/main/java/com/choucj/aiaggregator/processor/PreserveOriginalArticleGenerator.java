@@ -233,7 +233,8 @@ public class PreserveOriginalArticleGenerator implements OriginalPostGenerationG
             // 走任务级延迟重试 (AC4), 耗尽由调度器钩子按 state.articleId 收敛。
             try {
                 preparation = callExternal(tweetId, "prepareMedia", () ->
-                        weChatMediaPreparer.prepareMedia(tweetId, publishedAt, media));
+                        weChatMediaPreparer.prepareMedia(tweetId, publishedAt, media,
+                                videoTitleHint(tweet), null));
             } catch (NonRetryableException failure) {
                 Article failed = minimalFailureArticle(tweet);
                 failed.setMediaAuditMarkdown(buildMediaAuditMarkdown(media, tweet.getUrl()));
@@ -340,6 +341,26 @@ public class PreserveOriginalArticleGenerator implements OriginalPostGenerationG
                 .content(content).source("Twitter").originalUrl(tweet.getUrl())
                 .createdAt(tweet.getPublishedAt()).aiGenerated(false)
                 .generationMode(ContentGenerationMode.PRESERVE_ORIGINAL).build();
+    }
+
+    /**
+     * Story 10.11 (OQ1): 永久视频素材 title 来源 — PRESERVE_ORIGINAL 路径此刻尚无最终渲染
+     * Article (渲染在 prepareMedia 之后), 以推文文本首行 (formattedText → rawText → content)
+     * 作为确定性标题提示; preparer 侧会拼接 tweetId 后缀并截断。无可用行返回 null (由
+     * preparer 兜底命名)。digest 同理不可得, 传 null。
+     */
+    private static String videoTitleHint(Tweet tweet) {
+        String source = tweet.getFormattedText() != null ? tweet.getFormattedText()
+                : (tweet.getRawText() != null ? tweet.getRawText() : tweet.getContent());
+        if (source == null || source.isBlank()) {
+            return null;
+        }
+        for (String line : source.split("\\r?\\n")) {
+            if (line != null && !line.isBlank()) {
+                return line.strip();
+            }
+        }
+        return null;
     }
 
     private void convergeFailure(String tweetId, Article article, String stage, String code, String summary) {

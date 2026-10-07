@@ -33,6 +33,9 @@ public class WeChatProperties {
     /** WxMpService 调用配置 (复用 starter 注册的 WxMpService Bean). */
     private final ServiceClient client = new ServiceClient();
 
+    /** Story 10.11: VIDEO 永久素材上传配置 (Spike 10.9 §8 建议配置键落地). */
+    private final Video video = new Video();
+
     @Data
     public static class ServiceClient {
 
@@ -42,5 +45,30 @@ public class WeChatProperties {
          * 自定义 {@code WxMpConfigStorage} Bean 覆盖, 调用 {@code useStableAccessToken(true)}.
          */
         private boolean stableAccessToken = true;
+    }
+
+    @Data
+    public static class Video {
+
+        /**
+         * VIDEO 微信上传总开关 — 默认 true (Spike 10.9 已判 Go, 契约固化 §8).
+         * <p>false 时 VIDEO 保持 Story 10.8 降级语义 (SKIPPED + 预览图/原文链接文案), 零上传请求.
+         */
+        private boolean enabled = true;
+
+        /**
+         * 本地容量上限 (MB, 默认 10) — 微信永久端点超限表现为 Read timed out 而非干净错误码,
+         * 容量校验必须本地前置实施 (Spike §8 风险注记), 不得依赖微信侧语义.
+         */
+        private int sizeLimitMb = 10;
+
+        /**
+         * materialVideoInfo 回读尝试次数 (含首次, 默认 3) — 覆盖微信异步转码场景.
+         * <p>回读为 best-effort 证据, 耗尽仅记 warn 日志, 不作为 wechatPrepare=SUCCEEDED 前置.
+         */
+        private int readbackAttempts = 3;
+
+        /** 回读重试间隔 (毫秒, 默认 3000 — Spike 10.9 实测 3 次 × 3s 形态). */
+        private long readbackIntervalMs = 3000L;
     }
 }

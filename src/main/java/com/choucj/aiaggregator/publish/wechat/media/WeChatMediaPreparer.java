@@ -7,6 +7,7 @@ import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.common.util.TextTruncateUtil;
 import com.choucj.aiaggregator.publish.storage.MediaArchiveRecord;
 import com.choucj.aiaggregator.publish.storage.TweetMediaArchiveWriter;
+import com.choucj.aiaggregator.publish.wechat.config.WeChatProperties;
 import com.choucj.aiaggregator.source.twitter.model.MediaDownloadStatus;
 import com.choucj.aiaggregator.source.twitter.model.MediaPhaseState;
 import com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus;
@@ -42,9 +43,12 @@ import java.util.regex.Pattern;
  *   <li><b>单媒体失败降级</b> — 每媒体独立 try-catch，单个失败只回写 FAILED + 截断根因，
  *       不中断循环、不阻塞整篇草稿 (AD-5)</li>
  *   <li><b>幂等跳过</b> — sidecar 中已是 UPLOADED 且 wechatUrl 非空的媒体不再调微信接口
- *       (sidecar 是上传状态唯一权威源，防配额浪费)</li>
- *   <li><b>VIDEO/GIF 不走图片路径</b> — 一律 SKIPPED + 降级原因 (Story 8.2 结论: 内嵌未证实，
- *       按预览图/原文链接降级)，绝不调用图片上传接口</li>
+ *       (sidecar 是上传状态唯一权威源，防配额浪费)；Story 10.11: VIDEO 幂等判据为
+ *       wechatPrepare=SUCCEEDED + wechatVideoMediaId 非空</li>
+ *   <li><b>VIDEO/GIF 不走图片路径</b> — 绝不调用图片上传接口。Story 10.11 起 VIDEO 走独立
+ *       {@link WeChatVideoMediaAdapter} 永久素材上传 (Spike 10.9 §8 契约, 配置
+ *       {@code wechat.mp.video.enabled} 可关闭回落 10.8 降级语义)；GIF/UNKNOWN 仍 SKIPPED 降级
+ *       (Story 8.2 结论: 预览图/原文链接)</li>
  *   <li><b>字段严格分离</b> — PHOTO 只写 wechatUrl (uploadimg 只返回 url 无 media_id)，
  *       不触碰封面 thumb_media_id 链路与 wechatMediaId (AD-4)</li>
  *   <li><b>时间锚定</b> — effectivePublishedAt 一次性锚定，防 null 时多次 now() 跨日目录错位
@@ -88,6 +92,21 @@ public class WeChatMediaPreparer {
     private static final String VIDEO_SKIP_REASON =
             "视频内嵌未证实，降级为预览图+原文链接 (video_embed_unverified, Story 8.2)";
 
+    /** Story 10.11: VIDEO 幂等跳过原因 (sidecar 已有 mediaId 且 wechatPrepare=SUCCEEDED). */
+    private static final String VIDEO_IDEMPOTENT_SKIP_REASON = "已上传，幂等跳过";
+
+    /** Story 10.11 (OQ1): 永久素材 title 上限 (码点) — 微信限 640 字节, 中文 64 码点 (192 字节) 安全. */
+    private static final int VIDEO_TITLE_MAX_CODE_POINTS = 64;
+
+    /** Story 10.11 (OQ1): 永久素材 description 上限 (码点) — 微信限 1200 字节, 120 码点安全. */
+    private static final int VIDEO_DESCRIPTION_MAX_CODE_POINTS = 120;
+
+    /** Story 10.11 (OQ1): article title/digest 缺失时的素材命名兜底前缀. */
+    private static final String VIDEO_MATERIAL_FALLBACK_TITLE = "X 原帖视频";
+
+    /** Story 10.11 (OQ1): tweetId 后缀拼接前缀 (素材库人工清理定位锚点). */
+    private static final String VIDEO_MATERIAL_TITLE_SUFFIX = " tw-";
+
     /** Story 8.2 结论: GIF uploadimg 接受度未证实，按不支持处理 (含 8.2 决策表 degradeReason token). */
     private static final String GIF_SKIP_REASON =
             "GIF 接口接受度未证实，按不支持处理，降级为预览图+原文链接 (gif_api_unverified, Story 8.2)";
@@ -103,22 +122,39 @@ public class WeChatMediaPreparer {
     private final Optional<TweetMediaArchiveWriter> archiveWriter;
     /** Story 10.8: task.retry.* 重试策略 (重试上限唯一来源, 不新增第二套重试配置). */
     private final RetryPolicyProperties retryPolicy;
+    /** Story 10.11: VIDEO 永久素材适配器; null 时 VIDEO 保持 10.8 降级语义 (legacy 测试兼容). */
+    private final WeChatVideoMediaAdapter videoAdapter;
+    /** Story 10.11: wechat.mp.video.* 配置 (videoAdapter 为 null 时仅 videoPreparationEnabled 兜底消费). */
+    private final WeChatProperties weChatProperties;
 
     /**
-     * 构造器注入依赖 (Story 10.8 起含 {@link RetryPolicyProperties}).
+     * 构造器注入依赖 (Story 10.11 起含 {@link WeChatVideoMediaAdapter}).
      *
-     * @param uploadProbe   微信正文图片上传探针 (Story 8.1，同 wechat.mp.enabled 开关，必共存)
-     * @param archiveWriter sidecar 写入器 (twitter.media.enabled 独立开关，可能未注册；
-     *                      缺失时 prepareMedia 显式 fail-fast)
-     * @param retryPolicy   task.retry.* 既有重试策略 (RETRY_SCHEDULED 的 nextRetryAt 退避来源)
+     * @param uploadProbe      微信正文图片上传探针 (Story 8.1，同 wechat.mp.enabled 开关，必共存)
+     * @param archiveWriter    sidecar 写入器 (twitter.media.enabled 独立开关，可能未注册；
+     *                         缺失时 prepareMedia 显式 fail-fast)
+     * @param retryPolicy      task.retry.* 既有重试策略 (RETRY_SCHEDULED 的 nextRetryAt 退避来源)
+     * @param videoAdapter     VIDEO 永久素材上传适配器 (Story 10.11，同 wechat.mp.enabled 开关)
+     * @param weChatProperties wechat.mp.* 项目层配置 (wechat.mp.video.* 消费源)
      */
     @Autowired
     public WeChatMediaPreparer(WeChatBodyImageUploadProbe uploadProbe,
                                Optional<TweetMediaArchiveWriter> archiveWriter,
-                               RetryPolicyProperties retryPolicy) {
+                               RetryPolicyProperties retryPolicy,
+                               WeChatVideoMediaAdapter videoAdapter,
+                               WeChatProperties weChatProperties) {
         this.uploadProbe = uploadProbe;
         this.archiveWriter = archiveWriter;
         this.retryPolicy = retryPolicy;
+        this.videoAdapter = videoAdapter;
+        this.weChatProperties = weChatProperties;
+    }
+
+    /** Story 10.8 签名 (测试兼容): videoAdapter=null → VIDEO 走 10.8 降级语义 (SKIPPED, 零上传请求). */
+    public WeChatMediaPreparer(WeChatBodyImageUploadProbe uploadProbe,
+                               Optional<TweetMediaArchiveWriter> archiveWriter,
+                               RetryPolicyProperties retryPolicy) {
+        this(uploadProbe, archiveWriter, retryPolicy, null, new WeChatProperties());
     }
 
     /** Story 10.8 前签名 (测试兼容): 默认 task.retry.* (max-attempts=3, 60s-600s 指数退避). */
@@ -145,6 +181,25 @@ public class WeChatMediaPreparer {
      */
     public MediaPreparationResult prepareMedia(String tweetId, LocalDateTime publishedAt,
                                                List<TweetMedia> media) {
+        return prepareMedia(tweetId, publishedAt, media, null, null);
+    }
+
+    /**
+     * 带文章标题/简介的媒体准备 (Story 10.11 OQ1): 永久视频素材 title = 文章标题 + tweetId
+     * 后缀 (拼接后截断), description = 文章简介截断 — 兼顾素材库运营可读与人工清理定位。
+     *
+     * <p>title/digest 为 null 时回退确定性兜底 (X 原帖视频 + tweetId), 适配器对空值 fail-fast。
+     *
+     * @param tweetId       推文 ID (白名单校验由 resolveArchiveDir 承担)
+     * @param publishedAt   推文发布时间 (sidecar 目录日期段基准; null 时一次性锚定当前时刻)
+     * @param media         媒体列表 (null 视为空)
+     * @param articleTitle  文章标题 (OQ1 素材 title 来源; 可为 null)
+     * @param articleDigest 文章简介 (OQ1 素材 description 来源; 可为 null)
+     * @return 处理结果摘要 (成功数 + 跳过数 + 失败数 + per-media 状态)
+     */
+    public MediaPreparationResult prepareMedia(String tweetId, LocalDateTime publishedAt,
+                                               List<TweetMedia> media,
+                                               String articleTitle, String articleDigest) {
         if (media == null || media.isEmpty()) {
             return MediaPreparationResult.empty();
         }
@@ -179,6 +234,64 @@ public class WeChatMediaPreparer {
             TweetMedia sidecarState = ref == null ? null : ref.item();
 
             try {
+                // Story 10.11: VIDEO 幂等预检 — 先于 videoPreparationEnabled() gate (AC3 冻结:
+                // video.enabled=false 时重处理已 SUCCEEDED+mediaId 的 VIDEO 也不得落入通用
+                // !isPhoto SKIPPED 分支盖写 uploadStatus/failureReason)。sidecar 已有有效 mediaId
+                // 且 wechatPrepare=SUCCEEDED → 零上传请求/零写回跳过 (微信永久素材无删除 API,
+                // 重复上传会产生无法回收的孤儿素材)。
+                if (m.getType() == TweetMediaType.VIDEO && isVideoPrepared(sidecarState)) {
+                    log.info("VIDEO 已上传，幂等跳过微信永久素材准备: tweetId={}, mediaId={}", tweetId, mediaId);
+                    statuses.add(MediaPreparationResult.MediaPreparationStatus.skipped(
+                            mediaId, VIDEO_IDEMPOTENT_SKIP_REASON));
+                    skipCount++;
+                    continue;
+                }
+
+                // Story 10.11: VIDEO 生产分支 — 适配器就绪且配置开启时走永久素材上传 (Spike 10.9 §8
+                // 契约: 唯一端点 materialFileUpload(video), 唯一引用方式候选 A mediaId 纯文本直嵌);
+                // 未开启时回落到下方 !isPhoto 既有 SKIPPED 降级语义 (10.8 行为零变化)。
+                if (m.getType() == TweetMediaType.VIDEO && videoPreparationEnabled()) {
+                    // 上传前 publishability=BLOCKED 拦截 (镜像 PHOTO, Story 9.1 语义复用)
+                    if ((sidecarState != null && sidecarState.getPublishability() == PublishabilityStatus.BLOCKED)
+                            || m.getPublishability() == PublishabilityStatus.BLOCKED) {
+                        String blockedReason = "publishability=BLOCKED，gate 阻断，跳过微信上传 (Story 9.1)";
+                        tryWriteBack(writer, tweetId, effectivePublishedAt, ref, mediaId,
+                                original -> original.toBuilder()
+                                        .uploadStatus(MediaUploadStatus.SKIPPED)
+                                        .failureReason(blockedReason)
+                                        .build());
+                        log.info("VIDEO 被 publishability gate 阻断，跳过微信永久素材上传: tweetId={}, mediaId={}",
+                                tweetId, mediaId);
+                        statuses.add(MediaPreparationResult.MediaPreparationStatus.skipped(mediaId, blockedReason));
+                        skipCount++;
+                        continue;
+                    }
+
+                    // 本地就绪预检 (存在/非零 + localPath); 容量由适配器按 wechat.mp.video.size-limit-mb 前置。
+                    // 该路径未消耗微信配额, 但 I/O 矩阵要求本地前置失败 → wechatPrepare=FAILED_TERMINAL
+                    // (NonRetryable) → 文章 DELIVERY_FAILED + 草稿 0, 故走 safeWriteBackFailed 终态通道。
+                    String notReadyReason = localNotReadyReason(sidecarState, archiveDir);
+                    if (notReadyReason != null) {
+                        safeWriteBackFailed(writer, tweetId, effectivePublishedAt, ref, mediaId,
+                                notReadyReason, MediaPreparationResult.FailureClass.PERMANENT,
+                                ErrorCode.WECHAT_API_ERROR.name());
+                        log.warn("VIDEO 本地文件未就绪，不发起上传: tweetId={}, mediaId={}, reason={}",
+                                tweetId, mediaId, notReadyReason);
+                        statuses.add(MediaPreparationResult.MediaPreparationStatus.failed(
+                                mediaId, notReadyReason, false));
+                        failCount++;
+                        continue;
+                    }
+
+                    // 上传 + mediaId/wechatPrepare=SUCCEEDED 回写; 失败 (含回写未命中) 由共享
+                    // catch 走 classifyFailure/safeWriteBackFailed 既有治理链 (10.8 语义全复用)。
+                    uploadVideoAndWriteBack(writer, tweetId, effectivePublishedAt, ref, mediaId,
+                            sidecarState, archiveDir, articleTitle, articleDigest);
+                    statuses.add(MediaPreparationResult.MediaPreparationStatus.uploadedVideo(mediaId));
+                    successCount++;
+                    continue;
+                }
+
                 if (!isPhoto) {
                     // VIDEO/GIF/UNKNOWN/null: 一律 SKIPPED，不走图片上传路径 (Story 8.2 边界, AC5)。
                     // 回写软失败: 不消耗配额的操作不应因回写 miss 变成 FAILED (CR 2026-08-28)
@@ -319,6 +432,99 @@ public class WeChatMediaPreparer {
     }
 
     /**
+     * Story 10.11: VIDEO 生产准备总开关 — 适配器 Bean 存在且 {@code wechat.mp.video.enabled=true}。
+     * false 时 VIDEO 保持 Story 10.8 降级语义 (SKIPPED + 预览图/原文链接文案), 零上传请求。
+     */
+    private boolean videoPreparationEnabled() {
+        return videoAdapter != null
+                && (weChatProperties == null || weChatProperties.getVideo().isEnabled());
+    }
+
+    /**
+     * Story 10.11: VIDEO 幂等判据 — sidecar 已有有效 mediaId 且 wechatPrepare=SUCCEEDED。
+     * <p>幂等键即 sidecar mediaId 本身 (微信永久素材无删除 API, 不做"先查后传"的服务器端去重)。
+     */
+    private static boolean isVideoPrepared(TweetMedia sidecarState) {
+        return sidecarState != null
+                && sidecarState.getWechatPrepare() != null
+                && sidecarState.getWechatPrepare().getStatus() == MediaPhaseStatus.SUCCEEDED
+                && hasText(sidecarState.getWechatVideoMediaId());
+    }
+
+    /**
+     * Story 10.11: 上传 VIDEO 永久素材并回写 mediaId + {@code wechatPrepare=SUCCEEDED}。
+     *
+     * <p>OQ1: 素材 title = 文章标题 + tweetId 后缀 (截断至 64 码点), description = 文章简介
+     * (截断至 120 码点); 缺失时确定性兜底。回读 (materialVideoInfo) 已在适配器内 best-effort
+     * 完成, 失败仅 warn, 不影响成功语义。回写经 requireWriteBack: 未命中抛 Retryable
+     * (已消耗微信配额取得的 mediaId 不能被放弃), 由共享 catch 记 RETRY_SCHEDULED 供下轮重试
+     * (重复上传产生的微信后台孤儿素材需人工清理, 为 spec 已接受代价, 不做状态权威性妥协)。
+     */
+    private void uploadVideoAndWriteBack(TweetMediaArchiveWriter writer, String tweetId,
+                                         LocalDateTime effectivePublishedAt, SidecarRef ref,
+                                         String mediaId, TweetMedia sidecarState, Path archiveDir,
+                                         String articleTitle, String articleDigest) {
+        long startNanos = System.nanoTime();
+        String title = videoMaterialTitle(articleTitle, tweetId);
+        String description = videoMaterialDescription(articleDigest, tweetId);
+        String localPath = sidecarState != null ? sidecarState.getLocalPath() : null;
+        Path localFile = resolveLocalFile(archiveDir, localPath);
+        WeChatVideoMediaAdapter.UploadedVideo uploaded =
+                videoAdapter.uploadPermanentVideo(localFile, title, description);
+        String videoMediaId = uploaded.mediaId().trim();
+        requireWriteBack(writer, tweetId, effectivePublishedAt, ref, mediaId,
+                original -> {
+                    MediaPhaseState prev = original.getWechatPrepare() != null
+                            ? original.getWechatPrepare() : MediaPhaseState.notStarted();
+                    MediaPhaseState succeeded = MediaPhaseState.builder()
+                            .status(MediaPhaseStatus.SUCCEEDED)
+                            .attempt(Math.max(prev.getAttempt(), 0) + 1)
+                            .nextRetryAt(null)
+                            .errorClass(null)
+                            .errorCode(null)
+                            .errorSummary(null)
+                            .updatedAt(LocalDateTime.now())
+                            .build();
+                    return original.toBuilder()
+                            .uploadStatus(MediaUploadStatus.UPLOADED)
+                            .wechatVideoMediaId(videoMediaId)
+                            .failureReason(null)
+                            .wechatPrepare(succeeded)
+                            .build();
+                });
+        long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
+        log.info("微信永久视频素材上传回写完成: tweetId={}, mediaId={}, fileName={}, sizeBytes={}, "
+                        + "videoMediaIdPrefix={}, readbackSucceeded={}, status=UPLOADED, elapsedMs={}",
+                tweetId, mediaId, uploaded.fileName(), uploaded.sizeBytes(),
+                uploaded.mediaId().length() <= 6 ? uploaded.mediaId() : uploaded.mediaId().substring(0, 6),
+                uploaded.readbackSucceeded(), elapsedMs);
+    }
+
+    /**
+     * Story 10.11 (OQ1): 素材 title = 文章标题 + tweetId 后缀, 总长 ≤64 码点; 缺失时确定性兜底.
+     * <p>先把标题截到 64-suffix 码点再追加完整后缀 — 保证 {@code tw-{tweetId}} 幂等锚点
+     * 永远完整保留, 长标题不会截出残段 (suffix 动态长度, 防负取 max(0, ...))。
+     */
+    private static String videoMaterialTitle(String articleTitle, String tweetId) {
+        String suffix = VIDEO_MATERIAL_TITLE_SUFFIX + tweetId;
+        int baseMax = Math.max(0, VIDEO_TITLE_MAX_CODE_POINTS - suffix.length());
+        String base = hasText(articleTitle) ? singleLine(articleTitle) : VIDEO_MATERIAL_FALLBACK_TITLE;
+        return TextTruncateUtil.truncateByCodePoints(base, baseMax) + suffix;
+    }
+
+    /** Story 10.11 (OQ1): 素材 description = 文章简介截断至 120 码点; 缺失时确定性兜底. */
+    private static String videoMaterialDescription(String articleDigest, String tweetId) {
+        String base = hasText(articleDigest) ? singleLine(articleDigest)
+                : VIDEO_MATERIAL_FALLBACK_TITLE + VIDEO_MATERIAL_TITLE_SUFFIX + tweetId;
+        return TextTruncateUtil.truncateByCodePoints(base, VIDEO_DESCRIPTION_MAX_CODE_POINTS);
+    }
+
+    /** 换行/制表符压成空格 (素材命名不得含换行, 镜像 sanitizeReason 单行化口径, 不脱敏 URL — 素材库需可读). */
+    private static String singleLine(String value) {
+        return value.replaceAll("[\\r\\n\\t]", " ").trim();
+    }
+
+    /**
      * 回写并要求命中 (仅上传成功路径): 未命中抛 Retryable —— 已消耗微信配额取得的 URL
      * 不能被分类为不可重试而放弃 (CR 2026-08-28 D2 决策)，交由上层单媒体 catch 降级并暴露
      * retryable=true 供下轮重试。
@@ -456,8 +662,10 @@ public class WeChatMediaPreparer {
      * Story 10.8: 生成器级 {@code RETRY_SCHEDULED} 阶段证据回写 (静态, 供两个媒体感知生成器复用).
      *
      * <p>覆盖 preparer 逐媒体 catch 之外的路径 (如 preparer 级崩溃异常逃逸): 读取 canonical
-     * sidecar, 对所有「PHOTO 且 wechatPrepare 尚未进入 SUCCEEDED/终态」的媒体软失败回写
-     * RETRY_SCHEDULED 证据。回写异常只告警不抛出 — 证据落账不得阻断任务级延迟重试本身。
+     * sidecar, 对所有「PHOTO/VIDEO 且 wechatPrepare 尚未进入 SUCCEEDED/终态」的媒体软失败回写
+     * RETRY_SCHEDULED 证据。Story 10.11: VIDEO 加入同一驱动源 (耗尽判定在
+     * {@code ContentScheduler.convergeExhaustedPrepare}, 不另起重试循环)。回写异常只告警不抛出
+     * — 证据落账不得阻断任务级延迟重试本身。
      *
      * @return 是否至少回写了一个媒体 (测试与调度器观测用)
      */
@@ -474,7 +682,8 @@ public class WeChatMediaPreparer {
             }
             boolean mutated = false;
             for (TweetMedia m : sidecar.get().getMedia()) {
-                if (m == null || !hasText(m.getId()) || m.getType() != TweetMediaType.PHOTO) {
+                if (m == null || !hasText(m.getId())
+                        || !(m.getType() == TweetMediaType.PHOTO || m.getType() == TweetMediaType.VIDEO)) {
                     continue;
                 }
                 MediaPhaseState prev = m.getWechatPrepare() != null
