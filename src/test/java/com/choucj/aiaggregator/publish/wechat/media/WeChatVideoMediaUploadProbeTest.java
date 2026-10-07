@@ -10,6 +10,7 @@ import me.chanjar.weixin.mp.api.WxMpMaterialService;
 import me.chanjar.weixin.mp.api.WxMpService;
 import me.chanjar.weixin.mp.bean.material.WxMpMaterial;
 import me.chanjar.weixin.mp.bean.material.WxMpMaterialUploadResult;
+import me.chanjar.weixin.mp.bean.material.WxMpMaterialVideoInfoResult;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -208,6 +209,86 @@ class WeChatVideoMediaUploadProbeTest {
                 .satisfies(ex -> assertThat(((AggregatorException) ex).getErrorCode())
                         .isEqualTo(ErrorCode.WECHAT_API_ERROR))
                 .hasMessageContaining("WxJava 视频临时素材上传框架异常: sdk state broken");
+    }
+
+    @Test
+    void shouldQueryPermanentVideoInfoAndReturnFields(CapturedOutput output) throws Exception {
+        WxMpMaterialVideoInfoResult result = new WxMpMaterialVideoInfoResult();
+        result.setTitle("demo title");
+        result.setDescription("demo desc");
+        result.setDownUrl("https://mmedia.example/video-down");
+        when(wxMpService.getMaterialService()).thenReturn(materialService);
+        when(materialService.materialVideoInfo("PermId123456")).thenReturn(result);
+
+        WeChatVideoMediaUploadProbe.PermanentVideoInfo info = probe.queryPermanentVideoInfo("PermId123456");
+
+        assertThat(info.title()).isEqualTo("demo title");
+        assertThat(info.description()).isEqualTo("demo desc");
+        assertThat(info.downUrl()).isEqualTo("https://mmedia.example/video-down");
+        assertThat(output)
+                .contains("微信永久视频素材信息查询成功")
+                .contains("mediaIdPrefix=PermId");
+    }
+
+    @Test
+    void shouldReturnNullFieldsWhenVideoInfoResultIsNull() throws Exception {
+        when(wxMpService.getMaterialService()).thenReturn(materialService);
+        when(materialService.materialVideoInfo("PermId123456")).thenReturn(null);
+
+        WeChatVideoMediaUploadProbe.PermanentVideoInfo info = probe.queryPermanentVideoInfo("PermId123456");
+
+        assertThat(info.title()).isNull();
+        assertThat(info.description()).isNull();
+        assertThat(info.downUrl()).isNull();
+    }
+
+    @Test
+    void shouldReturnNullFieldsWhenVideoInfoResultHasNullFields(CapturedOutput output) throws Exception {
+        when(wxMpService.getMaterialService()).thenReturn(materialService);
+        when(materialService.materialVideoInfo("PermId123456")).thenReturn(new WxMpMaterialVideoInfoResult());
+
+        WeChatVideoMediaUploadProbe.PermanentVideoInfo info = probe.queryPermanentVideoInfo("PermId123456");
+
+        assertThat(info.title()).isNull();
+        assertThat(info.description()).isNull();
+        assertThat(info.downUrl()).isNull();
+        assertThat(output)
+                .contains("微信永久视频素材信息查询成功")
+                .doesNotContain("查询返回空");
+    }
+
+    @Test
+    void shouldFailFastWhenVideoInfoMediaIdBlank() {
+        assertThatThrownBy(() -> probe.queryPermanentVideoInfo("  "))
+                .isInstanceOf(NonRetryableException.class)
+                .hasMessageContaining("微信永久视频素材 media_id 不能为空");
+    }
+
+    @Test
+    void shouldMapWxVideoInfoError() throws Exception {
+        when(wxMpService.getMaterialService()).thenReturn(materialService);
+        when(materialService.materialVideoInfo("PermId123456"))
+                .thenThrow(wxError(45009, "api limited"));
+
+        assertThatThrownBy(() -> probe.queryPermanentVideoInfo("PermId123456"))
+                .isInstanceOf(com.choucj.aiaggregator.common.exception.RetryableException.class)
+                .satisfies(ex -> assertThat(((AggregatorException) ex).getErrorCode())
+                        .isEqualTo(ErrorCode.WECHAT_RATE_LIMITED))
+                .hasMessageContaining("微信 materialVideoInfo 失败")
+                .hasMessageContaining("errcode=45009");
+    }
+
+    @Test
+    void shouldWrapVideoInfoRuntimeException() throws Exception {
+        when(wxMpService.getMaterialService()).thenReturn(materialService);
+        when(materialService.materialVideoInfo("PermId123456"))
+                .thenThrow(new IllegalStateException("sdk state broken"));
+
+        assertThatThrownBy(() -> probe.queryPermanentVideoInfo("PermId123456"))
+                .isInstanceOf(NonRetryableException.class)
+                .satisfies(ex -> assertThat(((AggregatorException) ex).getErrorCode())
+                        .isEqualTo(ErrorCode.WECHAT_API_ERROR))
+                .hasMessageContaining("WxJava 永久视频素材信息查询框架异常: sdk state broken");
     }
 
     private static WxErrorException wxError(int code, String message) {

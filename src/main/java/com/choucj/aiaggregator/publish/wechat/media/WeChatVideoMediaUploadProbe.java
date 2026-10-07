@@ -11,6 +11,7 @@ import me.chanjar.weixin.common.error.WxErrorException;
 import me.chanjar.weixin.mp.api.WxMpService;
 import me.chanjar.weixin.mp.bean.material.WxMpMaterial;
 import me.chanjar.weixin.mp.bean.material.WxMpMaterialUploadResult;
+import me.chanjar.weixin.mp.bean.material.WxMpMaterialVideoInfoResult;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
@@ -115,6 +116,43 @@ public class WeChatVideoMediaUploadProbe {
         }
     }
 
+    /**
+     * 查询永久视频素材信息(只读, Story 10.9 spike)。
+     *
+     * <p>不校验 title/description/downUrl 是否齐全: 微信对视频可能有异步转码,
+     * 回读字段为空属于可观测事实, 由调用方(spike 测试)记录并判定。
+     *
+     * @param mediaId 永久视频素材 media_id
+     * @return 素材信息摘要; 微信返回空报文时字段为 null
+     */
+    public PermanentVideoInfo queryPermanentVideoInfo(String mediaId) {
+        String safeMediaId = requireText(mediaId, "微信永久视频素材 media_id 不能为空");
+        long startNanos = System.nanoTime();
+        try {
+            WxMpMaterialVideoInfoResult result = wxMpService.getMaterialService()
+                    .materialVideoInfo(safeMediaId);
+            long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
+            if (result == null) {
+                log.info("微信永久视频素材信息查询返回空: mediaIdPrefix={}, elapsedMs={}",
+                        prefixMediaId(safeMediaId), elapsedMs);
+                return new PermanentVideoInfo(null, null, null);
+            }
+            log.info("微信永久视频素材信息查询成功: mediaIdPrefix={}, elapsedMs={}",
+                    prefixMediaId(safeMediaId), elapsedMs);
+            return new PermanentVideoInfo(result.getTitle(), result.getDescription(), result.getDownUrl());
+        } catch (WxErrorException e) {
+            throw WxJavaWeChatClient.mapWxErrorException(e, "materialVideoInfo");
+        } catch (NonRetryableException e) {
+            throw e;
+        } catch (RuntimeException e) {
+            throw new NonRetryableException(
+                    ErrorCode.WECHAT_API_ERROR,
+                    "WxJava 永久视频素材信息查询框架异常: "
+                            + SingleModelRewriter.truncateForLog(SingleModelRewriter.getRootMessage(e), 200),
+                    e);
+        }
+    }
+
     private static Path validateVideoFile(Path videoPath) {
         if (videoPath == null) {
             throw new NonRetryableException(ErrorCode.WECHAT_API_ERROR,
@@ -165,5 +203,8 @@ public class WeChatVideoMediaUploadProbe {
 
     public record UploadedPermanentVideo(String mediaId, String url,
                                          String fileName, long sizeBytes) {
+    }
+
+    public record PermanentVideoInfo(String title, String description, String downUrl) {
     }
 }
