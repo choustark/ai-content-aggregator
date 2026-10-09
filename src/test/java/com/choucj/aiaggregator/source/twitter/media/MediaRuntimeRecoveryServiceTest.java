@@ -58,7 +58,7 @@ class MediaRuntimeRecoveryServiceTest {
         ArchiverProperties archiverProperties = new ArchiverProperties();
         archiverProperties.setBaseDirectory(tempDir.resolve("fallback").toString());
 
-        writer = new TweetMediaArchiveWriter(mediaProperties, archiverProperties, new ObjectMapper().findAndRegisterModules());
+        writer = new TweetMediaArchiveWriter(mediaProperties, archiverProperties, new ObjectMapper().findAndRegisterModules(), null);
         service = new MediaRuntimeRecoveryService(stateRepository, writer);
     }
 

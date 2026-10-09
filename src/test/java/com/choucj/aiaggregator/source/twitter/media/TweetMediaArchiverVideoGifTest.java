@@ -59,6 +59,7 @@ class TweetMediaArchiverVideoGifTest {
 
     private TweetMediaArchiveWriter writer;
     private TweetMediaArchiver archiver;
+    private io.micrometer.core.instrument.simple.SimpleMeterRegistry meterRegistry;
 
     @BeforeEach
     void setUp() {
@@ -71,8 +72,28 @@ class TweetMediaArchiverVideoGifTest {
         ArchiverProperties archiverProperties = new ArchiverProperties();
         archiverProperties.setBaseDirectory(tempDir.resolve("fallback").toString());
 
-        writer = new TweetMediaArchiveWriter(mediaProperties, archiverProperties, new ObjectMapper().findAndRegisterModules());
-        archiver = new TweetMediaArchiver(downloadClient, writer, stateRepository);
+        meterRegistry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        com.choucj.aiaggregator.monitoring.MediaMetrics mediaMetrics =
+                new com.choucj.aiaggregator.monitoring.MediaMetrics(meterRegistry);
+        writer = new TweetMediaArchiveWriter(mediaProperties, archiverProperties, new ObjectMapper().findAndRegisterModules(), mediaMetrics);
+        archiver = new TweetMediaArchiver(downloadClient, writer, stateRepository, mediaMetrics);
+    }
+
+    /** Story 10.12: 读取指定组合的 media.phase.result 计数值. */
+    private double counterValue(String type, String phase, String outcome, String errorClass) {
+        return meterRegistry.get("aiaggregator.media.phase.result")
+                .tag("type", type)
+                .tag("phase", phase)
+                .tag("outcome", outcome)
+                .tag("errorClass", errorClass)
+                .counter().count();
+    }
+
+    /** Story 10.12: 全部 media.phase.result 计数总和 (零副作用断言用). */
+    private double totalMediaCounterCount() {
+        return meterRegistry.find("aiaggregator.media.phase.result").counters().stream()
+                .mapToDouble(io.micrometer.core.instrument.Counter::count)
+                .sum();
     }
 
     // ===== 矩阵行 1: 多 mp4 不同码率 → 最高码率被下载, sidecar SUCCEEDED + 完整证据 =====
@@ -130,6 +151,9 @@ class TweetMediaArchiverVideoGifTest {
         assertThat(archived.getFailureReason()).isNull();
         String rawSidecar = Files.readString(tempDir.resolve("media/twitter/2026-08-02/tweet-v1/media.json"));
         assertThat(rawSidecar).contains("fileSizeBytes").contains("downloadedContentType");
+
+        // Story 10.12: VIDEO download 成功计数
+        assertThat(counterValue("video", "download", "succeeded", "none")).isEqualTo(1.0);
     }
 
     // ===== 矩阵行 2: 同码率确定性 → URL 字典序选中, 与 variants 列表顺序无关 =====
@@ -332,6 +356,11 @@ class TweetMediaArchiverVideoGifTest {
         assertThat(archived.getDownload().getNextRetryAt()).isNull();
         assertThat(archived.getDownload().getErrorClass()).isEqualTo("RETRYABLE");
         assertThat(archived.getDownloadStatus()).isEqualTo(MediaDownloadStatus.FAILED);
+
+        // Story 10.12: 可重试网络异常下载仍终态 (failed_terminal/retryable), 不产生 retry_scheduled
+        assertThat(counterValue("video", "download", "failed_terminal", "retryable")).isEqualTo(1.0);
+        assertThat(meterRegistry.find("aiaggregator.media.phase.result")
+                .tag("phase", "download").tag("outcome", "retry_scheduled").counter()).isNull();
     }
 
     /**
@@ -398,6 +427,8 @@ class TweetMediaArchiverVideoGifTest {
         assertThat(String.valueOf(archived.getDownload().getUpdatedAt())).isEqualTo(firstPhaseUpdatedAt);
         assertThat(archived.getFileSizeBytes()).isEqualTo(firstFileSize);
         assertThat(archived.getDownloadedContentType()).isEqualTo("video/mp4");
+        // Story 10.12: 幂等跳过不计 download 成功 — 第二次运行后计数仍为首次真实下载的 1.0
+        assertThat(counterValue("video", "download", "succeeded", "none")).isEqualTo(1.0);
     }
 
     /** (AC3): 文件缺失 (或零字节) → 幂等双校验不通过, 重新下载. */
@@ -529,6 +560,9 @@ class TweetMediaArchiverVideoGifTest {
         assertThat(archived.getOriginalPostUrl()).isNotBlank();
         assertThat(archived.getManualInstruction()).isNotBlank();
         assertThat(archived.getProviderRawSummary()).isEqualTo("gif:variants=1,maxBitrate=0,formats=video/mp4");
+
+        // Story 10.12: GIF (DEFERRED) 不建指标 — 下载跳过零计数
+        assertThat(totalMediaCounterCount()).isZero();
     }
 
     /** GIF 绝不触发下载 (VIDEO 下载化后 GIF 语义零变化的另一半). */

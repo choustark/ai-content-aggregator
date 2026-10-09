@@ -67,6 +67,8 @@ class WeChatMediaPreparerTest {
 
     TweetMediaArchiveWriter writer;
     WeChatMediaPreparer preparer;
+    com.choucj.aiaggregator.monitoring.MediaMetrics metrics;
+    io.micrometer.core.instrument.simple.SimpleMeterRegistry meterRegistry;
 
     @BeforeEach
     void setUp() {
@@ -74,9 +76,15 @@ class WeChatMediaPreparerTest {
         mediaProperties.setBaseDirectory(tempDir.toString());
         ArchiverProperties archiverProperties = new ArchiverProperties();
         archiverProperties.setBaseDirectory(tempDir.toString());
+        meterRegistry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        metrics = new com.choucj.aiaggregator.monitoring.MediaMetrics(meterRegistry);
         writer = new TweetMediaArchiveWriter(mediaProperties, archiverProperties,
-                new ObjectMapper().findAndRegisterModules());
-        preparer = new WeChatMediaPreparer(uploadProbe, Optional.of(writer));
+                new ObjectMapper().findAndRegisterModules(), metrics);
+        // videoAdapter=null 保持 10.8 前语义 (VIDEO/GIF 走 SKIPPED 降级); VIDEO 生产分支由
+        // videoPreparer()/videoPreparerDisabled() 显式构造 (Story 10.11 测试口径不变)
+        preparer = new WeChatMediaPreparer(uploadProbe, Optional.of(writer),
+                new com.choucj.aiaggregator.task.queue.RetryPolicyProperties(),
+                null, new WeChatProperties(), metrics);
     }
 
     // ===== AC1/AC2: 成功上传 + sidecar 回写 =====
@@ -105,6 +113,9 @@ class WeChatMediaPreparerTest {
         assertThat(sidecarMedia.getFailureReason()).isNull();
         // 未混用字段: 正文图片不写 wechatMediaId (uploadimg 只返回 url)
         assertThat(sidecarMedia.getWechatMediaId()).isNull();
+
+        // Story 10.12: wechat_prepare 成功计数
+        assertThat(counterValue("photo", "wechat_prepare", "succeeded", "none")).isEqualTo(1.0);
     }
 
     // ===== AC7: 幂等重入 =====
@@ -130,6 +141,9 @@ class WeChatMediaPreparerTest {
         TweetMedia sidecarMedia = readSidecarMedia("media-1");
         assertThat(sidecarMedia.getUploadStatus()).isEqualTo(MediaUploadStatus.UPLOADED);
         assertThat(sidecarMedia.getWechatUrl()).isEqualTo(WECHAT_URL);
+
+        // Story 10.12: 幂等跳过零指标 (零副作用)
+        assertThat(totalMediaCounterCount()).isZero();
     }
 
     // ===== AC7 判别性: sidecar 是唯一权威源，不信任传入对象 (CR 2026-08-28 Patch#6) =====
@@ -319,6 +333,10 @@ class WeChatMediaPreparerTest {
         TweetMedia succeeded = readSidecarMedia("media-2");
         assertThat(succeeded.getUploadStatus()).isEqualTo(MediaUploadStatus.UPLOADED);
         assertThat(succeeded.getWechatUrl()).isEqualTo(WECHAT_URL);
+
+        // Story 10.12: 重试分类 → retry_scheduled/retryable; 成功媒体 → succeeded
+        assertThat(counterValue("photo", "wechat_prepare", "retry_scheduled", "retryable")).isEqualTo(1.0);
+        assertThat(counterValue("photo", "wechat_prepare", "succeeded", "none")).isEqualTo(1.0);
     }
 
     // ===== AC5: 视频/GIF 不走图片路径 =====
@@ -342,6 +360,9 @@ class WeChatMediaPreparerTest {
         assertThat(readSidecarMedia("media-v").getFailureReason()).contains("video_embed_unverified");
         assertThat(readSidecarMedia("media-g").getUploadStatus()).isEqualTo(MediaUploadStatus.SKIPPED);
         assertThat(readSidecarMedia("media-g").getFailureReason()).contains("gif_api_unverified");
+
+        // Story 10.12: VIDEO/GIF 降级跳过零指标 (GIF 不建指标; 跳过非阶段结果)
+        assertThat(totalMediaCounterCount()).isZero();
     }
 
     // ===== AC7: 本地文件缺失 =====
@@ -359,6 +380,9 @@ class WeChatMediaPreparerTest {
         TweetMedia sidecarMedia = readSidecarMedia("media-1");
         assertThat(sidecarMedia.getUploadStatus()).isEqualTo(MediaUploadStatus.FAILED);
         assertThat(sidecarMedia.getFailureReason()).contains("local file missing");
+
+        // Story 10.12: 本地前置失败 → failed_terminal/permanent
+        assertThat(counterValue("photo", "wechat_prepare", "failed_terminal", "permanent")).isEqualTo(1.0);
     }
 
     @Test
@@ -453,6 +477,9 @@ class WeChatMediaPreparerTest {
         verifyNoInteractions(uploadProbe);
         assertThat(result.mediaStatuses()).allMatch(s -> s.failureReason() != null
                 && s.failureReason().contains("sidecar"));
+
+        // Story 10.12: sidecar 缺失逐媒体记 failed_terminal
+        assertThat(counterValue("photo", "wechat_prepare", "failed_terminal", "permanent")).isEqualTo(2.0);
     }
 
     // ===== Story 9.1 Task 3: 上传前 publishability=BLOCKED 拦截 (AC 5) =====
@@ -478,6 +505,9 @@ class WeChatMediaPreparerTest {
         assertThat(sidecarMedia.getUploadStatus()).isEqualTo(MediaUploadStatus.SKIPPED);
         assertThat(sidecarMedia.getPublishability()).isEqualTo(PublishabilityStatus.BLOCKED);
         assertThat(sidecarMedia.getFailureReason()).contains("BLOCKED");
+
+        // Story 10.12: BLOCKED gate 跳过零指标 (矩阵第 7 行)
+        assertThat(totalMediaCounterCount()).isZero();
     }
 
     @Test
@@ -575,6 +605,9 @@ class WeChatMediaPreparerTest {
         assertThat(sidecarMedia.getWechatPrepare().getErrorClass()).isEqualTo("RETRYABLE");
         assertThat(sidecarMedia.getWechatPrepare().getErrorCode()).isEqualTo("WECHAT_RATE_LIMITED");
         assertThat(sidecarMedia.getWechatPrepare().getErrorSummary()).contains("45009");
+
+        // Story 10.12: 45009 → retry_scheduled/rate_limited
+        assertThat(counterValue("photo", "wechat_prepare", "retry_scheduled", "rate_limited")).isEqualTo(1.0);
     }
 
     /** Story 10.8 (I/O 矩阵「40164 环境阻塞」): 终态 ENVIRONMENT_BLOCKED 证据 + nextRetryAt=null. */
@@ -605,6 +638,9 @@ class WeChatMediaPreparerTest {
         assertThat(sidecarMedia.getWechatPrepare().getNextRetryAt()).isNull();
         assertThat(sidecarMedia.getWechatPrepare().getErrorClass()).isEqualTo("TERMINAL");
         assertThat(sidecarMedia.getWechatPrepare().getErrorCode()).isEqualTo("WECHAT_ENVIRONMENT_BLOCKED");
+
+        // Story 10.12: 40164 → blocked/environment_blocked (立即终态零重试)
+        assertThat(counterValue("photo", "wechat_prepare", "blocked", "environment_blocked")).isEqualTo(1.0);
     }
 
     /** Story 10.8: attempt 单调递增 — 二次失败 attempt=2 且 nextRetryAt 按新 attempt 退避. */
@@ -728,6 +764,9 @@ class WeChatMediaPreparerTest {
                 .isEqualTo(com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus.SUCCEEDED);
         assertThat(sidecarMedia.getWechatPrepare().getAttempt()).isEqualTo(1);
         assertThat(sidecarMedia.getWechatPrepare().getNextRetryAt()).isNull();
+
+        // Story 10.12: VIDEO wechat_prepare 成功计数
+        assertThat(counterValue("video", "wechat_prepare", "succeeded", "none")).isEqualTo(1.0);
     }
 
     /** I/O 矩阵「幂等跳过」: 已有 mediaId + wechatPrepare=SUCCEEDED → 零上传请求, 成功字段不回退. */
@@ -758,6 +797,9 @@ class WeChatMediaPreparerTest {
         assertThat(sidecarMedia.getWechatPrepare().getStatus())
                 .isEqualTo(com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus.SUCCEEDED);
         assertThat(sidecarMedia.getUploadStatus()).isEqualTo(MediaUploadStatus.UPLOADED);
+
+        // Story 10.12: VIDEO 幂等跳过零指标
+        assertThat(totalMediaCounterCount()).isZero();
     }
 
     /** I/O 矩阵「环境阻断」: 40164 → ENVIRONMENT_BLOCKED 终态, 不重试. */
@@ -782,6 +824,9 @@ class WeChatMediaPreparerTest {
                 .isEqualTo(com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus.ENVIRONMENT_BLOCKED);
         assertThat(sidecarMedia.getWechatPrepare().getNextRetryAt()).isNull();
         assertThat(sidecarMedia.getWechatVideoMediaId()).isNull();
+
+        // Story 10.12: VIDEO 40164 → blocked/environment_blocked
+        assertThat(counterValue("video", "wechat_prepare", "blocked", "environment_blocked")).isEqualTo(1.0);
     }
 
     /** I/O 矩阵「临时错误」: Retryable (45009/网络) → RETRY_SCHEDULED + nextRetryAt 有限重试. */
@@ -807,6 +852,9 @@ class WeChatMediaPreparerTest {
         assertThat(sidecarMedia.getWechatPrepare().getNextRetryAt()).isNotNull();
         assertThat(sidecarMedia.getWechatPrepare().getErrorClass()).isEqualTo("RETRYABLE");
         assertThat(sidecarMedia.getWechatVideoMediaId()).isNull();
+
+        // Story 10.12: VIDEO 45009 → retry_scheduled/rate_limited
+        assertThat(counterValue("video", "wechat_prepare", "retry_scheduled", "rate_limited")).isEqualTo(1.0);
     }
 
     /** I/O 矩阵「本地前置失败」: 文件缺失 → 不发起上传, FAILED_TERMINAL (NonRetryable). */
@@ -826,6 +874,9 @@ class WeChatMediaPreparerTest {
         assertThat(sidecarMedia.getWechatPrepare().getStatus())
                 .isEqualTo(com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus.FAILED_TERMINAL);
         assertThat(sidecarMedia.getWechatPrepare().getErrorClass()).isEqualTo("TERMINAL");
+
+        // Story 10.12: VIDEO 本地前置失败 → failed_terminal/permanent
+        assertThat(counterValue("video", "wechat_prepare", "failed_terminal", "permanent")).isEqualTo(1.0);
     }
 
     /** I/O 矩阵「回写未命中」防御口径: sidecar 未命中该媒体 → 不记成功, FAILED + 可诊断原因. */
@@ -938,10 +989,27 @@ class WeChatMediaPreparerTest {
 
     // ===== helpers =====
 
+    /** Story 10.12: 读取指定组合的 media.phase.result 计数值. */
+    private double counterValue(String type, String phase, String outcome, String errorClass) {
+        return meterRegistry.get("aiaggregator.media.phase.result")
+                .tag("type", type)
+                .tag("phase", phase)
+                .tag("outcome", outcome)
+                .tag("errorClass", errorClass)
+                .counter().count();
+    }
+
+    /** Story 10.12: 全部 media.phase.result 计数总和 (零副作用断言用). */
+    private double totalMediaCounterCount() {
+        return meterRegistry.find("aiaggregator.media.phase.result").counters().stream()
+                .mapToDouble(io.micrometer.core.instrument.Counter::count)
+                .sum();
+    }
+
     private WeChatMediaPreparer videoPreparer() {
         return new WeChatMediaPreparer(uploadProbe, Optional.of(writer),
                 new com.choucj.aiaggregator.task.queue.RetryPolicyProperties(),
-                videoAdapter, new WeChatProperties());
+                videoAdapter, new WeChatProperties(), metrics);
     }
 
     private WeChatMediaPreparer videoPreparerDisabled() {
@@ -949,7 +1017,7 @@ class WeChatMediaPreparerTest {
         properties.getVideo().setEnabled(false);
         return new WeChatMediaPreparer(uploadProbe, Optional.of(writer),
                 new com.choucj.aiaggregator.task.queue.RetryPolicyProperties(),
-                videoAdapter, properties);
+                videoAdapter, properties, metrics);
     }
 
     private TweetMedia.TweetMediaBuilder video(String id, String filename) {

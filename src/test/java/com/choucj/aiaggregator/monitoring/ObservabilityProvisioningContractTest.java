@@ -76,6 +76,7 @@ class ObservabilityProvisioningContractTest {
                 .contains("http_server_requests_seconds_count")
                 .contains("aiaggregator_task_queue_size")
                 .contains("aiaggregator_task_processed_total")
+                .contains("aiaggregator_media_phase_result_total")
                 .contains("\"noValue\":\"N/A\"")
                 .contains("队列执行结果");
     }

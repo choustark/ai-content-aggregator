@@ -61,6 +61,7 @@ class TweetMediaArchiverTest {
 
     private TweetMediaArchiveWriter writer;
     private TweetMediaArchiver archiver;
+    private io.micrometer.core.instrument.simple.SimpleMeterRegistry meterRegistry;
 
     @BeforeEach
     void setUp() {
@@ -73,8 +74,21 @@ class TweetMediaArchiverTest {
         ArchiverProperties archiverProperties = new ArchiverProperties();
         archiverProperties.setBaseDirectory(tempDir.resolve("fallback").toString());
 
-        writer = new TweetMediaArchiveWriter(mediaProperties, archiverProperties, new ObjectMapper().findAndRegisterModules());
-        archiver = new TweetMediaArchiver(downloadClient, writer, stateRepository);
+        meterRegistry = new io.micrometer.core.instrument.simple.SimpleMeterRegistry();
+        com.choucj.aiaggregator.monitoring.MediaMetrics mediaMetrics =
+                new com.choucj.aiaggregator.monitoring.MediaMetrics(meterRegistry);
+        writer = new TweetMediaArchiveWriter(mediaProperties, archiverProperties, new ObjectMapper().findAndRegisterModules(), mediaMetrics);
+        archiver = new TweetMediaArchiver(downloadClient, writer, stateRepository, mediaMetrics);
+    }
+
+    /** Story 10.12: 读取指定组合的 media.phase.result 计数值. */
+    private double counterValue(String type, String phase, String outcome, String errorClass) {
+        return meterRegistry.get("aiaggregator.media.phase.result")
+                .tag("type", type)
+                .tag("phase", phase)
+                .tag("outcome", outcome)
+                .tag("errorClass", errorClass)
+                .counter().count();
     }
 
     @Test
@@ -102,6 +116,9 @@ class TweetMediaArchiverTest {
         // Story 10.8: 成功直写三阶段 download=SUCCEEDED (幂等跳过的权威依据)
         assertThat(updated.getDownload()).isNotNull();
         assertThat(updated.getDownload().getStatus()).isEqualTo(MediaPhaseStatus.SUCCEEDED);
+
+        // Story 10.12: download 成功计数
+        assertThat(counterValue("photo", "download", "succeeded", "none")).isEqualTo(1.0);
     }
 
     /**
@@ -130,6 +147,8 @@ class TweetMediaArchiverTest {
         MediaArchiveRecord afterSkip = writer.readSidecar("tweet-idem", PUBLISHED_AT).orElseThrow();
         assertThat(String.valueOf(afterSkip.getMedia().get(0).getDownload().getUpdatedAt()))
                 .isEqualTo(firstPhaseUpdatedAt);
+        // Story 10.12: 幂等跳过不计 download 成功 — 第二次运行后计数仍为首次真实下载的 1.0
+        assertThat(counterValue("photo", "download", "succeeded", "none")).isEqualTo(1.0);
     }
 
     /**
@@ -193,6 +212,9 @@ class TweetMediaArchiverTest {
             assertThat(files.map(Path::toString).toList())
                     .noneMatch(name -> name.endsWith(".jpg") || name.endsWith(".tmp"));
         }
+
+        // Story 10.12: 魔数校验失败属不可重试终态 (NonRetryable → permanent)
+        assertThat(counterValue("photo", "download", "failed_terminal", "permanent")).isEqualTo(1.0);
     }
 
     /** Story 10.8: 图片魔数识别 — JPEG/PNG/WebP 通过, 非图片/过短/null 拒绝。 */
@@ -344,6 +366,12 @@ class TweetMediaArchiverTest {
         assertThat(result.mediaStatuses())
                 .extracting(TweetMediaArchiver.MediaArchiveStatus::retryable)
                 .containsExactly(true, false);
+
+        // Story 10.12: 下载阶段无 retry_scheduled — RetryableException 仍终态, errorClass=retryable
+        assertThat(counterValue("photo", "download", "failed_terminal", "retryable")).isEqualTo(1.0);
+        assertThat(counterValue("photo", "download", "failed_terminal", "permanent")).isEqualTo(1.0);
+        assertThat(meterRegistry.find("aiaggregator.media.phase.result")
+                .tag("phase", "download").tag("outcome", "retry_scheduled").counter()).isNull();
     }
 
     /**
@@ -400,6 +428,9 @@ class TweetMediaArchiverTest {
                 "video:variants=1,maxBitrate=832000,formats=video/mp4");
         // 归档文件真实落盘
         assertThat(Files.exists(tempDir.resolve(archived.getLocalPath()))).isTrue();
+
+        // Story 10.12: VIDEO download 成功计数
+        assertThat(counterValue("video", "download", "succeeded", "none")).isEqualTo(1.0);
     }
 
     @Test
@@ -426,6 +457,9 @@ class TweetMediaArchiverTest {
                 .withBean(MediaRuntimeStateRepository.class,
                         () -> new MediaRuntimeStateRepository(org.mockito.Mockito.mock(
                                 com.choucj.aiaggregator.common.repository.RedisRepository.class)))
+                .withBean(com.choucj.aiaggregator.monitoring.MediaMetrics.class,
+                        () -> new com.choucj.aiaggregator.monitoring.MediaMetrics(
+                                new io.micrometer.core.instrument.simple.SimpleMeterRegistry()))
                 .withPropertyValues(
                         "twitter.media.enabled=true",
                         "twitter.media.download-timeout-seconds=30",

@@ -3,6 +3,7 @@ package com.choucj.aiaggregator.source.twitter.media;
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.util.TextTruncateUtil;
+import com.choucj.aiaggregator.monitoring.MediaMetrics;
 import com.choucj.aiaggregator.publish.storage.MediaArchiveRecord;
 import com.choucj.aiaggregator.publish.storage.TweetMediaArchiveWriter;
 import com.choucj.aiaggregator.source.twitter.config.TwitterMediaProperties;
@@ -82,6 +83,8 @@ public class TweetMediaArchiver {
     private final MediaDownloadClient downloadClient;
     private final TweetMediaArchiveWriter archiveWriter;
     private final MediaRuntimeStateRepository stateRepository;
+    /** Story 10.12: 媒体阶段成功率指标 (观测旁路, 不改变归档语义). */
+    private final MediaMetrics mediaMetrics;
     private final DateTimeFormatter dateFormatter;
 
     /**
@@ -90,13 +93,16 @@ public class TweetMediaArchiver {
      * @param downloadClient 媒体下载客户端
      * @param archiveWriter  归档写入器(提供 dateFormatter)
      * @param stateRepository 媒体运行时状态仓库 (Story 7.4, Redis 快照; 内部软失败, 不阻塞归档)
+     * @param mediaMetrics   媒体阶段指标 (Story 10.12; 观测旁路)
      */
     public TweetMediaArchiver(MediaDownloadClient downloadClient,
                                 TweetMediaArchiveWriter archiveWriter,
-                                MediaRuntimeStateRepository stateRepository) {
+                                MediaRuntimeStateRepository stateRepository,
+                                MediaMetrics mediaMetrics) {
         this.downloadClient = downloadClient;
         this.archiveWriter = archiveWriter;
         this.stateRepository = stateRepository;
+        this.mediaMetrics = mediaMetrics;
         // 复用 TweetMediaArchiveWriter 的 dateFormatter,确保日期格式一致性
         this.dateFormatter = extractDateFormatter(archiveWriter);
     }
@@ -364,6 +370,10 @@ public class TweetMediaArchiver {
                     tweetId, mediaId, filePath.getFileName());
         }
 
+        // Story 10.12: download 阶段成功计数在幂等跳过分支之后 — 仅真实下载/校验成功才计,
+        // 幂等跳过不产生指标 (观测旁路); 后续任一失败走 logFailedDownload 记 failed_terminal
+        recordDownloadSucceeded(media);
+
         // 确保目录存在 (Writer 的 ensureDirectoryExists 已在 resolveArchiveDir 隐式处理,
         // 但并发场景下可能尚未创建, 此处显式调用)
         try {
@@ -441,6 +451,10 @@ public class TweetMediaArchiver {
             log.warn("幂等检查 VIDEO 文件状态失败, 继续尝试下载: tweetId={}, mediaId={}, file={}",
                     tweetId, mediaId, filePath.getFileName());
         }
+
+        // Story 10.12: download 阶段成功计数在幂等跳过分支之后 — 仅真实下载/校验成功才计,
+        // 幂等跳过不产生指标 (观测旁路); 后续任一失败走 logFailedDownload 记 failed_terminal
+        recordDownloadSucceeded(media);
 
         // 选择在下载前一次性确定; 选中候选失败不回退次优候选 (Story 10.10 OQ1 裁定)
         TweetMediaVariant selected = VideoVariantSelector.select(media.getVariants())
@@ -850,6 +864,9 @@ public class TweetMediaArchiver {
 
     private String logFailedDownload(String tweetId, LocalDateTime publishedAt, TweetMedia media,
                                      String mediaId, int mediaIndex, Exception e) {
+        // Story 10.12: 下载失败唯一汇聚点 → failed_terminal 终态计数 (不产生 retry_scheduled;
+        // errorClass 仅记录异常性质: 可重试异常=retryable, 其余=permanent)。观测旁路, 不改变终态语义。
+        recordDownloadFailedTerminal(media, e);
         String failureReason;
         if (e instanceof NonRetryableException) {
             failureReason = TextTruncateUtil.truncateForLog(e.getMessage(), 200);
@@ -887,6 +904,45 @@ public class TweetMediaArchiver {
                     tweetId, mediaId);
         }
         return failureReason;
+    }
+
+    /** Story 10.12: download 阶段成功计数 (PHOTO/VIDEO; GIF/UNKNOWN 不建指标). */
+    private void recordDownloadSucceeded(TweetMedia media) {
+        if (mediaMetrics == null) {
+            return;
+        }
+        MediaMetrics.MediaType type = metricTypeOf(media);
+        if (type != null) {
+            mediaMetrics.recordSucceeded(type, MediaMetrics.MediaPhase.DOWNLOAD);
+        }
+    }
+
+    /** Story 10.12: download 阶段终态失败计数 — RetryableException=retryable, 其余=permanent. */
+    private void recordDownloadFailedTerminal(TweetMedia media, Exception e) {
+        if (mediaMetrics == null) {
+            return;
+        }
+        MediaMetrics.MediaType type = metricTypeOf(media);
+        if (type == null) {
+            return;
+        }
+        mediaMetrics.record(type, MediaMetrics.MediaPhase.DOWNLOAD,
+                MediaMetrics.MediaOutcome.FAILED_TERMINAL,
+                e instanceof RetryableException
+                        ? MediaMetrics.MediaErrorClass.RETRYABLE
+                        : MediaMetrics.MediaErrorClass.PERMANENT);
+    }
+
+    /** Story 10.12: 指标类型映射 — 仅 PHOTO/VIDEO 入指标, GIF/UNKNOWN 恒为 null. */
+    private static MediaMetrics.MediaType metricTypeOf(TweetMedia media) {
+        if (media == null) {
+            return null;
+        }
+        return switch (media.getType()) {
+            case PHOTO -> MediaMetrics.MediaType.PHOTO;
+            case VIDEO -> MediaMetrics.MediaType.VIDEO;
+            default -> null;
+        };
     }
 
     /**

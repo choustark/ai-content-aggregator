@@ -2,6 +2,7 @@ package com.choucj.aiaggregator.publish.storage;
 
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.util.TextTruncateUtil;
+import com.choucj.aiaggregator.monitoring.MediaMetrics;
 import com.choucj.aiaggregator.publish.storage.config.ArchiverProperties;
 import com.choucj.aiaggregator.source.twitter.config.TwitterMediaProperties;
 import com.choucj.aiaggregator.source.twitter.model.MediaDownloadStatus;
@@ -92,6 +93,8 @@ public class TweetMediaArchiveWriter {
 
     private final TwitterMediaProperties properties;
     private final ObjectMapper objectMapper;
+    /** Story 10.12: 媒体阶段成功率指标 (观测旁路; 测试直接构造传 null → 埋点静默关闭). */
+    private final MediaMetrics mediaMetrics;
     private final String baseDirectory;
     private final String sidecarFilename;
     private final DateTimeFormatter dateFormatter;
@@ -108,9 +111,11 @@ public class TweetMediaArchiveWriter {
 
     public TweetMediaArchiveWriter(TwitterMediaProperties properties,
                                    ArchiverProperties archiveProperties,
-                                   ObjectMapper objectMapper) {
+                                   ObjectMapper objectMapper,
+                                   MediaMetrics mediaMetrics) {
         this.properties = properties;
         this.objectMapper = objectMapper;
+        this.mediaMetrics = mediaMetrics;
         this.baseDirectory = resolveBaseDirectory(properties, archiveProperties);
         this.sidecarFilename = properties.getSidecarFilename();
         this.dateFormatter = DateTimeFormatter.ofPattern(properties.getDatePattern());
@@ -407,6 +412,9 @@ public class TweetMediaArchiveWriter {
                     .status(MediaPhaseStatus.SUCCEEDED).attempt(1).updatedAt(now).build());
         }
         writeSidecar(tweetId, record.getCanonicalArchiveDate().atStartOfDay(), record.getMedia());
+        // Story 10.12: article_reference 引用成功计数在 writeSidecar 成功之后单点统一计 —
+        // writeSidecar 抛异常 + 重放时不会双计 (观测旁路; 仅 PHOTO/VIDEO)
+        required.forEach(this::recordReferenceSucceeded);
         return true;
     }
 
@@ -453,6 +461,8 @@ public class TweetMediaArchiveWriter {
                         .updatedAt(now)
                         .build());
                 media.setUploadStatus(MediaUploadStatus.FAILED);
+                // Story 10.12: 重试耗尽收敛 → wechat_prepare 终态计数 (观测旁路)
+                recordPrepareExhausted(media);
                 mutated = true;
             }
             if (mutated) {
@@ -462,6 +472,37 @@ public class TweetMediaArchiveWriter {
             }
             return mutated;
         }
+    }
+
+    // ===== Story 10.12: 媒体阶段指标 (观测旁路; mediaMetrics=null 时静默关闭) =====
+
+    /** article_reference 引用成功计数 (PHOTO/VIDEO; GIF/UNKNOWN 不建指标). */
+    private void recordReferenceSucceeded(TweetMedia media) {
+        MediaMetrics.MediaType type = metricTypeOf(media);
+        if (mediaMetrics != null && type != null) {
+            mediaMetrics.recordSucceeded(type, MediaMetrics.MediaPhase.ARTICLE_REFERENCE);
+        }
+    }
+
+    /** wechat_prepare 重试耗尽终态计数 (PERMANENT 分类). */
+    private void recordPrepareExhausted(TweetMedia media) {
+        MediaMetrics.MediaType type = metricTypeOf(media);
+        if (mediaMetrics != null && type != null) {
+            mediaMetrics.record(type, MediaMetrics.MediaPhase.WECHAT_PREPARE,
+                    MediaMetrics.MediaOutcome.FAILED_TERMINAL, MediaMetrics.MediaErrorClass.PERMANENT);
+        }
+    }
+
+    /** 指标类型映射 — 仅 PHOTO/VIDEO 入指标, GIF/UNKNOWN 恒为 null (Story 10.12 Never). */
+    private static MediaMetrics.MediaType metricTypeOf(TweetMedia media) {
+        if (media == null) {
+            return null;
+        }
+        return switch (media.getType()) {
+            case PHOTO -> MediaMetrics.MediaType.PHOTO;
+            case VIDEO -> MediaMetrics.MediaType.VIDEO;
+            default -> null;
+        };
     }
 
     private Path resolveArchiveDirForDate(String tweetId, LocalDate date) {

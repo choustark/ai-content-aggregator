@@ -1,6 +1,7 @@
 package com.choucj.aiaggregator.publish.storage;
 
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
+import com.choucj.aiaggregator.monitoring.MediaMetrics;
 import com.choucj.aiaggregator.publish.storage.config.ArchiverProperties;
 import com.choucj.aiaggregator.source.twitter.config.TwitterMediaConfig;
 import com.choucj.aiaggregator.source.twitter.config.TwitterMediaProperties;
@@ -13,6 +14,7 @@ import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -53,6 +55,7 @@ class TweetMediaArchiveWriterTest {
     private ArchiverProperties archiveProperties;
     private ObjectMapper objectMapper;
     private TweetMediaArchiveWriter writer;
+    private SimpleMeterRegistry meterRegistry;
 
     @BeforeEach
     void setUp() {
@@ -63,7 +66,10 @@ class TweetMediaArchiveWriterTest {
         archiveProperties.setBaseDirectory(tempDir.toString());
         objectMapper = new ObjectMapper();
         objectMapper.findAndRegisterModules(); // JavaTimeModule for LocalDateTime
-        writer = new TweetMediaArchiveWriter(properties, archiveProperties, objectMapper);
+        // Story 10.12: 真实 MediaMetrics — 供 article_reference/耗尽埋点断言 (观测旁路)
+        meterRegistry = new SimpleMeterRegistry();
+        writer = new TweetMediaArchiveWriter(properties, archiveProperties, objectMapper,
+                new MediaMetrics(meterRegistry));
     }
 
     private TweetMedia samplePhotoMedia(String id, String sourceUrl) {
@@ -77,9 +83,20 @@ class TweetMediaArchiveWriterTest {
                 .build();
     }
 
+    /** Story 10.12: 读取指定组合的 media.phase.result 计数值. */
+    private double counterValue(String type, String phase, String outcome, String errorClass) {
+        return meterRegistry.get("aiaggregator.media.phase.result")
+                .tag("type", type)
+                .tag("phase", phase)
+                .tag("outcome", outcome)
+                .tag("errorClass", errorClass)
+                .counter().count();
+    }
+
     // Story 10.8: wechatPrepare RETRY_SCHEDULED 持久化往返 + 耗尽终态化
     @Test
     void shouldTerminalizeRetryScheduledPhaseOnMarkWechatPrepareExhausted() {
+        // Story 10.12: 耗尽收敛 → wechat_prepare/failed_terminal/permanent 计数见方法尾部断言
         LocalDateTime when = LocalDateTime.of(2026, 8, 2, 10, 0);
         LocalDateTime nextRetryAt = when.plusMinutes(1);
         TweetMedia pending = samplePhotoMedia("m1", "https://x.com/p1.jpg")
@@ -119,6 +136,10 @@ class TweetMediaArchiveWriterTest {
         // 幂等: 再次调用无可终态化媒体 → false
         assertThat(writer.markWechatPrepareExhausted("tw-2083", "WECHAT_RATE_LIMITED", "尝试耗尽"))
                 .isFalse();
+
+        // Story 10.12: 耗尽收敛恰好一个媒体入表 (photo, wechat_prepare, failed_terminal, permanent);
+        // 无 RETRY_SCHEDULED 阶段的 untouched 媒体不计数
+        assertThat(counterValue("photo", "wechat_prepare", "failed_terminal", "permanent")).isEqualTo(1.0);
     }
 
     // Story 10.8: articleId 非法/未知 → 不误写, 返回 false
@@ -251,7 +272,7 @@ class TweetMediaArchiveWriterTest {
         Path occupied = tempDir.resolve("occupied-base");
         Files.writeString(occupied, "not a directory");
         properties.setBaseDirectory(occupied.toString());
-        writer = new TweetMediaArchiveWriter(properties, archiveProperties, objectMapper);
+        writer = new TweetMediaArchiveWriter(properties, archiveProperties, objectMapper, null);
 
         assertThatThrownBy(() -> writer.writeSidecar("2083", LocalDateTime.of(2026, 8, 2, 10, 0), List.of()))
                 .isInstanceOf(NonRetryableException.class)
@@ -307,7 +328,7 @@ class TweetMediaArchiveWriterTest {
     @Test
     void shouldRejectIllegalDatePatternAtConstruction() {
         properties.setDatePattern("yyyy-MM-dd-HH"); // 字符集合法, 但 LocalDate.format 不支持 HH
-        assertThatThrownBy(() -> new TweetMediaArchiveWriter(properties, archiveProperties, objectMapper))
+        assertThatThrownBy(() -> new TweetMediaArchiveWriter(properties, archiveProperties, objectMapper, null))
                 .isInstanceOf(NonRetryableException.class)
                 .hasMessageContaining("date-pattern 配置非法");
     }
@@ -335,6 +356,7 @@ class TweetMediaArchiveWriterTest {
                     om.findAndRegisterModules();
                     return om;
                 })
+                .withBean(MediaMetrics.class, () -> new MediaMetrics(new SimpleMeterRegistry()))
                 .withUserConfiguration(TweetMediaArchiveWriter.class)
                 .withPropertyValues("twitter.media.enabled=" + enabled);
     }
@@ -345,7 +367,7 @@ class TweetMediaArchiveWriterTest {
         Path occupied = tempDir.resolve("occupied-base-2");
         Files.writeString(occupied, "not a directory");
         properties.setBaseDirectory(occupied.toString());
-        writer = new TweetMediaArchiveWriter(properties, archiveProperties, objectMapper);
+        writer = new TweetMediaArchiveWriter(properties, archiveProperties, objectMapper, null);
 
         TweetMedia m = samplePhotoMedia("m1", "https://secret.example.com/leak.jpg");
         try {
@@ -647,6 +669,10 @@ class TweetMediaArchiveWriterTest {
         List<TweetMedia> stored = writer.readCanonicalSidecar("referenced-1").orElseThrow().getMedia();
         assertThat(stored.get(0).getArticleReference().getStatus()).isEqualTo(MediaPhaseStatus.SUCCEEDED);
         assertThat(stored.get(1).getArticleReference().getStatus()).isEqualTo(MediaPhaseStatus.DEFERRED);
+
+        // Story 10.12: 仅 PHOTO 入表 (photo, article_reference, succeeded, none); GIF 不建指标 (恒零值)
+        assertThat(counterValue("photo", "article_reference", "succeeded", "none")).isEqualTo(1.0);
+        assertThat(counterValue("video", "article_reference", "succeeded", "none")).isZero();
     }
 
     @Test
@@ -695,6 +721,9 @@ class TweetMediaArchiveWriterTest {
         TweetMedia stored = writer.readCanonicalSidecar("video-ref-1").orElseThrow().getMedia().getFirst();
         assertThat(stored.getArticleReference().getStatus()).isEqualTo(MediaPhaseStatus.SUCCEEDED);
         assertThat(stored.getWechatPrepare().getStatus()).isEqualTo(MediaPhaseStatus.SUCCEEDED);
+
+        // Story 10.12: VIDEO 引用成功入表
+        assertThat(counterValue("video", "article_reference", "succeeded", "none")).isEqualTo(1.0);
     }
 
     @Test

@@ -5,6 +5,7 @@ import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.common.util.TextTruncateUtil;
+import com.choucj.aiaggregator.monitoring.MediaMetrics;
 import com.choucj.aiaggregator.publish.storage.MediaArchiveRecord;
 import com.choucj.aiaggregator.publish.storage.TweetMediaArchiveWriter;
 import com.choucj.aiaggregator.publish.wechat.config.WeChatProperties;
@@ -126,9 +127,11 @@ public class WeChatMediaPreparer {
     private final WeChatVideoMediaAdapter videoAdapter;
     /** Story 10.11: wechat.mp.video.* 配置 (videoAdapter 为 null 时仅 videoPreparationEnabled 兜底消费). */
     private final WeChatProperties weChatProperties;
+    /** Story 10.12: 媒体阶段成功率指标 (观测旁路; legacy 测试构造器传 null → 埋点静默关闭). */
+    private final MediaMetrics mediaMetrics;
 
     /**
-     * 构造器注入依赖 (Story 10.11 起含 {@link WeChatVideoMediaAdapter}).
+     * 构造器注入依赖 (Story 10.12 起含 {@link MediaMetrics}).
      *
      * @param uploadProbe      微信正文图片上传探针 (Story 8.1，同 wechat.mp.enabled 开关，必共存)
      * @param archiveWriter    sidecar 写入器 (twitter.media.enabled 独立开关，可能未注册；
@@ -136,25 +139,28 @@ public class WeChatMediaPreparer {
      * @param retryPolicy      task.retry.* 既有重试策略 (RETRY_SCHEDULED 的 nextRetryAt 退避来源)
      * @param videoAdapter     VIDEO 永久素材上传适配器 (Story 10.11，同 wechat.mp.enabled 开关)
      * @param weChatProperties wechat.mp.* 项目层配置 (wechat.mp.video.* 消费源)
+     * @param mediaMetrics     媒体阶段指标 (Story 10.12; 观测旁路, 不改变准备语义)
      */
     @Autowired
     public WeChatMediaPreparer(WeChatBodyImageUploadProbe uploadProbe,
                                Optional<TweetMediaArchiveWriter> archiveWriter,
                                RetryPolicyProperties retryPolicy,
                                WeChatVideoMediaAdapter videoAdapter,
-                               WeChatProperties weChatProperties) {
+                               WeChatProperties weChatProperties,
+                               MediaMetrics mediaMetrics) {
         this.uploadProbe = uploadProbe;
         this.archiveWriter = archiveWriter;
         this.retryPolicy = retryPolicy;
         this.videoAdapter = videoAdapter;
         this.weChatProperties = weChatProperties;
+        this.mediaMetrics = mediaMetrics;
     }
 
     /** Story 10.8 签名 (测试兼容): videoAdapter=null → VIDEO 走 10.8 降级语义 (SKIPPED, 零上传请求). */
     public WeChatMediaPreparer(WeChatBodyImageUploadProbe uploadProbe,
                                Optional<TweetMediaArchiveWriter> archiveWriter,
                                RetryPolicyProperties retryPolicy) {
-        this(uploadProbe, archiveWriter, retryPolicy, null, new WeChatProperties());
+        this(uploadProbe, archiveWriter, retryPolicy, null, new WeChatProperties(), null);
     }
 
     /** Story 10.8 前签名 (测试兼容): 默认 task.retry.* (max-attempts=3, 60s-600s 指数退避). */
@@ -277,6 +283,7 @@ public class WeChatMediaPreparer {
                                 ErrorCode.WECHAT_API_ERROR.name());
                         log.warn("VIDEO 本地文件未就绪，不发起上传: tweetId={}, mediaId={}, reason={}",
                                 tweetId, mediaId, notReadyReason);
+                        recordPrepareTerminal(m);
                         statuses.add(MediaPreparationResult.MediaPreparationStatus.failed(
                                 mediaId, notReadyReason, false));
                         failCount++;
@@ -287,6 +294,8 @@ public class WeChatMediaPreparer {
                     // catch 走 classifyFailure/safeWriteBackFailed 既有治理链 (10.8 语义全复用)。
                     uploadVideoAndWriteBack(writer, tweetId, effectivePublishedAt, ref, mediaId,
                             sidecarState, archiveDir, articleTitle, articleDigest);
+                    // Story 10.12: wechat_prepare 阶段成功 (观测旁路)
+                    recordPrepareSucceeded(m);
                     statuses.add(MediaPreparationResult.MediaPreparationStatus.uploadedVideo(mediaId));
                     successCount++;
                     continue;
@@ -348,6 +357,7 @@ public class WeChatMediaPreparer {
                                     .build());
                     log.warn("微信正文图片本地文件未就绪: tweetId={}, mediaId={}, reason={}",
                             tweetId, mediaId, notReadyReason);
+                    recordPrepareTerminal(m);
                     statuses.add(MediaPreparationResult.MediaPreparationStatus.failed(
                             mediaId, notReadyReason, false));
                     failCount++;
@@ -356,6 +366,8 @@ public class WeChatMediaPreparer {
 
                 String wechatUrl = uploadAndWriteBack(writer, tweetId, effectivePublishedAt, ref, mediaId,
                         resolveLocalFile(archiveDir, sidecarState.getLocalPath()));
+                // Story 10.12: wechat_prepare 阶段成功 (观测旁路)
+                recordPrepareSucceeded(m);
                 statuses.add(MediaPreparationResult.MediaPreparationStatus.uploaded(mediaId, wechatUrl));
                 successCount++;
             } catch (Exception e) {
@@ -369,6 +381,9 @@ public class WeChatMediaPreparer {
                         tweetId, mediaId, failureClass, errorCode, reason);
                 safeWriteBackFailed(writer, tweetId, effectivePublishedAt, ref, mediaId,
                         reason, failureClass, errorCode);
+                // Story 10.12: 按四分类计数 — RETRYABLE/RATE_LIMITED=retry_scheduled,
+                // ENVIRONMENT_BLOCKED=blocked(立即终态零重试), PERMANENT=failed_terminal (观测旁路)
+                recordPrepareFailure(m, failureClass);
                 statuses.add(MediaPreparationResult.MediaPreparationStatus.failed(
                         mediaId, reason, failureClass));
                 failCount++;
@@ -398,6 +413,8 @@ public class WeChatMediaPreparer {
             }
             // synthetic id 计数与 prepareMedia 主循环保持一致 (photo-only 计数)
             boolean isPhoto = m.getType() == TweetMediaType.PHOTO;
+            // Story 10.12: sidecar 缺失属准备阶段终态失败 (不调微信, 零重试), 按类型计数 (观测旁路)
+            recordPrepareTerminal(m);
             statuses.add(MediaPreparationResult.MediaPreparationStatus.failed(
                     effectiveMediaId(tweetId, m, isPhoto ? photoIndex++ : index),
                     SIDE_CAR_MISSING_REASON, false));
@@ -613,6 +630,57 @@ public class WeChatMediaPreparer {
                     : MediaPreparationResult.FailureClass.PERMANENT;
         }
         return MediaPreparationResult.FailureClass.PERMANENT;
+    }
+
+    // ===== Story 10.12: wechat_prepare 阶段指标 (观测旁路; mediaMetrics=null 时静默关闭) =====
+
+    /** wechat_prepare 阶段成功 (PHOTO uploadimg / VIDEO materialFileUpload). */
+    private void recordPrepareSucceeded(TweetMedia media) {
+        MediaMetrics.MediaType type = metricTypeOf(media);
+        if (mediaMetrics != null && type != null) {
+            mediaMetrics.recordSucceeded(type, MediaMetrics.MediaPhase.WECHAT_PREPARE);
+        }
+    }
+
+    /** wechat_prepare 阶段终态失败 (PERMANENT 分类: 本地未就绪/不可重试异常). */
+    private void recordPrepareTerminal(TweetMedia media) {
+        recordPrepareFailure(media, MediaPreparationResult.FailureClass.PERMANENT);
+    }
+
+    /**
+     * 按四分类计数 wechat_prepare 失败: RETRYABLE/RATE_LIMITED → {@code retry_scheduled}
+     * (既有重试钩子实际排期), ENVIRONMENT_BLOCKED → {@code blocked} (立即终态零重试),
+     * PERMANENT → {@code failed_terminal}。
+     */
+    private void recordPrepareFailure(TweetMedia media, MediaPreparationResult.FailureClass failureClass) {
+        MediaMetrics.MediaType type = metricTypeOf(media);
+        if (mediaMetrics == null || type == null || failureClass == null) {
+            return;
+        }
+        switch (failureClass) {
+            case RETRYABLE -> mediaMetrics.record(type, MediaMetrics.MediaPhase.WECHAT_PREPARE,
+                    MediaMetrics.MediaOutcome.RETRY_SCHEDULED, MediaMetrics.MediaErrorClass.RETRYABLE);
+            case RATE_LIMITED -> mediaMetrics.record(type, MediaMetrics.MediaPhase.WECHAT_PREPARE,
+                    MediaMetrics.MediaOutcome.RETRY_SCHEDULED, MediaMetrics.MediaErrorClass.RATE_LIMITED);
+            case ENVIRONMENT_BLOCKED -> mediaMetrics.record(type, MediaMetrics.MediaPhase.WECHAT_PREPARE,
+                    MediaMetrics.MediaOutcome.BLOCKED, MediaMetrics.MediaErrorClass.ENVIRONMENT_BLOCKED);
+            case PERMANENT -> mediaMetrics.record(type, MediaMetrics.MediaPhase.WECHAT_PREPARE,
+                    MediaMetrics.MediaOutcome.FAILED_TERMINAL, MediaMetrics.MediaErrorClass.PERMANENT);
+            default -> log.warn("未纳入指标矩阵的失败分类, 计数丢弃 (观测旁路不抛错): type={}, failureClass={}",
+                    type, failureClass);
+        }
+    }
+
+    /** 指标类型映射 — 仅 PHOTO/VIDEO 入指标, GIF/UNKNOWN 恒为 null (Story 10.12 Never). */
+    private static MediaMetrics.MediaType metricTypeOf(TweetMedia media) {
+        if (media == null) {
+            return null;
+        }
+        return switch (media.getType()) {
+            case PHOTO -> MediaMetrics.MediaType.PHOTO;
+            case VIDEO -> MediaMetrics.MediaType.VIDEO;
+            default -> null;
+        };
     }
 
     /** Story 10.8: 阶段证据 errorCode 来源 — AggregatorException 取枚举名, 其余取异常类简名 (不含原始 message, N4). */

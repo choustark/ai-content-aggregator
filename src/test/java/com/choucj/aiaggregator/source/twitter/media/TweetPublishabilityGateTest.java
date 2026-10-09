@@ -72,7 +72,7 @@ public class TweetPublishabilityGateTest {
         archiverProperties.setBaseDirectory(tempDir.resolve("fallback").toString());
 
         archiveWriter = new TweetMediaArchiveWriter(
-                mediaProperties, archiverProperties, new ObjectMapper().findAndRegisterModules());
+                mediaProperties, archiverProperties, new ObjectMapper().findAndRegisterModules(), null);
         gate = new TweetPublishabilityGate(mockRecoveryService, archiveWriter);
     }
 
