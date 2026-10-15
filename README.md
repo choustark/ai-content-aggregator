@@ -28,8 +28,14 @@ flowchart LR
     A["定时抓取<br/>X 推文 + GitHub Trending"] --> B["两级过滤<br/>互动量粗筛 + LLM 创新度评分"]
     B --> C["AI 改写<br/>三种生成模式"]
     C --> D["微信公众号草稿<br/>人工审核后发布"]
-    C --> E["本地 Markdown 归档<br/>完整审计记录"]
+    C --> E["本地 Markdown 归档<br/>完整审计记录"]1
 ```
+
+### 系统逻辑架构
+
+下图展示从外部内容发现、可靠任务调度、过滤与内容生成，到本地归档和微信公众号草稿创建的完整数据流：
+
+![信萃系统逻辑架构](docs/architecture/system-architecture-logical.png)
 
 ### 三种生成模式
 
@@ -62,6 +68,12 @@ flowchart LR
 | 存储 | Redis（任务队列 + 嵌入向量 RediSearch） |
 | 观测 | Micrometer + Prometheus + Grafana + cAdvisor（单机 Docker 观测平面） |
 | 测试 | JUnit 5 + Mockito，1100+ 自动化测试，外部 API 调用默认隔离 |
+
+### 部署与可观测性架构
+
+业务应用、Redis 数据层、外部平台与独立观测栈之间的部署关系如下：
+
+![信萃部署与可观测性架构](docs/architecture/system-architecture-deployment.png)
 
 ## 快速开始
 
