@@ -88,6 +88,19 @@ class TwitterSourceTest {
     }
 
     @Test
+    void shouldEnrichSpecifiedTweetsWithoutAccountDiscovery() {
+        Tweet partial = baseTweet("1", "summary");
+        when(redisRepository.getObject(eq(RedisKeys.tweet("1")), eq(Tweet.class))).thenReturn(null);
+        when(fxTwitterClient.fetchTweetDetail("1"))
+                .thenReturn(Tweet.builder().id("1").content("full content").build());
+
+        List<Tweet> result = source.enrichSpecifiedTweets(List.of(partial));
+
+        assertThat(result).singleElement().extracting(Tweet::getContent).isEqualTo("full content");
+        verify(discoveryClient, never()).discoverTweets(anyString());
+    }
+
+    @Test
     void shouldMergeFxTwitterFieldsOnHappyPath() {
         Tweet partial = baseTweet("1", "summary-rsshub");
         when(discoveryClient.discoverTweets("karpathy")).thenReturn(List.of(partial));

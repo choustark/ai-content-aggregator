@@ -119,6 +119,25 @@ class TwitterProcessorTest {
     }
 
     @Test
+    void shouldProcessProvidedTweetsWithoutRunningAccountFetch() {
+        Tweet tweet = tweet("specified-1", "content");
+        Tweet filteredOut = tweet("specified-2", "other");
+        when(commentFilterDelegate.filter(any())).thenReturn(List.of(tweet));
+        when(innovationFilterDelegate.filter(any())).thenReturn(List.of(tweet));
+        when(contentRewriter.rewrite(tweet)).thenReturn(article("tw-specified-1"));
+        doThrow(new IllegalStateException("publish failed")).when(contentPublisher).publish(any());
+
+        TwitterProcessor.ProcessingSummary summary = processor.processTweets(List.of(tweet, filteredOut));
+
+        assertThat(summary.discovered()).isEqualTo(2);
+        assertThat(summary.filtered()).isEqualTo(1);
+        assertThat(summary.archived()).isZero();
+        assertThat(summary.failed()).isEqualTo(1);
+        verify(twitterSource, never()).fetch();
+        verify(contentPublisher).publish(any());
+    }
+
+    @Test
     void shouldInvokeAllContentPublishersForEachSuccessfulArticle() {
         processor = new TwitterProcessor(twitterSource, List.of(
                 new CommentFilterStub(commentFilterDelegate),

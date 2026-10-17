@@ -144,11 +144,11 @@ public class ApifyDiscoveryClient implements NamedTwitterDiscoveryProvider {
      * 由调用方经 {@code TwitterSource.enrichTweet} (twscrape → FxTwitter) 完成降级.
      *
      * @param targets X post URL / post ID / Article URL 列表
-     * @return 解析后的保真 Tweet 列表; 入口未启用或 targets 为空时返回空列表
+     * @return 解析后的保真 Tweet 列表; targets 为空时返回空列表
      */
     public List<Tweet> discoverSpecifiedTweets(List<String> targets) {
-        if (!targetProperties.isEnabled() || targets == null || targets.isEmpty()) {
-            log.debug("指定内容入口未启用或 targets 为空, 跳过: enabled={}", targetProperties.isEnabled());
+        if (targets == null || targets.isEmpty()) {
+            log.debug("指定内容 targets 为空, 跳过");
             return List.of();
         }
         validateConfigured("specified");
@@ -249,12 +249,12 @@ public class ApifyDiscoveryClient implements NamedTwitterDiscoveryProvider {
      * @param raw 原始 target
      * @return 归一化 URL, 或 {@code null} 表示应跳过
      */
-    String normalizeTarget(String raw) {
+    public String normalizeTarget(String raw) {
         if (!StringUtils.hasText(raw)) {
             return null;
         }
         String trimmed = raw.trim();
-        if (trimmed.matches("\\d+")) {
+        if (trimmed.matches("\\d{1,20}")) {
             return "https://x.com/i/status/" + trimmed;
         }
         try {
@@ -264,7 +264,7 @@ public class ApifyDiscoveryClient implements NamedTwitterDiscoveryProvider {
             if (!isAllowedXHost(host) || !StringUtils.hasText(path)) {
                 return null;
             }
-            if (path.matches(".*/status/\\d+/?$")) {
+            if (path.matches(".*/status/\\d{1,20}/?$")) {
                 String normalizedPath = path.endsWith("/") ? path.substring(0, path.length() - 1) : path;
                 return "https://x.com" + normalizedPath;
             }

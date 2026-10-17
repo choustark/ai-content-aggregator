@@ -427,21 +427,6 @@ class ApifyDiscoveryClientTest {
     }
 
     @Test
-    void shouldNotCallApifyWhenTargetEntryDisabled() {
-        targetProperties.setEnabled(false);
-        RestClient restClient = mock(RestClient.class);
-        // 必须用同一个 restClient 构造 client, verifyNoInteractions 才有意义 (CR patch: 原断言对未注入 mock 必然通过)
-        client = new ApifyDiscoveryClient(properties, restClient, new ObjectMapper(), targetProperties,
-                TestSlowOperationRecorder.create());
-
-        List<Tweet> result = client.discoverSpecifiedTweets(List.of("https://x.com/OpenAI/status/111"));
-
-        assertThat(result).isEmpty();
-        // enabled=false 不得调用 Apify
-        org.mockito.Mockito.verifyNoInteractions(restClient);
-    }
-
-    @Test
     void shouldReturnEmptyWhenTargetsEmpty() {
         targetProperties.setEnabled(true);
 

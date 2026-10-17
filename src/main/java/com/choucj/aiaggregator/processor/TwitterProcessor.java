@@ -140,6 +140,26 @@ public class TwitterProcessor {
      */
     public void process() {
         log.info("Twitter Pipeline 启动");
+        // Stage 1: typed batch failures must reach the Story 10.5 queue retry/dead-letter state machine.
+        List<Tweet> tweets;
+        try {
+            tweets = twitterSource.fetch();
+        } catch (RetryableException | NonRetryableException e) {
+            throw e;
+        } catch (Exception e) {
+            // Keep the legacy fallback for unexpected, unclassified runtime failures only.
+            log.error("TwitterSource.fetch 失败, 本批次跳过 (故障隔离 L1 兜底)", e);
+            tweets = List.of();
+        }
+        processTweets(tweets);
+    }
+
+    /**
+     * 处理调用方已经发现并补全的 Tweet 列表，复用定时批处理的筛选、生成、归档和发布核心。
+     * 不读取账号配置，不再次执行发现；用于受控的指定 Post 同步入口。
+     */
+    public ProcessingSummary processTweets(List<Tweet> tweets) {
+        List<Tweet> safeTweets = tweets == null ? List.of() : tweets;
         int discovered = 0;
         int commentPassed = 0;
         int innovationPassed = 0;
@@ -154,22 +174,10 @@ public class TwitterProcessor {
         int rewriteWithMediaEmbeddedMediaCount = 0;
         int rewriteWithMediaDegradedMediaCount = 0;
 
-        // Stage 1: typed batch failures must reach the Story 10.5 queue retry/dead-letter state machine.
-        List<Tweet> tweets;
-        try {
-            tweets = twitterSource.fetch();
-        } catch (RetryableException | NonRetryableException e) {
-            throw e;
-        } catch (Exception e) {
-            // Keep the legacy fallback for unexpected, unclassified runtime failures only.
-            // Patch-5: e 末参数自动展开堆栈; format 无 error={} 占位符 (N4: 不输出 e.getMessage() 含正文风险)
-            log.error("TwitterSource.fetch 失败, 本批次跳过 (故障隔离 L1 兜底)", e);
-            tweets = List.of();
-        }
-        discovered = tweets.size();
+        discovered = safeTweets.size();
 
         // Stage 2: filter chain (ContentFilter 责任链, @Order 保证顺序)
-        List<Tweet> filtered = new ArrayList<>(tweets);
+        List<Tweet> filtered = new ArrayList<>(safeTweets);
         for (ContentFilter<Tweet> filter : contentFilters) {
             int before = filtered.size();
             boolean degraded = false;
@@ -315,6 +323,11 @@ public class TwitterProcessor {
                 archiveSuccess, failure,
                 rewriteWithMediaAttempted, rewriteWithMediaPublished, rewriteWithMediaBlocked,
                 rewriteWithMediaEmbeddedMediaCount, rewriteWithMediaDegradedMediaCount);
+        return new ProcessingSummary(discovered, filtered.size(), archiveSuccess, failure);
+    }
+
+    /** 指定入口可安全返回的计数摘要，不包含正文、URL 或外部响应。 */
+    public record ProcessingSummary(int discovered, int filtered, int archived, int failed) {
     }
 
     /**

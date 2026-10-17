@@ -103,6 +103,24 @@ public class TwitterSource implements DataSource<Tweet> {
     }
 
     /**
+     * 对已经完成指定目标发现的 Tweet 复用与批量入口相同的缓存、twscrape 与 FxTwitter 补全语义。
+     * 调用方必须先完成目标 URL 校验与单目标发现；本方法不做发现，也不改变 {@link #fetch()} 行为。
+     */
+    public List<Tweet> enrichSpecifiedTweets(List<Tweet> discovered) {
+        if (discovered == null || discovered.isEmpty()) {
+            return List.of();
+        }
+        List<Tweet> enriched = new ArrayList<>(discovered.size());
+        for (Tweet partial : discovered) {
+            Tweet result = enrichTweet(partial);
+            if (result != null) {
+                enriched.add(result);
+            }
+        }
+        return enriched;
+    }
+
+    /**
      * 双链降级补全单条 Tweet (Story 2.2b 升级).
      *
      * <p>流程:

@@ -178,6 +178,10 @@ twitter:
     #   - https://x.com/OpenAI/status/1234567890
     #   - 1234567890          # 纯 post ID(spike Q1a 未测变体, 默认归一化为 /i/status/{id})
     #   - https://x.com/i/article/...   # Article URL(spike Q1b 未测变体, best-effort 透传)
+  # 指定单个 X Post 的同步 REST 入口；令牌只从环境变量注入，禁止提交明文。
+  specified:
+    enabled: ${TWITTER_SPECIFIED_ENABLED:false}
+    token: ${TWITTER_SPECIFIED_TOKEN:}
   # Story 7.1: X 媒体本地归档(确定性目录 + media.json sidecar).
   # 集成型开关, 默认 false; 关闭时 TweetMediaArchiveWriter Bean 不注册, 媒体归档不激活, 既有 Pipeline 零回归.
   media:
