@@ -7,6 +7,7 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.http.client.ClientHttpRequestFactory;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.web.client.RestClient;
+import org.springframework.util.StringUtils;
 
 import java.time.Duration;
 
@@ -20,9 +21,19 @@ public class ScraperConfig {
     @Bean
     @Qualifier("xAuthorScraperRestClient")
     public RestClient xAuthorScraperRestClient(ScraperProperties properties) {
-        return RestClient.builder()
-                .requestFactory(buildRequestFactory(properties.getTimeoutSeconds()))
-                .build();
+        return buildRestClient(RestClient.builder(), properties);
+    }
+
+    RestClient buildRestClient(RestClient.Builder builder, ScraperProperties properties) {
+        builder.requestFactory(buildRequestFactory(properties.getTimeoutSeconds()));
+        configureAuthentication(builder, properties);
+        return builder.build();
+    }
+
+    void configureAuthentication(RestClient.Builder builder, ScraperProperties properties) {
+        if (StringUtils.hasText(properties.getApiKey())) {
+            builder.defaultHeader("Authorization", "Bearer " + properties.getApiKey().trim());
+        }
     }
 
     private ClientHttpRequestFactory buildRequestFactory(int timeoutSeconds) {

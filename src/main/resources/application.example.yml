@@ -196,6 +196,7 @@ twitter:
     max-file-size-mb: 10
 
 scraper:
+  api-key: ${X_ACTOR_API_KEY:}
   # 本地 x-author-self-scraper API 服务. 该服务内部运行 Apify SDK/Crawlee Actor,
   # 但 HTTP 协议不是 Apify 云端 /v2/acts/*, 因此独立配置.
   base-url: http://127.0.0.1:3100

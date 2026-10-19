@@ -18,6 +18,9 @@ import org.springframework.validation.annotation.Validated;
 @Data
 public class ScraperProperties {
 
+    /** 本地 API 可选 Bearer key；空值时不发送 Authorization。 */
+    private String apiKey = "";
+
     /** 本地 scraper API base URL. */
     private String baseUrl = "http://127.0.0.1:3100";
 

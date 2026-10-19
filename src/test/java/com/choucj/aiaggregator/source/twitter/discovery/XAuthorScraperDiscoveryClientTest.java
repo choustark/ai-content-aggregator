@@ -10,11 +10,17 @@ import com.choucj.aiaggregator.source.twitter.model.TweetAccessStatus;
 import com.choucj.aiaggregator.source.twitter.model.TweetContentType;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import ch.qos.logback.classic.Logger;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import org.slf4j.LoggerFactory;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
+import org.springframework.http.HttpStatus;
 import org.springframework.test.web.client.MockRestServiceServer;
+import org.springframework.test.web.client.ExpectedCount;
 import org.springframework.web.client.RestClient;
 
 import java.util.List;
@@ -23,8 +29,10 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.content;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withSuccess;
+import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
 
 class XAuthorScraperDiscoveryClientTest {
 
@@ -57,6 +65,219 @@ class XAuthorScraperDiscoveryClientTest {
         assertThat(input).containsEntry("includeArticles", true);
         assertThat(input).containsEntry("maxItemsPerAuthor", 3);
         assertThat(input).containsEntry("proxyConfiguration", Map.of("useApifyProxy", false));
+    }
+
+    @Test
+    void shouldDiscoverOneSpecifiedPostWithExactJobContract() {
+        XPostTargetNormalizer.Target target = new XPostTargetNormalizer.Target(
+                "https://x.com/u/status/123", "123");
+        server.expect(requestTo(BASE_URL + "/v1/jobs"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(content().json("""
+                        {"postUrls":["https://x.com/u/status/123"],"includePosts":true,"includeArticles":false}
+                        """, true))
+                .andRespond(withStatus(HttpStatus.ACCEPTED).contentType(MediaType.APPLICATION_JSON)
+                        .body("{\"job\":{\"id\":\"job-post\",\"status\":\"queued\"}}"));
+        server.expect(requestTo(BASE_URL + "/v1/jobs/job-post"))
+                .andRespond(withSuccess("{\"job\":{\"id\":\"job-post\",\"status\":\"completed\"}}",
+                        MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE_URL + "/v1/jobs/job-post/results?offset=0&limit=100"))
+                .andRespond(withSuccess("""
+                        {"total":1,"items":[{"id":"123","text":"body","author":{"username":"u"},
+                        "quotedPostId":"456","metrics":{"likes":2}}]}
+                        """, MediaType.APPLICATION_JSON));
+
+        List<Tweet> tweets = client.discoverSpecifiedPost(target);
+
+        assertThat(tweets).singleElement().satisfies(tweet -> {
+            assertThat(tweet.getId()).isEqualTo("123");
+            assertThat(tweet.getAuthor()).isEqualTo("@u");
+            assertThat(tweet.getQuotedTweetUrl()).isEqualTo("https://x.com/i/status/456");
+        });
+        server.verify();
+    }
+
+    @Test
+    void shouldFailClosedWhenSpecifiedResultHasDifferentId() {
+        XPostTargetNormalizer.Target target = new XPostTargetNormalizer.Target(
+                "https://x.com/u/status/123", "123");
+        server.expect(requestTo(BASE_URL + "/v1/jobs"))
+                .andRespond(withSuccess("{\"job\":{\"id\":\"job-wrong\"}}", MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE_URL + "/v1/jobs/job-wrong"))
+                .andRespond(withSuccess("{\"job\":{\"status\":\"completed\"}}", MediaType.APPLICATION_JSON));
+        server.expect(requestTo(BASE_URL + "/v1/jobs/job-wrong/results?offset=0&limit=100"))
+                .andRespond(withSuccess("{\"total\":1,\"items\":[{\"id\":\"999\",\"text\":\"wrong\"}]}",
+                        MediaType.APPLICATION_JSON));
+
+        assertThatThrownBy(() -> client.discoverSpecifiedPost(target))
+                .isInstanceOf(NonRetryableException.class)
+                .hasMessageContaining("POST_ID_MISMATCH")
+                .satisfies(error -> assertThat(error.getMessage()).doesNotContain("https://"));
+        server.verify();
+    }
+
+    @Test
+    void shouldTreatZeroTotalAsPermanentPostNotFound() {
+        expectSpecifiedJob("job-empty", "completed", null);
+        server.expect(requestTo(BASE_URL + "/v1/jobs/job-empty/results?offset=0&limit=100"))
+                .andRespond(withSuccess("{\"total\":0,\"items\":[]}", MediaType.APPLICATION_JSON));
+
+        assertThatThrownBy(() -> client.discoverSpecifiedPost(target()))
+                .isInstanceOf(NonRetryableException.class)
+                .hasMessageContaining("POST_NOT_FOUND");
+        server.verify();
+    }
+
+    @Test
+    void shouldTreatSessionAndRateLimitFailuresAsPermanent() {
+        for (String code : List.of("INVALID_POST_URL", "LOGIN_REQUIRED", "RATE_LIMITED",
+                "PROTECTED_POST", "POST_NOT_FOUND", "POST_ID_MISMATCH")) {
+            setUp();
+            expectSpecifiedJob("job-" + code, "failed", code);
+            assertThatThrownBy(() -> client.discoverSpecifiedPost(target()))
+                    .isInstanceOf(NonRetryableException.class)
+                    .hasMessageContaining(code);
+            server.verify();
+        }
+    }
+
+    @Test
+    void shouldMapPollJobNotFoundToRetryableWithoutChangingUsernameMapping() {
+        server.expect(requestTo(BASE_URL + "/v1/jobs"))
+                .andRespond(withStatus(HttpStatus.ACCEPTED).contentType(MediaType.APPLICATION_JSON)
+                        .body("{\"job\":{\"id\":\"missing-job\"}}"));
+        server.expect(requestTo(BASE_URL + "/v1/jobs/missing-job"))
+                .andRespond(withStatus(HttpStatus.NOT_FOUND).contentType(MediaType.APPLICATION_JSON)
+                        .body("{\"error\":{\"code\":\"JOB_NOT_FOUND\"}}"));
+
+        assertThatThrownBy(() -> client.discoverSpecifiedPost(target()))
+                .isInstanceOf(RetryableException.class)
+                .hasMessageContaining("JOB_NOT_FOUND");
+        server.verify();
+    }
+
+    @Test
+    void shouldTimeoutWhenSpecifiedJobRemainsQueued() {
+        properties.setMaxWaitSeconds(1);
+        server.expect(requestTo(BASE_URL + "/v1/jobs"))
+                .andRespond(withStatus(HttpStatus.ACCEPTED).contentType(MediaType.APPLICATION_JSON)
+                        .body("{\"job\":{\"id\":\"queued-job\"}}"));
+        server.expect(ExpectedCount.manyTimes(), requestTo(BASE_URL + "/v1/jobs/queued-job"))
+                .andRespond(withSuccess("{\"job\":{\"status\":\"queued\"}}", MediaType.APPLICATION_JSON));
+
+        assertThatThrownBy(() -> client.discoverSpecifiedPost(target()))
+                .isInstanceOf(RetryableException.class)
+                .hasMessageContaining("轮询超时");
+        server.verify();
+    }
+
+    @Test
+    void shouldTreatInconsistentOrTruncatedResultsAsRetryableStructureErrors() {
+        for (String body : List.of(
+                "{\"total\":2,\"items\":[{\"id\":\"999\",\"text\":\"wrong\"}]}",
+                "{\"total\":101,\"items\":[]}")) {
+            setUp();
+            expectSpecifiedJob("job-structure", "completed", null);
+            server.expect(requestTo(BASE_URL + "/v1/jobs/job-structure/results?offset=0&limit=100"))
+                    .andRespond(withSuccess(body, MediaType.APPLICATION_JSON));
+            assertThatThrownBy(() -> client.discoverSpecifiedPost(target()))
+                    .isInstanceOf(RetryableException.class)
+                    .hasMessageContaining("结果结构非法");
+            server.verify();
+        }
+    }
+
+    @Test
+    void shouldRetainMediaOnlyPostAndRejectNullTargetBeforeHttp() throws Exception {
+        Tweet tweet = client.parseItem(new ObjectMapper().readTree("""
+                {"id":"123","media":[{"type":"photo","url":"https://media.example/image.jpg"}]}
+                """), null);
+        assertThat(tweet).isNotNull();
+        assertThat(tweet.getContent()).isNull();
+        assertThat(tweet.getMedia()).hasSize(1);
+
+        assertThatThrownBy(() -> client.discoverSpecifiedPost(null))
+                .isInstanceOf(NonRetryableException.class);
+        server.verify();
+    }
+
+    @Test
+    void shouldTreatJobLifecycleTechnicalFailuresAsRetryable() {
+        for (String code : List.of("JOB_NOT_FOUND", "ACTOR_FAILED")) {
+            setUp();
+            expectSpecifiedJob("job-" + code, "failed", code);
+            assertThatThrownBy(() -> client.discoverSpecifiedPost(target()))
+                    .isInstanceOf(RetryableException.class)
+                    .hasMessageContaining(code);
+            server.verify();
+        }
+        setUp();
+        expectSpecifiedJob("job-cancelled", "cancelled", null);
+        assertThatThrownBy(() -> client.discoverSpecifiedPost(target()))
+                .isInstanceOf(RetryableException.class)
+                .hasMessageContaining("CANCELLED");
+        server.verify();
+    }
+
+    @Test
+    void shouldTreatUnknownStatusAndInvalidResultStructureAsRetryable() {
+        expectSpecifiedJob("job-unknown", "mystery", null);
+        assertThatThrownBy(() -> client.discoverSpecifiedPost(target()))
+                .isInstanceOf(RetryableException.class)
+                .hasMessageContaining("状态非法");
+        server.verify();
+
+        setUp();
+        expectSpecifiedJob("job-invalid-result", "completed", null);
+        server.expect(requestTo(BASE_URL + "/v1/jobs/job-invalid-result/results?offset=0&limit=100"))
+                .andRespond(withSuccess("{\"total\":\"secret body\",\"items\":{}}", MediaType.APPLICATION_JSON));
+        assertThatThrownBy(() -> client.discoverSpecifiedPost(target()))
+                .isInstanceOf(RetryableException.class)
+                .hasMessageContaining("结果结构非法")
+                .satisfies(error -> assertSafe(error.getMessage()));
+        server.verify();
+    }
+
+    @Test
+    void shouldNotLeakSensitiveResponseDataInExceptionOrLogs() {
+        Logger logger = (Logger) LoggerFactory.getLogger(XAuthorScraperDiscoveryClient.class);
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        logger.addAppender(appender);
+        String sensitive = "https://x.com/private/status/123 body Authorization=Bearer leak Cookie=auth_token=abc; ct0=xyz";
+        try {
+            server.expect(requestTo(BASE_URL + "/v1/jobs"))
+                    .andRespond(withStatus(HttpStatus.BAD_REQUEST).contentType(MediaType.APPLICATION_JSON)
+                            .body("{\"error\":{\"code\":\"INVALID_POST_URL\",\"message\":\"" + sensitive + "\"}}"));
+            assertThatThrownBy(() -> client.discoverSpecifiedPost(target()))
+                    .isInstanceOf(NonRetryableException.class)
+                    .satisfies(error -> assertSafe(error.getMessage()));
+            String logs = appender.list.stream().map(ILoggingEvent::getFormattedMessage)
+                    .reduce("", (left, right) -> left + right);
+            assertSafe(logs);
+        } finally {
+            logger.detachAppender(appender);
+        }
+        server.verify();
+    }
+
+    private void expectSpecifiedJob(String jobId, String status, String code) {
+        server.expect(requestTo(BASE_URL + "/v1/jobs"))
+                .andRespond(withStatus(HttpStatus.ACCEPTED).contentType(MediaType.APPLICATION_JSON)
+                        .body("{\"job\":{\"id\":\"" + jobId + "\"}}"));
+        String error = code == null ? "" : ",\"error\":{\"code\":\"" + code + "\"}";
+        server.expect(requestTo(BASE_URL + "/v1/jobs/" + jobId))
+                .andRespond(withSuccess("{\"job\":{\"status\":\"" + status + "\"" + error + "}}",
+                        MediaType.APPLICATION_JSON));
+    }
+
+    private XPostTargetNormalizer.Target target() {
+        return new XPostTargetNormalizer.Target("https://x.com/u/status/123", "123");
+    }
+
+    private void assertSafe(String value) {
+        assertThat(value).doesNotContain("https://x.com/private", "secret body", "Authorization", "Cookie",
+                "auth_token", "ct0", "Bearer leak");
     }
 
     @Test

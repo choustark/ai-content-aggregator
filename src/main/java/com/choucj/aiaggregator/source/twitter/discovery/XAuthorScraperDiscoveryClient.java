@@ -57,6 +57,9 @@ public class XAuthorScraperDiscoveryClient implements NamedTwitterDiscoveryProvi
     private static final int SUMMARY_TEXT_LIMIT = 120;
     private static final Set<String> SESSION_FAILURE_CODES = Set.of(
             "RATE_LIMITED", "LOGIN_EXPIRED", "LOGIN_REQUIRED", "CHALLENGE");
+    private static final Set<String> SPECIFIED_PERMANENT_FAILURE_CODES = Set.of(
+            "INVALID_POST_URL", "RATE_LIMITED", "LOGIN_EXPIRED", "LOGIN_REQUIRED", "CHALLENGE",
+            "PROTECTED_POST", "POST_NOT_FOUND", "POST_ID_MISMATCH");
 
     private final ScraperProperties properties;
     private final RestClient restClient;
@@ -93,6 +96,137 @@ public class XAuthorScraperDiscoveryClient implements NamedTwitterDiscoveryProvi
         log.info("x-author scraper 抓取完成: username={}, jobId={}, status={}, 条数={}, 耗时={}ms",
                 normalizedUsername, jobId, job.path("status").asText("unknown"), tweets.size(), elapsedMs);
         return tweets;
+    }
+
+    /** 通过本地 Job API 精确抓取一个指定 Post；不会回退到账号时间线。 */
+    public List<Tweet> discoverSpecifiedPost(XPostTargetNormalizer.Target target) {
+        if (target == null) {
+            throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                    "x-author scraper 指定 Post 目标不能为空");
+        }
+        Map<String, Object> input = new LinkedHashMap<>();
+        input.put("postUrls", List.of(target.url()));
+        input.put("includePosts", true);
+        input.put("includeArticles", false);
+        long startNanos = System.nanoTime();
+        String jobId = submitJob(input, target.tweetId());
+        waitForSpecifiedCompletion(jobId, target.tweetId());
+        List<Tweet> results = fetchSpecifiedResults(jobId, target.tweetId());
+        List<Tweet> matches = results.stream()
+                .filter(tweet -> target.tweetId().equals(tweet.getId()))
+                .toList();
+        if (matches.isEmpty()) {
+            String code = results.isEmpty() ? "POST_NOT_FOUND" : "POST_ID_MISMATCH";
+            throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                    "x-author scraper 指定 Post 结果无效: jobId=" + jobId
+                            + ", postId=" + target.tweetId() + ", code=" + code);
+        }
+        long elapsedMs = (System.nanoTime() - startNanos) / 1_000_000;
+        log.info("x-author scraper 指定 Post 抓取完成: postId={}, jobId={}, 条数={}, 耗时={}ms",
+                target.tweetId(), jobId, matches.size(), elapsedMs);
+        return matches;
+    }
+
+    private void waitForSpecifiedCompletion(String jobId, String postId) {
+        long deadline = System.nanoTime() + properties.getMaxWaitSeconds() * 1_000_000_000L;
+        while (System.nanoTime() < deadline) {
+            JsonNode job = getSpecifiedJob(jobId, postId);
+            String status = job.path("status").asText("");
+            if ("completed".equals(status)) {
+                return;
+            }
+            if ("failed".equals(status) || "cancelled".equals(status)) {
+                String code = job.path("error").path("code").asText(
+                        "cancelled".equals(status) ? "CANCELLED" : "ACTOR_FAILED");
+                String message = "x-author scraper 指定 Post job 失败: jobId=" + jobId
+                        + ", postId=" + postId + ", code=" + code;
+                if (SPECIFIED_PERMANENT_FAILURE_CODES.contains(code)) {
+                    throw new NonRetryableException(ErrorCode.EXTERNAL_API_ERROR, message);
+                }
+                throw new RetryableException(ErrorCode.EXTERNAL_API_ERROR, message);
+            }
+            if (!("queued".equals(status) || "running".equals(status))) {
+                throw new RetryableException(ErrorCode.EXTERNAL_API_ERROR,
+                        "x-author scraper 指定 Post job 状态非法: jobId=" + jobId
+                                + ", postId=" + postId + ", status="
+                                + (StringUtils.hasText(status) ? status : "unknown"));
+            }
+            sleep(jobId, postId);
+        }
+        throw new RetryableException(ErrorCode.EXTERNAL_API_ERROR,
+                "x-author scraper 指定 Post 轮询超时: jobId=" + jobId + ", postId=" + postId);
+    }
+
+    private JsonNode getSpecifiedJob(String jobId, String postId) {
+        String body;
+        try {
+            body = slowOperationRecorder.observe(Kind.HTTP, Dependency.LOCAL_SCRAPER, Operation.POLL_JOB,
+                    () -> restClient.get().uri(buildUrl("/v1/jobs/" + jobId)).retrieve().body(String.class));
+        } catch (HttpClientErrorException e) {
+            throw mapSpecifiedClientError(e, "poll", jobId, postId);
+        } catch (HttpServerErrorException e) {
+            throw mapServerError(e, "poll", jobId, postId);
+        } catch (RestClientException e) {
+            throw new RetryableException(ErrorCode.EXTERNAL_API_ERROR,
+                    "x-author scraper 指定 Post 响应失败: stage=poll, jobId=" + jobId + ", postId=" + postId, e);
+        }
+        JsonNode job = parseJson(body, "poll", jobId, postId).path("job");
+        if (job.isMissingNode() || job.isNull()) {
+            throw new RetryableException(ErrorCode.EXTERNAL_API_ERROR,
+                    "x-author scraper 指定 Post job 结构非法: jobId=" + jobId + ", postId=" + postId);
+        }
+        return job;
+    }
+
+    private List<Tweet> fetchSpecifiedResults(String jobId, String postId) {
+        String body;
+        try {
+            body = slowOperationRecorder.observe(
+                    Kind.HTTP, Dependency.LOCAL_SCRAPER, Operation.FETCH,
+                    () -> restClient.get().uri(buildUrl("/v1/jobs/" + jobId + "/results?offset=0&limit=100"))
+                            .retrieve().body(String.class));
+        } catch (HttpClientErrorException e) {
+            throw mapSpecifiedClientError(e, "results", jobId, postId);
+        } catch (HttpServerErrorException e) {
+            throw mapServerError(e, "results", jobId, postId);
+        } catch (RestClientException e) {
+            throw new RetryableException(ErrorCode.EXTERNAL_API_ERROR,
+                    "x-author scraper 指定 Post 响应失败: stage=results, jobId=" + jobId
+                            + ", postId=" + postId, e);
+        }
+        JsonNode root = parseJson(body, "results", jobId, postId);
+        JsonNode items = root.path("items");
+        JsonNode total = root.path("total");
+        if (!items.isArray() || !total.canConvertToInt() || total.asInt() < 0
+                || total.asInt() != items.size() || total.asInt() > 100) {
+            throw new RetryableException(ErrorCode.EXTERNAL_API_ERROR,
+                    "x-author scraper 指定 Post 结果结构非法: jobId=" + jobId + ", postId=" + postId);
+        }
+        if (total.asInt() == 0) {
+            throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                    "x-author scraper 指定 Post 结果无效: jobId=" + jobId
+                            + ", postId=" + postId + ", code=POST_NOT_FOUND");
+        }
+        List<Tweet> tweets = new ArrayList<>();
+        for (JsonNode item : items) {
+            Tweet tweet = parseItem(item, null);
+            if (tweet != null) {
+                tweets.add(tweet);
+            }
+        }
+        return tweets;
+    }
+
+    private RuntimeException mapSpecifiedClientError(HttpClientErrorException e, String stage,
+                                                      String jobId, String postId) {
+        String code = extractErrorCode(e.getResponseBodyAsString());
+        String message = "x-author scraper 指定 Post 客户端错误(" + e.getStatusCode() + "): stage=" + stage
+                + ", jobId=" + jobId + ", postId=" + postId + ", code=" + code
+                + ", bodyLen=" + length(e.getResponseBodyAsString());
+        if ("JOB_NOT_FOUND".equals(code)) {
+            return new RetryableException(ErrorCode.EXTERNAL_API_ERROR, message);
+        }
+        return new NonRetryableException(ErrorCode.EXTERNAL_API_ERROR, message);
     }
 
     Map<String, Object> buildInput(String username) {
@@ -244,14 +378,14 @@ public class XAuthorScraperDiscoveryClient implements NamedTwitterDiscoveryProvi
         }
         String content = firstTextValue(path(item, "article.body"), path(item, "body"),
                 path(item, "text"), path(item, "fullText"));
-        if (!StringUtils.hasText(content)) {
-            log.warn("x-author scraper 返回项正文为空, 跳过: tweetId={}, contentType={}",
-                    id, firstText(item, "contentType"));
-            return null;
-        }
         String author = normalizeAuthor(firstText(item, "requestedUsername", "username", "author.userName", "author.username"),
                 fallbackAuthor);
         List<TweetMedia> media = extractMedia(item);
+        if (!StringUtils.hasText(content) && media.isEmpty()) {
+            log.warn("x-author scraper 返回项无正文且无媒体, 跳过: tweetId={}, contentType={}",
+                    id, firstText(item, "contentType"));
+            return null;
+        }
         List<String> imageUrls = media.stream()
                 .filter(m -> m.getType() == TweetMediaType.PHOTO)
                 .map(TweetMedia::getSourceUrl)
@@ -274,7 +408,7 @@ public class XAuthorScraperDiscoveryClient implements NamedTwitterDiscoveryProvi
                 .media(media)
                 .links(extractTextArray(path(item, "links"), path(item, "article.links")))
                 .mentions(extractTextArray(path(item, "mentions")))
-                .quotedTweetUrl(buildQuotedTweetUrl(firstText(item, "quotedTweetUrl", "quotedTweetId")))
+                .quotedTweetUrl(buildQuotedTweetUrl(firstText(item, "quotedTweetUrl", "quotedTweetId", "quotedPostId")))
                 .contentType(resolveContentType(firstText(item, "contentType")))
                 .accessStatus(TweetAccessStatus.ACCESSIBLE)
                 .build();
@@ -301,6 +435,9 @@ public class XAuthorScraperDiscoveryClient implements NamedTwitterDiscoveryProvi
                 jobId, username, code, summary);
         if (SESSION_FAILURE_CODES.contains(code) || "ARTICLE_FAILED".equals(code)) {
             return new NonRetryableException(ErrorCode.EXTERNAL_API_ERROR, message);
+        }
+        if ("JOB_NOT_FOUND".equals(code)) {
+            return new RetryableException(ErrorCode.EXTERNAL_API_ERROR, message);
         }
         return new RetryableException(ErrorCode.EXTERNAL_API_ERROR, message);
     }

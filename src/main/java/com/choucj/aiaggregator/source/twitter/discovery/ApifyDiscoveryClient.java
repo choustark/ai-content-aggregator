@@ -56,6 +56,7 @@ public class ApifyDiscoveryClient implements NamedTwitterDiscoveryProvider {
     private final ObjectMapper objectMapper;
     private final TwitterTargetProperties targetProperties;
     private final SlowOperationRecorder slowOperationRecorder;
+    private final XPostTargetNormalizer targetNormalizer = new XPostTargetNormalizer();
 
     public ApifyDiscoveryClient(ApifyTwitterProperties properties,
                                 @Qualifier("apifyTwitterRestClient") RestClient restClient,
@@ -250,29 +251,20 @@ public class ApifyDiscoveryClient implements NamedTwitterDiscoveryProvider {
      * @return 归一化 URL, 或 {@code null} 表示应跳过
      */
     public String normalizeTarget(String raw) {
-        if (!StringUtils.hasText(raw)) {
-            return null;
+        String postUrl = targetNormalizer.normalizeUrl(raw);
+        if (postUrl != null || !StringUtils.hasText(raw)) {
+            return postUrl;
         }
-        String trimmed = raw.trim();
-        if (trimmed.matches("\\d{1,20}")) {
-            return "https://x.com/i/status/" + trimmed;
-        }
+        // 保留 Apify 既有 Article 用途；指定 Post Controller 不经过此兼容分支。
         try {
-            URI uri = new URI(trimmed);
-            String host = uri.getHost();
-            String path = uri.getPath();
-            if (!isAllowedXHost(host) || !StringUtils.hasText(path)) {
-                return null;
+            URI uri = new URI(raw.trim());
+            if (isAllowedXHost(uri.getHost()) && uri.getPath() != null
+                    && uri.getPath().startsWith("/i/article/")) {
+                return "https://x.com" + uri.getPath()
+                        + (StringUtils.hasText(uri.getQuery()) ? "?" + uri.getQuery() : "");
             }
-            if (path.matches(".*/status/\\d{1,20}/?$")) {
-                String normalizedPath = path.endsWith("/") ? path.substring(0, path.length() - 1) : path;
-                return "https://x.com" + normalizedPath;
-            }
-            if (path.startsWith("/i/article/")) {
-                return "https://x.com" + path + (StringUtils.hasText(uri.getQuery()) ? "?" + uri.getQuery() : "");
-            }
-        } catch (URISyntaxException e) {
-            return null;
+        } catch (URISyntaxException ignored) {
+            // 交由调用方按无法识别处理。
         }
         return null;
     }
