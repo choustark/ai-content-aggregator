@@ -253,9 +253,8 @@ public class WeChatMediaPreparer {
                     continue;
                 }
 
-                // Story 10.11: VIDEO 生产分支 — 适配器就绪且配置开启时走永久素材上传 (Spike 10.9 §8
-                // 契约: 唯一端点 materialFileUpload(video), 唯一引用方式候选 A mediaId 纯文本直嵌);
-                // 未开启时回落到下方 !isPhoto 既有 SKIPPED 降级语义 (10.8 行为零变化)。
+                // VIDEO 永久素材上传能力仅供受控试验；Story 10.13 已明确 materialMediaId
+                // 不能直接作为正文播放器引用。未开启时回落到既有 SKIPPED 降级语义。
                 if (m.getType() == TweetMediaType.VIDEO && videoPreparationEnabled()) {
                     // 上传前 publishability=BLOCKED 拦截 (镜像 PHOTO, Story 9.1 语义复用)
                     if ((sidecarState != null && sidecarState.getPublishability() == PublishabilityStatus.BLOCKED)

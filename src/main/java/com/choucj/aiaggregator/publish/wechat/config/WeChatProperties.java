@@ -51,10 +51,10 @@ public class WeChatProperties {
     public static class Video {
 
         /**
-         * VIDEO 微信上传总开关 — 默认 true (Spike 10.9 已判 Go, 契约固化 §8).
-         * <p>false 时 VIDEO 保持 Story 10.8 降级语义 (SKIPPED + 预览图/原文链接文案), 零上传请求.
+         * VIDEO 微信上传总开关 — 默认 false；正文播放器标识映射完整 Go 前不得误启用.
+         * <p>false 时 VIDEO 保持 Story 10.8 降级语义 (SKIPPED + 原文链接文案), 零上传请求.
          */
-        private boolean enabled = true;
+        private boolean enabled = false;
 
         /**
          * 本地容量上限 (MB, 默认 10) — 微信永久端点超限表现为 Read timed out 而非干净错误码,

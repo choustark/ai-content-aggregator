@@ -1,6 +1,5 @@
 package com.choucj.aiaggregator.publish.wechat.converter;
 
-import com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus;
 import com.choucj.aiaggregator.source.twitter.model.MediaUploadStatus;
 import com.choucj.aiaggregator.source.twitter.model.PublishabilityStatus;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
@@ -23,8 +22,7 @@ import java.util.Set;
  * <ul>
  *   <li>PHOTO: {@code type == PHOTO} + {@code uploadStatus == UPLOADED} + {@code wechatUrl}
  *       非空白 + {@code publishability != BLOCKED} — 微信正文图片必须使用微信上传返回 URL</li>
- *   <li>VIDEO (Story 10.11, 候选 A): {@code wechatPrepare == SUCCEEDED} +
- *       {@code wechatVideoMediaId} 非空白 + 非 BLOCKED — 以纯文本 mediaId 追加, 不走图片路径</li>
+ *   <li>VIDEO: Story 10.14 标准播放器节点适配前始终不可嵌入</li>
  *   <li>GIF/UNKNOWN 不嵌入 (降级审计计数)</li>
  * </ul>
  *
@@ -33,7 +31,7 @@ import java.util.Set;
  * 防同一媒体生成重复微信图片。
  *
  * <p><b>输出边界 (AC 6):</b> PHOTO 只输出 Markdown image syntax
- * ({@code ![原帖图片-N](wechatUrl)}); VIDEO 只输出纯文本 mediaId (Story 10.11 候选 A);
+ * ({@code ![原帖图片-N](wechatUrl)}); VIDEO 不输出素材 ID、外链或预览图;
  * 不得输出 X/CDN sourceUrl、本地 localPath 或 raw HTML {@code <img>} 标签。图片初始插入位置固定为 LLM Markdown 正文之后、
  * converter footer 之前 (Story 9.1 guardrail; 图文穿插属后续 Story 9.2)。
  *
@@ -44,9 +42,6 @@ public class MarkdownMediaInserter {
 
     /** 嵌入图片 alt 文本前缀 — 序号从 1 开始, 按嵌入顺序递增。 */
     private static final String IMAGE_ALT_PREFIX = "原帖图片-";
-
-    /** Story 10.11 (候选 A): VIDEO 纯文本 mediaId 直嵌标签 (Markdown 形态, 与 Renderer 口径一致)。 */
-    private static final String VIDEO_EMBED_LABEL = "视频素材: ";
 
     /**
      * 在改写 Markdown 正文后追加可嵌入媒体 image syntax.
@@ -73,24 +68,16 @@ public class MarkdownMediaInserter {
         if (sidecarMedia != null) {
             for (TweetMedia media : sidecarMedia) {
                 boolean embeddablePhoto = media != null && isEmbeddablePhoto(media);
-                boolean embeddableVideo = media != null && isEmbeddableVideo(media);
-                if (media == null || !(embeddablePhoto || embeddableVideo) || !markSeen(media, seenKeys)) {
+                if (media == null || !embeddablePhoto || !markSeen(media, seenKeys)) {
                     degradedCount++;
                     continue;
                 }
                 embeddedCount++;
                 // 首张图片无前导空行; 后续图片始终以空行分隔, 即使正文为空也保持合法 Markdown
                 mediaMarkdown.append(content.isEmpty() && mediaMarkdown.isEmpty() ? "" : "\n\n");
-                if (embeddableVideo) {
-                    // Story 10.11 (候选 A): VIDEO 以纯文本 mediaId 追加 — Spike 10.9 实测
-                    // addDraft 接受且草稿回读幸存; 不输出 <img>/iframe。
-                    mediaMarkdown.append(VIDEO_EMBED_LABEL)
-                            .append(media.getWechatVideoMediaId().trim());
-                } else {
-                    photoAltIndex++;
-                    mediaMarkdown.append("![").append(IMAGE_ALT_PREFIX).append(photoAltIndex)
-                            .append("](").append(media.getWechatUrl().trim()).append(")");
-                }
+                photoAltIndex++;
+                mediaMarkdown.append("![").append(IMAGE_ALT_PREFIX).append(photoAltIndex)
+                        .append("](").append(media.getWechatUrl().trim()).append(")");
             }
         }
 
@@ -104,19 +91,6 @@ public class MarkdownMediaInserter {
                 && media.getUploadStatus() == MediaUploadStatus.UPLOADED
                 && media.getWechatUrl() != null
                 && !media.getWechatUrl().isBlank()
-                && media.getPublishability() != PublishabilityStatus.BLOCKED;
-    }
-
-    /**
-     * Story 10.11: VIDEO 可嵌入谓词 — wechatPrepare=SUCCEEDED + mediaId 非空 + 非 BLOCKED
-     * (候选 A 嵌入按 {@code wechatVideoMediaId} 判定, 不复用 PHOTO 的 wechatUrl)。
-     */
-    private static boolean isEmbeddableVideo(TweetMedia media) {
-        return media.getType() == TweetMediaType.VIDEO
-                && media.getWechatPrepare() != null
-                && media.getWechatPrepare().getStatus() == MediaPhaseStatus.SUCCEEDED
-                && media.getWechatVideoMediaId() != null
-                && !media.getWechatVideoMediaId().isBlank()
                 && media.getPublishability() != PublishabilityStatus.BLOCKED;
     }
 

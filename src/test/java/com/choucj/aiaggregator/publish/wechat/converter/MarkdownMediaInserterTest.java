@@ -215,17 +215,17 @@ class MarkdownMediaInserterTest {
         assertThat(result.degradedCount()).isEqualTo(1);
     }
 
-    // ===== Story 10.11: VIDEO 候选 A 纯文本 mediaId 嵌入 =====
+    // ===== Story 10.13: VIDEO materialMediaId 纯文本路径 fail closed =====
 
     @Test
-    void should_append_video_media_id_as_plain_text_when_video_prepared() {
+    void should_fail_closed_when_only_material_media_id_is_available() {
         MarkdownMediaInserter.MarkdownMediaInsertionResult result =
                 inserter.insert("正文", List.of(preparedVideo("m2", "wxvid001mediaid")));
 
-        // 候选 A 形态: 纯文本 mediaId 追加, 不输出 Markdown image/iframe/raw img
-        assertThat(result.content()).isEqualTo("正文\n\n视频素材: wxvid001mediaid");
-        assertThat(result.embeddedCount()).isEqualTo(1);
-        assertThat(result.degradedCount()).isZero();
+        assertThat(result.content()).isEqualTo("正文");
+        assertThat(result.content()).doesNotContain("视频素材", "wxvid001mediaid");
+        assertThat(result.embeddedCount()).isZero();
+        assertThat(result.degradedCount()).isEqualTo(1);
     }
 
     @Test
@@ -238,9 +238,9 @@ class MarkdownMediaInserterTest {
                 inserter.insert("正文", sidecar);
 
         assertThat(result.content()).isEqualTo(
-                "正文\n\n![原帖图片-1](https://mmbiz.qpic.cn/a.jpg)"
-                        + "\n\n视频素材: wxvid001mediaid");
-        assertThat(result.embeddedCount()).isEqualTo(2);
+                "正文\n\n![原帖图片-1](https://mmbiz.qpic.cn/a.jpg)");
+        assertThat(result.embeddedCount()).isEqualTo(1);
+        assertThat(result.degradedCount()).isEqualTo(1);
     }
 
     /** PHOTO alt 序号用独立计数 — PHOTO/VIDEO 混排不断号 (embeddedCount 仍为总嵌入数). */
@@ -256,9 +256,9 @@ class MarkdownMediaInserterTest {
 
         assertThat(result.content()).isEqualTo(
                 "正文\n\n![原帖图片-1](https://mmbiz.qpic.cn/a.jpg)"
-                        + "\n\n视频素材: wxvid001mediaid"
                         + "\n\n![原帖图片-2](https://mmbiz.qpic.cn/b.jpg)");
-        assertThat(result.embeddedCount()).isEqualTo(3);
+        assertThat(result.embeddedCount()).isEqualTo(2);
+        assertThat(result.degradedCount()).isEqualTo(1);
     }
 
     @Test
@@ -309,9 +309,9 @@ class MarkdownMediaInserterTest {
                         preparedVideo("m2", "wxvid001mediaid"),
                         preparedVideo("m2", "wxvid002mediaid")));
 
-        assertThat(result.content()).isEqualTo("正文\n\n视频素材: wxvid001mediaid");
-        assertThat(result.embeddedCount()).isEqualTo(1);
-        assertThat(result.degradedCount()).isEqualTo(1);
+        assertThat(result.content()).isEqualTo("正文");
+        assertThat(result.embeddedCount()).isZero();
+        assertThat(result.degradedCount()).isEqualTo(2);
     }
 
     // ===== fixtures =====

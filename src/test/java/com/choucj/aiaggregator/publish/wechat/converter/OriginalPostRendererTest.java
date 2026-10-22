@@ -303,10 +303,10 @@ class OriginalPostRendererTest {
         assertThat(result.degradedMediaCount()).isEqualTo(1);
     }
 
-    // ===== Story 10.11: 已上传 VIDEO 候选 A mediaId 纯文本直嵌 =====
+    // ===== Story 10.13: 已上传 VIDEO 仍不得以 materialMediaId 纯文本直嵌 =====
 
     @Test
-    void should_embed_video_media_id_as_plain_text_when_video_prepared() {
+    void should_degrade_video_even_when_material_media_id_is_prepared() {
         Tweet tweet = baseTweet().build();
         TweetMedia video = TweetMedia.builder()
                 .id("m1")
@@ -318,20 +318,19 @@ class OriginalPostRendererTest {
 
         OriginalPostRenderResult result = renderer.render(tweet, List.of(video));
 
-        // 候选 A 形态: <p>视频素材: mediaId</p>, 经 HTML 转义后纯文本幸存
-        assertThat(result.html()).contains("<p>视频素材: wxvid001mediaid</p>");
+        assertThat(result.html()).contains("视频内容暂不支持稳定内嵌");
+        assertThat(result.html()).doesNotContain("视频素材", "wxvid001mediaid");
         assertThat(result.html()).doesNotContain("<img");
         assertThat(result.html()).doesNotContain("iframe");
-        assertThat(result.html()).doesNotContain("视频内容暂不支持稳定内嵌");
         // mediaId 非图片 URL: 不污染「嵌入图片数」指标 (图片归图片)
         assertThat(result.embeddedImageCount()).isZero();
-        assertThat(result.degradedMediaCount()).isZero();
+        assertThat(result.degradedMediaCount()).isEqualTo(1);
         // mediaId 不是图片 URL, 不进 embeddedImageUrls
         assertThat(result.embeddedImageUrls()).isEmpty();
     }
 
     @Test
-    void should_escape_video_media_id_when_embedded() {
+    void should_not_render_untrusted_material_media_id() {
         Tweet tweet = baseTweet().build();
         TweetMedia video = TweetMedia.builder()
                 .id("m1")
@@ -344,7 +343,8 @@ class OriginalPostRendererTest {
         OriginalPostRenderResult result = renderer.render(tweet, List.of(video));
 
         assertThat(result.html()).doesNotContain("<script>");
-        assertThat(result.html()).contains("&lt;script&gt;");
+        assertThat(result.html()).doesNotContain("&lt;script&gt;", "alert(1)");
+        assertThat(result.html()).contains("视频内容暂不支持稳定内嵌");
     }
 
     @Test

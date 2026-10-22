@@ -703,10 +703,10 @@ class TweetMediaArchiveWriterTest {
         assertThat(stored.getArticleReference().getStatus()).isEqualTo(MediaPhaseStatus.DEFERRED);
     }
 
-    // ===== Story 10.11: VIDEO 引用完整性 (renderedContent contains wechatVideoMediaId) =====
+    // ===== Story 10.13: materialMediaId 不得作为 VIDEO 正文引用 =====
 
     @Test
-    void should_mark_video_article_reference_succeeded_when_content_contains_media_id() {
+    void should_not_mark_video_article_reference_succeeded_for_material_media_id_text() {
         LocalDateTime when = LocalDateTime.of(2026, 8, 2, 10, 0);
         TweetMedia video = TweetMedia.builder().id("v").type(TweetMediaType.VIDEO)
                 .downloadStatus(MediaDownloadStatus.DOWNLOADED)
@@ -715,15 +715,15 @@ class TweetMediaArchiveWriterTest {
                 .build();
         writer.writeSidecar("video-ref-1", when, List.of(video));
 
-        // 兼容投影已把 download/wechatPrepare 补为 SUCCEEDED; 正文包含 mediaId → 引用成功
+        // 即使兼容投影已把 download/wechatPrepare 补为 SUCCEEDED，正文含 mediaId 也不得引用成功。
         assertThat(writer.markArticleReferencesSucceeded(
-                "video-ref-1", "正文 视频素材: wxvid001mediaid")).isTrue();
+                "video-ref-1", "正文 视频素材: wxvid001mediaid")).isFalse();
         TweetMedia stored = writer.readCanonicalSidecar("video-ref-1").orElseThrow().getMedia().getFirst();
-        assertThat(stored.getArticleReference().getStatus()).isEqualTo(MediaPhaseStatus.SUCCEEDED);
+        assertThat(stored.getArticleReference().getStatus()).isEqualTo(MediaPhaseStatus.NOT_STARTED);
         assertThat(stored.getWechatPrepare().getStatus()).isEqualTo(MediaPhaseStatus.SUCCEEDED);
 
-        // Story 10.12: VIDEO 引用成功入表
-        assertThat(counterValue("video", "article_reference", "succeeded", "none")).isEqualTo(1.0);
+        // fail closed 不得写入 VIDEO 引用成功指标。
+        assertThat(counterValue("video", "article_reference", "succeeded", "none")).isZero();
     }
 
     @Test

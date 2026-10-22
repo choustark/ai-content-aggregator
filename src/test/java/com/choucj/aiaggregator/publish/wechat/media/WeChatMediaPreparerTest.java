@@ -1007,9 +1007,11 @@ class WeChatMediaPreparerTest {
     }
 
     private WeChatMediaPreparer videoPreparer() {
+        WeChatProperties properties = new WeChatProperties();
+        properties.getVideo().setEnabled(true);
         return new WeChatMediaPreparer(uploadProbe, Optional.of(writer),
                 new com.choucj.aiaggregator.task.queue.RetryPolicyProperties(),
-                videoAdapter, new WeChatProperties(), metrics);
+                videoAdapter, properties, metrics);
     }
 
     private WeChatMediaPreparer videoPreparerDisabled() {
