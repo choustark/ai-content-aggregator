@@ -225,6 +225,136 @@
 				</plugins>
 			</build>
 		</profile>
+		<!--
+			Story 10.15: 生产 External 验收门禁 (release acceptance gate).
+
+			双闸设计:
+			1. preflight 前置检查 — ReleaseAcceptancePreflightTest 绑定在 process-test-classes 阶段,
+			   先于必需套件执行; 微信凭据 / Redis Cluster 三节点 / PHOTO fixture 任一缺失即 FAIL
+			   (而非 skip), Maven 失败中断, 后续必需测试不执行。
+			2. verify 守门器 — exec-maven-plugin 在 verify 阶段运行 scripts/verify_release_acceptance.py,
+			   解析 surefire XML 断言必需测试集 0 skipped / 0 failures / 0 errors 且报告齐全,
+			   缺口即非零退出 (surefire 无法原生把 skipped 计为失败, 故由脚本独立裁决)。
+			   守门器必需类清单由下方 gate execution 的 <argument> 显式传入 (pom 为单一事实源)。
+
+			必需测试集 (2026-10-23 裁决, 共 4 项): preflight + 真实 Redis Cluster TaskQueue 恢复 +
+			PHOTO-only 成功交付 E2E + 失败四层收敛 E2E。其余 external 测试保持开发 smoke 定位
+			(-Pexternal-tests 入口 assume-skip 语义不变)。
+
+			陈旧报告防御 (review 修复): initialize 阶段先清除上一次运行遗留的必需集 surefire 报告,
+			使 -DskipTests / -Dtest 覆盖等跳过场景因「报告缺失」在守门器处暴露, 而非消费陈旧绿报告假 PASS。
+
+			surefire 配置 combine.self="override" 抹掉默认的 excludedGroups=external 排除
+			(必需类均为 @Tag("external"), 不清除会被反向排除), 并重新声明隔离的 test profile;
+			forkCount/threadCount/parallel 固定单线程顺序执行, 保证报告可解析; runOrder=alphabetical
+			保证执行顺序稳定。
+		-->
+		<profile>
+			<id>release-acceptance</id>
+			<build>
+				<plugins>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-clean-plugin</artifactId>
+						<executions>
+							<!-- 陈旧报告防御: 必需集报告只认本次运行的产出, 上次遗留一律先清除 -->
+							<execution>
+								<id>purge-stale-acceptance-reports</id>
+								<phase>initialize</phase>
+								<goals>
+									<goal>clean</goal>
+								</goals>
+								<configuration>
+									<excludeDefaultDirectories>true</excludeDefaultDirectories>
+									<filesets>
+										<fileset>
+											<directory>${project.build.directory}/surefire-reports</directory>
+											<includes>
+												<include>TEST-com.choucj.aiaggregator.release.*.xml</include>
+												<include>TEST-com.choucj.aiaggregator.publish.e2e.WeChatDeliveryE2EFailureTest.xml</include>
+												<include>TEST-com.choucj.aiaggregator.task.queue.TaskQueueRecoveryIntegrationTest.xml</include>
+											</includes>
+										</fileset>
+									</filesets>
+								</configuration>
+							</execution>
+						</executions>
+					</plugin>
+					<plugin>
+						<groupId>org.apache.maven.plugins</groupId>
+						<artifactId>maven-surefire-plugin</artifactId>
+						<configuration combine.self="override">
+							<!-- 单线程顺序执行: 必需套件共享真实外部环境, 且保证 surefire 报告可解析 -->
+							<forkCount>1</forkCount>
+							<reuseForks>true</reuseForks>
+							<threadCount>1</threadCount>
+							<parallel>none</parallel>
+							<runOrder>alphabetical</runOrder>
+							<systemPropertyVariables>
+								<!-- 与默认回归一致, 固定使用隔离的 test profile, 不读本地运行配置 -->
+								<spring.profiles.active>test</spring.profiles.active>
+							</systemPropertyVariables>
+						</configuration>
+						<executions>
+							<!-- 禁用默认全量执行: release 门禁只运行显式必需清单, 不夹带其它测试 -->
+							<execution>
+								<id>default-test</id>
+								<phase>none</phase>
+							</execution>
+							<!-- 前置闸: preflight 先行, 任一前置缺失即 FAIL 中断构建 -->
+							<execution>
+								<id>release-acceptance-preflight</id>
+								<phase>process-test-classes</phase>
+								<goals>
+									<goal>test</goal>
+								</goals>
+								<configuration>
+									<test>com.choucj.aiaggregator.release.ReleaseAcceptancePreflightTest</test>
+								</configuration>
+							</execution>
+							<!-- 必需套件: preflight 通过后才执行 -->
+							<execution>
+								<id>release-acceptance-required</id>
+								<phase>test</phase>
+								<goals>
+									<goal>test</goal>
+								</goals>
+								<configuration>
+									<test>com.choucj.aiaggregator.publish.e2e.WeChatDeliveryE2EFailureTest,com.choucj.aiaggregator.release.WeChatPhotoDeliveryReleaseTest,com.choucj.aiaggregator.task.queue.TaskQueueRecoveryIntegrationTest</test>
+								</configuration>
+							</execution>
+						</executions>
+					</plugin>
+					<plugin>
+						<groupId>org.codehaus.mojo</groupId>
+						<artifactId>exec-maven-plugin</artifactId>
+						<version>3.2.0</version>
+						<executions>
+							<!-- 后置闸: 解析 surefire 报告, 0 skipped / 0 failures / 0 errors + 报告齐全才放行 -->
+							<execution>
+								<id>release-acceptance-gate</id>
+								<phase>verify</phase>
+								<goals>
+									<goal>exec</goal>
+								</goals>
+								<configuration>
+									<executable>python3</executable>
+									<arguments>
+										<argument>${project.basedir}/scripts/verify_release_acceptance.py</argument>
+										<argument>${project.build.directory}/surefire-reports</argument>
+										<!-- 必需类清单单一事实源: 与上方两个 surefire execution 的 <test> 清单保持一致 -->
+										<argument>com.choucj.aiaggregator.release.ReleaseAcceptancePreflightTest</argument>
+										<argument>com.choucj.aiaggregator.publish.e2e.WeChatDeliveryE2EFailureTest</argument>
+										<argument>com.choucj.aiaggregator.release.WeChatPhotoDeliveryReleaseTest</argument>
+										<argument>com.choucj.aiaggregator.task.queue.TaskQueueRecoveryIntegrationTest</argument>
+									</arguments>
+								</configuration>
+							</execution>
+						</executions>
+					</plugin>
+				</plugins>
+			</build>
+		</profile>
 		<profile>
 			<id>story-5.1-coverage</id>
 			<build>

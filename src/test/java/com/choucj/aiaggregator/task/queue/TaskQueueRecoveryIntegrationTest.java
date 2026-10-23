@@ -48,6 +48,9 @@ import static org.assertj.core.api.Assertions.fail;
  *
  * <p><b>跳过策略(沿用 Story 1.5a):</b> 本地无 Redis 时通过
  * {@link Assumptions#assumeTrue(boolean, String)} 跳过,不阻塞 CI.
+ * <b>Story 10.15 起本类兼任 release acceptance 必需集</b>({@code -P release-acceptance}):
+ * 该入口下 assume-skip 会作为 skipped 被守门器判为 gate failure, 不再「计为通过」;
+ * 上述不阻塞语义仅适用于默认回归与 {@code -Pexternal-tests} 开发 smoke 入口。
  */
 @SpringBootTest
 @ActiveProfiles("test")

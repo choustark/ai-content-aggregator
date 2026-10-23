@@ -13,6 +13,7 @@ import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaVariant;
 import io.micrometer.core.instrument.MeterRegistry;
+import me.chanjar.weixin.mp.api.WxMpService;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Tag;
 import org.junit.jupiter.api.Test;
@@ -54,7 +55,10 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
  * <p>守卫策略 (复用 Spike 10.9/10.11 形态): 无真实凭据 / 无样例文件 / 40164 白名单、
  * 45009 配额、40013/40001/40014 凭据、DNS 阻塞时 assume-skip, 不 fail CI
  * (样例文件缺失在读取前 assumeTrue, 避免 NoSuchFileException 硬失败)。
- * 成功创建的草稿 mediaId 追加 {@code target/spike-10.12/created-artifacts.txt} 供人工清理;
+ * Story 10.15: 成功创建的真实草稿在 finally 中经 {@code draft/delete}
+ * (WxJava {@code delDraft}) 自动删除, 仅删本测试自建草稿, 替代 created-artifacts.txt
+ * 人工清理模式; 删除失败时 mediaId 追加 {@code target/release-acceptance/pending-cleanup.txt}
+ * 供人工清理 (full mediaId 只落 target/, 不入仓库), 不掩盖测试结果。
  * 同时产出脱敏证据报告 {@code target/spike-10.12/evidence-report.md}。
  */
 @SpringBootTest
@@ -99,6 +103,10 @@ class WeChatDeliveryE2ESuccessTest {
 
     @Autowired
     private WxMpProperties wxMpProperties;
+
+    /** 真实 WxMpService (不 mock) — Story 10.15 draft/delete teardown 经 WxJava draft API 执行。 */
+    @Autowired
+    private WxMpService wxMpService;
 
     @Autowired
     private MeterRegistry meterRegistry;
@@ -202,9 +210,12 @@ class WeChatDeliveryE2ESuccessTest {
 
         // 真实草稿创建 (封面素材缺失属账号未预备, assume-skip 不洗绿)
         long publishStart = System.nanoTime();
-        String draftMediaId;
+        String draftMediaId = null;
+        long publishMs = -1;
         try {
             draftMediaId = weChatPublisher.publishDraft(generation.article());
+            // 计时止于 publishDraft 返回: finally 中 draft/delete teardown 耗时不得计入草稿创建耗时
+            publishMs = (System.nanoTime() - publishStart) / 1_000_000;
         } catch (NonRetryableException e) {
             if (e.getMessage() != null && e.getMessage().contains("封面")) {
                 writeEvidenceReport("SKIP(封面素材缺失)", record, generateMs, -1, "THUMB_MISSING");
@@ -212,11 +223,13 @@ class WeChatDeliveryE2ESuccessTest {
             }
             writeEvidenceReport("FAIL(addDraft)", record, generateMs, -1, "ADD_DRAFT_ERROR");
             throw e;
+        } finally {
+            // Story 10.15: draft/delete 自动 teardown (仅删自建草稿), 替代 created-artifacts.txt 人工模式;
+            // 清理失败不掩盖测试结果, 只记录待人工清理清单
+            deleteSelfCreatedDraft(draftMediaId);
         }
-        long publishMs = (System.nanoTime() - publishStart) / 1_000_000;
 
         assertThat(draftMediaId).isNotBlank();
-        recordCreatedArtifact(draftMediaId);
         writeEvidenceReport("DRAFT_CREATED", record, generateMs, publishMs, "none");
 
         System.out.printf("[story-10.12] E2E 成功路径完成: draftMediaIdPrefix=%s, generateMs=%d, publishMs=%d%n",
@@ -295,18 +308,46 @@ class WeChatDeliveryE2ESuccessTest {
         assumeTrue(!blocked, "跳过: 外部微信环境阻塞 - " + message);
     }
 
-    /** 草稿 mediaId 记录到 created-artifacts.txt (不入库), 供人工后台清理. */
-    private static void recordCreatedArtifact(String draftMediaId) {
-        String line = LocalDateTime.now() + " story-10.12-e2e-success draftMediaId=" + draftMediaId
-                + System.lineSeparator();
+    /**
+     * Story 10.15 draft/delete 自动 teardown: 经 WxJava {@code delDraft} 删除本测试自建草稿。
+     * 删除失败不掩盖测试结果, 只把 full mediaId 追加到
+     * {@code target/release-acceptance/pending-cleanup.txt} (不入仓库) 供人工清理,
+     * 控制台仅输出前缀脱敏标识。
+     */
+    private void deleteSelfCreatedDraft(String draftMediaId) {
+        if (!StringUtils.hasText(draftMediaId)) {
+            return; // 草稿未创建 (skip/失败路径), 无需清理
+        }
         try {
-            Path artifacts = ARTIFACTS_DIR.resolve("created-artifacts.txt").toAbsolutePath().normalize();
-            Files.createDirectories(artifacts.getParent());
-            Files.writeString(artifacts, line, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            Boolean deleted = wxMpService.getDraftService().delDraft(draftMediaId);
+            if (Boolean.TRUE.equals(deleted)) {
+                System.out.printf("[story-10.12] 自建草稿已自动删除: draftMediaIdPrefix=%s%n",
+                        prefix(draftMediaId, 8));
+            } else {
+                recordPendingCleanup(draftMediaId, "delDraft 返回 false");
+            }
         } catch (Exception e) {
-            System.out.printf("[story-10.12] created-artifacts.txt 写入失败(请人工记录该 mediaId): err=%s%n",
+            // 脱敏: 控制台只打异常类名与前缀, full mediaId 只落 target/ 待人工清单
+            recordPendingCleanup(draftMediaId, e.getClass().getSimpleName());
+        }
+    }
+
+    /** 清理失败 → 追加待人工清理清单 (与 story-10.15 release 测试共用同一文件, 守门器读取标记 CONCERN)。 */
+    private static void recordPendingCleanup(String draftMediaId, String reason) {
+        String line = LocalDateTime.now() + " story-10.12-e2e-success draftMediaId=" + draftMediaId
+                + " reason=" + reason + System.lineSeparator();
+        try {
+            Path pending = Path.of("target/release-acceptance/pending-cleanup.txt")
+                    .toAbsolutePath().normalize();
+            Files.createDirectories(pending.getParent());
+            Files.writeString(pending, line, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        } catch (Exception e) {
+            System.out.printf("[story-10.12] 待清理清单写入失败(请人工记录该 mediaId): err=%s%n",
                     e.getMessage());
         }
+        System.out.printf("[story-10.12][CONCERN] draft/delete 清理失败 (reason=%s), "
+                        + "draftMediaIdPrefix=%s 已记录待人工清理%n",
+                reason, prefix(draftMediaId, 8));
     }
 
     /**
@@ -334,9 +375,11 @@ class WeChatDeliveryE2ESuccessTest {
                     .append('\n');
         }
         report.append("\n## 人工预览待填栏\n\n");
-        report.append("- draftMediaId 前缀: (见 created-artifacts.txt, 已记录)\n");
-        report.append("- 公众号后台预览结果: 待人工填写\n");
-        report.append("- 人工发布状态: 待人工填写\n");
+        report.append("- 草稿处置: 已由 draft/delete 自动清理 (仅删自建草稿);\n")
+                .append("  若 target/release-acceptance/pending-cleanup.txt 有记录则该草稿待人工删除\n");
+        report.append("- 公众号后台预览结果: 不适用 (草稿已由 draft/delete 自动清理; ")
+                .append("如需后台人工预览, 临时禁用 deleteSelfCreatedDraft 后重跑)\n");
+        report.append("- 人工发布状态: 不适用 (草稿已自动清理, 不进入发布流程)\n");
         try {
             Path evidence = ARTIFACTS_DIR.resolve("evidence-report.md").toAbsolutePath().normalize();
             Files.createDirectories(evidence.getParent());

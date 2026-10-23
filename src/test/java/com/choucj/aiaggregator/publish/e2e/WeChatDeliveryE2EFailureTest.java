@@ -135,6 +135,9 @@ class WeChatDeliveryE2EFailureTest {
                         .id(ARTICLE_ID)
                         .title("story-10.12 失败路径 E2E")
                         .content("改写正文段落, 必需媒体下载失败应整体交付失败。")
+                        // 交付失败收敛经 ArticleArchiveRepository.saveSnapshot, 其 requireArticle
+                        // 强制 createdAt 非空 — release 必需集下四层收敛必须可真实完成
+                        .createdAt(PUBLISHED_AT)
                         .aiGenerated(true)
                         .build());
 
@@ -143,10 +146,16 @@ class WeChatDeliveryE2EFailureTest {
                 .type(TweetMediaType.PHOTO)
                 // 不可达: discard 端口 9, 连接立即拒绝 → Retryable → 下载终态失败
                 .sourceUrl("http://127.0.0.1:9/e2e-fail-photo.jpg")
+                // allowDownload 默认 false 会被 archiver 直接 SKIP (不触发下载失败路径),
+                // 必需集语义是真实下载尝试后终态失败, 故显式放行下载
+                .allowDownload(true)
                 .order(0)
                 .build();
         var tweet = com.choucj.aiaggregator.source.twitter.model.Tweet.builder()
                 .id(TWEET_ID)
+                // publishability gate 推文级判定要求文本三字段不全 blank (T1):
+                // release 必需集下本测试必须真实执行, fixture 携带源文本避免被 gate 前置 BLOCK
+                .content("story-10.12 失败路径 E2E fixture: 必需媒体下载失败整体收敛。")
                 .url("https://x.com/e2e/status/" + TWEET_ID)
                 .publishedAt(PUBLISHED_AT)
                 .media(List.of(photo))
