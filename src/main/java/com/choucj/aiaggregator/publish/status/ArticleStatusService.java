@@ -105,6 +105,17 @@ public class ArticleStatusService {
         writeSoftFail("markDraftCreated", articleId, ArticleStatus.DRAFT_CREATED, false);
     }
 
+    /**
+     * Story 10.16 — 远端草稿已成功但本地收据写回未完成时镜像 RECONCILING。
+     *
+     * <p>软失败(与其他 mark* 一致): Redis 镜像只是加速与观测, 权威状态在归档快照;
+     * 镜像写失败不影响对账持久化(快照 reconcileMediaId + Redis 对账收据仍可恢复)。
+     */
+    public void markReconciling(String articleId) {
+        validateArticleId(articleId);
+        writeSoftFail("markReconciling", articleId, ArticleStatus.RECONCILING, false);
+    }
+
     /** 严格镜像 DELIVERY_FAILED；Redis 写失败必须透传，供 saga 重放补齐。 */
     public void markDeliveryFailed(String articleId) {
         validateArticleId(articleId);

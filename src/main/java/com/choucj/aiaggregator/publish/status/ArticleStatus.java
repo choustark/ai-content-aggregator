@@ -78,5 +78,15 @@ public enum ArticleStatus {
     /**
      * 草稿已创建 — 微信草稿创建成功 (addDraft 返回 media_id), 等待人工审核或定时发布.
      */
-    DRAFT_CREATED
+    DRAFT_CREATED,
+
+    /**
+     * 对账中 (Story 10.16) — 微信远端 addDraft 已成功(或疑似成功)但本地收据写回未完成,
+     * 快照 {@code reconcileMediaId}/Redis 对账收据留存已知 mediaId.
+     *
+     * <p>本状态属<b>中间态而非终态</b>: 自动对账检测到收据即补写回本地三处并转 {@link #DRAFT_CREATED};
+     * 补全失败停留本状态并告警。<b>任何后续触发都不得再次调用微信写 API</b> —
+     * 后续只做本地写回。状态接口/监控对外新增此状态值(2026-10-23 裁决 1A)。
+     */
+    RECONCILING
 }

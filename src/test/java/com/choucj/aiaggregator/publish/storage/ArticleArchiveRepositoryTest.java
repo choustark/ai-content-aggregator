@@ -165,6 +165,52 @@ class ArticleArchiveRepositoryTest {
     }
 
     @Test
+    void should_reject_status_rewrite_out_of_reconciling_guard_state() {
+        // Story 10.16: RECONCILING 持有未落账的远端草稿收据, 镜像 DELIVERY_FAILED 守卫形态
+        repository.saveSnapshot(article("tw-123"), ArticleStatus.PENDING_PUBLISH,
+                LocalDateTime.of(2026, 9, 1, 8, 0), archiveFile);
+        repository.markReconciling("tw-123", "media-1");
+
+        assertThatThrownBy(() -> repository.markStatus("tw-123", ArticleStatus.PENDING_PUBLISH))
+                .isInstanceOf(NonRetryableException.class)
+                .hasMessageContaining("RECONCILING");
+        assertThatThrownBy(() -> repository.markStatus("tw-123", ArticleStatus.DRAFT_CREATED))
+                .isInstanceOf(NonRetryableException.class)
+                .hasMessageContaining("RECONCILING");
+    }
+
+    @Test
+    void should_park_reconciling_and_keep_latest_media_id_on_repeated_park() {
+        repository.saveSnapshot(article("tw-123"), ArticleStatus.PENDING_PUBLISH,
+                LocalDateTime.of(2026, 9, 1, 8, 0), archiveFile);
+
+        repository.markReconciling("tw-123", "media-crash");
+
+        ArchivedArticle snapshot = repository.findByArticleId("tw-123").orElseThrow();
+        assertThat(snapshot.getStatus()).isEqualTo(ArticleStatus.RECONCILING);
+        assertThat(snapshot.getReconcileMediaId()).isEqualTo("media-crash");
+        // 幂等重 park 以最近一次远端成功为准, 覆盖 mediaId
+        repository.markReconciling("tw-123", "media-crash-2");
+        ArchivedArticle reparked = repository.findByArticleId("tw-123").orElseThrow();
+        assertThat(reparked.getStatus()).isEqualTo(ArticleStatus.RECONCILING);
+        assertThat(reparked.getReconcileMediaId()).isEqualTo("media-crash-2");
+    }
+
+    @Test
+    void should_return_parked_reconciling_snapshot_from_due_scan_when_due() {
+        // 裁决 2A: RECONCILING 纳入到期扫描 — 文章被触碰即触发自动对账
+        repository.saveSnapshot(article("tw-123"), ArticleStatus.PENDING_PUBLISH,
+                LocalDateTime.of(2026, 9, 1, 8, 0), archiveFile);
+        repository.markReconciling("tw-123", "media-crash");
+
+        assertThat(repository.findDueForPublish(LocalDateTime.of(2026, 9, 1, 8, 1)))
+                .extracting(ArchivedArticle::getArticleId)
+                .containsExactly("tw-123");
+        // 未到期仍不返回
+        assertThat(repository.findDueForPublish(LocalDateTime.of(2026, 9, 1, 7, 59))).isEmpty();
+    }
+
+    @Test
     void should_serialize_concurrent_read_modify_write_without_corrupting_snapshot() throws Exception {
         repository.saveSnapshot(article("tw-123"), ArticleStatus.CREATED, null, archiveFile);
         try (var executor = Executors.newFixedThreadPool(2)) {

@@ -272,6 +272,7 @@
 											<includes>
 												<include>TEST-com.choucj.aiaggregator.release.*.xml</include>
 												<include>TEST-com.choucj.aiaggregator.publish.e2e.WeChatDeliveryE2EFailureTest.xml</include>
+												<include>TEST-com.choucj.aiaggregator.publish.wechat.DraftPublishClaimIntegrationTest.xml</include>
 												<include>TEST-com.choucj.aiaggregator.task.queue.TaskQueueRecoveryIntegrationTest.xml</include>
 											</includes>
 										</fileset>
@@ -320,7 +321,7 @@
 									<goal>test</goal>
 								</goals>
 								<configuration>
-									<test>com.choucj.aiaggregator.publish.e2e.WeChatDeliveryE2EFailureTest,com.choucj.aiaggregator.release.WeChatPhotoDeliveryReleaseTest,com.choucj.aiaggregator.task.queue.TaskQueueRecoveryIntegrationTest</test>
+									<test>com.choucj.aiaggregator.publish.e2e.WeChatDeliveryE2EFailureTest,com.choucj.aiaggregator.release.WeChatPhotoDeliveryReleaseTest,com.choucj.aiaggregator.publish.wechat.DraftPublishClaimIntegrationTest,com.choucj.aiaggregator.task.queue.TaskQueueRecoveryIntegrationTest</test>
 								</configuration>
 							</execution>
 						</executions>
@@ -346,6 +347,7 @@
 										<argument>com.choucj.aiaggregator.release.ReleaseAcceptancePreflightTest</argument>
 										<argument>com.choucj.aiaggregator.publish.e2e.WeChatDeliveryE2EFailureTest</argument>
 										<argument>com.choucj.aiaggregator.release.WeChatPhotoDeliveryReleaseTest</argument>
+										<argument>com.choucj.aiaggregator.publish.wechat.DraftPublishClaimIntegrationTest</argument>
 										<argument>com.choucj.aiaggregator.task.queue.TaskQueueRecoveryIntegrationTest</argument>
 									</arguments>
 								</configuration>

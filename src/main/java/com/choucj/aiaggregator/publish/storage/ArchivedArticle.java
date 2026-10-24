@@ -30,6 +30,14 @@ public class ArchivedArticle {
 
     private String wechatDraftMediaId;
 
+    /**
+     * Story 10.16 — 对账留存 mediaId: 远端 addDraft 已成功(或疑似成功)但快照尚未推进为
+     * {@code DRAFT_CREATED} 时, 在 {@code RECONCILING} 快照中尽力留存已知 mediaId,
+     * 供自动对账只补本地写回(绝不重发远端)。对账补全成功后由
+     * {@code markDraftCreated}/{@code reconcileDraftCreatedFromReplay} 清除。
+     */
+    private String reconcileMediaId;
+
     private String archiveFile;
 
     private String failureStage;

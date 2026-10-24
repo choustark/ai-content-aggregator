@@ -159,6 +159,46 @@ public final class RedisKeys {
     }
 
     /**
+     * Story 10.16: 微信草稿发布原子认领租约键(Redis String, 值=持有实例 holderId, PX 租约 TTL).
+     *
+     * <p>发布工作流在 addDraft 之前经 {@code DraftPublishClaimService} 以 SET NX+PX 语义原子认领;
+     * 租约 TTL 覆盖「addDraft 调用 + 收据写回」时长上限(分钟级), 进程崩溃残留靠 TTL 自动过期自愈。
+     *
+     * <p>与 {@link #taskDraftReconcile(String)} 参与<b>同一个</b> Lua 操作, 必须同 slot —
+     * 两者共享 {@code task:{queue}:} 固定 hash tag 前缀(与 10.4 任务键族一致)。
+     *
+     * @param articleId 文章 ID (如 {@code "tw-1234567890"}), 须匹配 {@code (tw|gh)-[A-Za-z0-9_-]+}
+     * @return {@code "task:{queue}:draft-claim:<articleId>"}
+     */
+    public static String taskDraftClaim(String articleId) {
+        return TASK_QUEUE_TAGGED_PREFIX + "draft-claim:" + requireArticleId(articleId);
+    }
+
+    /**
+     * Story 10.16: 微信草稿对账收据键(Redis Hash: {@code articleId/mediaId/recordedAt}).
+     *
+     * <p>「远端 addDraft 成功但本地快照写回失败」时原子写入(同 Lua 内释放认领租约), 留存已知
+     * mediaId 供对账只补本地写回、绝不重发远端调用; 对账补全成功后删除。归档快照仍是权威源,
+     * 本键是异常窗口内的耐久收据镜像。
+     *
+     * @param articleId 文章 ID, 须匹配 {@code (tw|gh)-[A-Za-z0-9_-]+}
+     * @return {@code "task:{queue}:draft-reconcile:<articleId>"}
+     */
+    public static String taskDraftReconcile(String articleId) {
+        return TASK_QUEUE_TAGGED_PREFIX + "draft-reconcile:" + requireArticleId(articleId);
+    }
+
+    /** articleId 白名单校验(与 ArticleStatusService / ArticleArchiveRepository 同口径), 防键注入。 */
+    private static String requireArticleId(String articleId) {
+        if (articleId == null || articleId.isBlank()
+                || !articleId.matches("(tw|gh)-[A-Za-z0-9_-]+")) {
+            throw new IllegalArgumentException(
+                    "articleId must match (tw|gh)-[A-Za-z0-9_-]+: " + articleId);
+        }
+        return articleId;
+    }
+
+    /**
      * Story 10.4: 一次性迁移幂等账本键(Redis Set).
      *
      * <p>只记录已迁移的旧 taskId; 正常队列路径<b>不读</b>此键. 旧键确认删除前不得清空该账本

@@ -103,6 +103,14 @@ public class ArticleArchiveRepository {
                 throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
                         "DELIVERY_FAILED 为受保护终态，必须通过显式补跑创建新任务: articleId=" + articleId);
             }
+            if (snapshot.getStatus() == ArticleStatus.RECONCILING && status != ArticleStatus.RECONCILING) {
+                // Story 10.16: RECONCILING 持有未落账的远端副作用(疑似成功草稿), 直接改写会丢失
+                // 对账上下文并可能在重投后再次触发远端调用。离开本状态只能经 markDraftCreated /
+                // reconcileDraftCreatedFromReplay 补全收据。
+                throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                        "RECONCILING 持有未落账的远端草稿收据, 禁止直接改写状态, 必须先完成本地对账: "
+                                + "articleId=" + articleId + ", targetStatus=" + status);
+            }
             snapshot.setStatus(status);
             writeSnapshot(snapshot);
             updateMarkdownStatus(snapshot);
@@ -148,6 +156,31 @@ public class ArticleArchiveRepository {
         }
     }
 
+    /**
+     * Story 10.16 — 进入对账状态并尽力留存已知 mediaId:「远端 addDraft 成功但本地收据写回失败」
+     * 的异常路径调用(软失败由调用方负责), 供自动对账只补本地写回、绝不重发远端调用。
+     * 已处于对账状态时幂等覆盖 mediaId(以最近一次远端成功为准)。
+     */
+    public ArchivedArticle markReconciling(String articleId, String reconcileMediaId) {
+        validateArticleId(articleId);
+        synchronized (articleLock(articleId)) {
+            ArchivedArticle snapshot = findByArticleId(articleId)
+                .orElseThrow(() -> new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                        "文章归档快照不存在: articleId=" + articleId));
+            if (snapshot.getStatus() == ArticleStatus.DELIVERY_FAILED) {
+                throw new NonRetryableException(ErrorCode.NON_RETRYABLE_ERROR,
+                        "DELIVERY_FAILED 为受保护终态，拒绝进入对账状态: articleId=" + articleId);
+            }
+            snapshot.setStatus(ArticleStatus.RECONCILING);
+            if (reconcileMediaId != null && !reconcileMediaId.isBlank()) {
+                snapshot.setReconcileMediaId(reconcileMediaId);
+            }
+            writeSnapshot(snapshot);
+            updateMarkdownStatus(snapshot);
+            return snapshot;
+        }
+    }
+
     public ArchivedArticle markDraftCreated(String articleId, String mediaId, LocalDateTime draftCreatedAt) {
         validateArticleId(articleId);
         synchronized (articleLock(articleId)) {
@@ -161,6 +194,7 @@ public class ArticleArchiveRepository {
             snapshot.setStatus(ArticleStatus.DRAFT_CREATED);
             snapshot.setWechatDraftMediaId(mediaId);
             snapshot.setDraftCreatedAt(draftCreatedAt);
+            snapshot.setReconcileMediaId(null);
             writeSnapshot(snapshot);
             updateMarkdownStatus(snapshot);
             return snapshot;
@@ -192,6 +226,7 @@ public class ArticleArchiveRepository {
             snapshot.setStatus(ArticleStatus.DRAFT_CREATED);
             snapshot.setWechatDraftMediaId(mediaId);
             snapshot.setDraftCreatedAt(draftCreatedAt);
+            snapshot.setReconcileMediaId(null);
             writeSnapshot(snapshot);
             updateMarkdownStatus(snapshot);
             return snapshot;
@@ -224,8 +259,12 @@ public class ArticleArchiveRepository {
         }
     }
 
+    /**
+     * Story 10.16: RECONCILING 纳入到期扫描 — 文章被批量循环触碰即触发自动对账
+     * (裁决 2A「文章被触碰时补偿」触发点): claim 收据命中 → 只补本地写回, 绝不重发远端。
+     */
     private static boolean isPublishableStatus(ArticleStatus status) {
-        return status == ArticleStatus.PENDING_PUBLISH;
+        return status == ArticleStatus.PENDING_PUBLISH || status == ArticleStatus.RECONCILING;
     }
 
     private void writeSnapshot(ArchivedArticle snapshot) {
@@ -337,6 +376,9 @@ public class ArticleArchiveRepository {
         if (status == ArticleStatus.DELIVERY_FAILED) {
             return "交付失败";
         }
+        if (status == ArticleStatus.RECONCILING) {
+            return "对账中";
+        }
         return "已创建";
     }
 
@@ -345,7 +387,8 @@ public class ArticleArchiveRepository {
     }
 
     private ArticleStatus mergeStatus(ArticleStatus existing, ArticleStatus desired) {
-        if (existing == ArticleStatus.DRAFT_CREATED || existing == ArticleStatus.DELIVERY_FAILED) {
+        if (existing == ArticleStatus.DRAFT_CREATED || existing == ArticleStatus.DELIVERY_FAILED
+                || existing == ArticleStatus.RECONCILING) {
             return existing;
         }
         if (desired == ArticleStatus.CREATED && existing != null) {

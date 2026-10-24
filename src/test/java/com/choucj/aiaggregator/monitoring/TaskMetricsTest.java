@@ -221,6 +221,17 @@ class TaskMetricsTest {
     }
 
     @Test
+    void should_count_each_draft_claim_outcome_once_when_recorded() {
+        for (TaskMetrics.DraftClaimOutcome outcome : TaskMetrics.DraftClaimOutcome.values()) {
+            metrics.recordDraftClaim(outcome);
+            assertThat(registry.get("aiaggregator.task.draft.claim")
+                    .tag("outcome", outcome.tagValue()).counter().count()).isEqualTo(1);
+        }
+
+        assertMeterIdsUseClosedLowCardinalityContract();
+    }
+
+    @Test
     void should_not_leak_identity_values_into_idempotent_meter_ids() {
         // 幂等命中只允许 kind 封闭标签; articleId/taskId/correlationId 只进日志不入 meter
         metrics.recordIdempotent(TaskMetrics.IdempotentKind.ARCHIVE);
@@ -240,7 +251,8 @@ class TaskMetricsTest {
                 "success", "failure", "retryable_failure", "non_retryable_failure", "unexpected_failure", "skipped",
                 "content_fetch", "batch_publish",
                 "scheduled", "dispatched", "exhausted", "dead_lettered", "replayed",
-                "archive", "draft");
+                "archive", "draft",
+                "acquired", "skip-held", "skip-existing", "reconcile-parked");
         registry.getMeters().forEach(meter -> {
             assertThat(meter.getId().getName()).startsWith("aiaggregator.");
             assertThat(meter.getId().getTags())

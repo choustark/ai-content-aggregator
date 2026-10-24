@@ -45,6 +45,10 @@ import java.util.function.LongSupplier;
  *       （{@code MarkdownArchiver}）与草稿侧 {@code DRAFT_CREATED} 幂等命中跳过
  *       （{@code ArticlePublicationWorkflow}）。taskId/articleId/correlationId 只进日志，
  *       不进标签（低基数纪律）。</li>
+ *   <li>{@code aiaggregator.task.draft.claim}（Prometheus:
+ *       {@code aiaggregator_task_draft_claim_total}），Counter/认领次数，唯一标签
+ *       {@code outcome=acquired|skip-held|skip-existing|reconcile-parked}（Story 10.16）。
+ *       记录点：{@code ArticlePublicationWorkflow} 发布单点在 addDraft 前的原子认领分支。</li>
  *   <li>{@code aiaggregator.schedule.last.success}（Prometheus:
  *       {@code aiaggregator_schedule_last_success_seconds}），Gauge/Unix 秒，唯一标签
  *       {@code operation=content_fetch|batch_publish}；进程启动后尚未成功执行时为 NaN，
@@ -81,6 +85,7 @@ public class TaskMetrics {
     private final Map<BatchArticleOutcome, Counter> batchArticleCounters = new EnumMap<>(BatchArticleOutcome.class);
     private final Map<RetryMetricOutcome, Counter> retryCounters = new EnumMap<>(RetryMetricOutcome.class);
     private final Map<IdempotentKind, Counter> idempotentCounters = new EnumMap<>(IdempotentKind.class);
+    private final Map<DraftClaimOutcome, Counter> draftClaimCounters = new EnumMap<>(DraftClaimOutcome.class);
 
     @Autowired
     public TaskMetrics(TaskQueue taskQueue, MeterRegistry registry) {
@@ -96,6 +101,7 @@ public class TaskMetrics {
         registerBatchArticleCounters(registry);
         registerRetryCounters(registry);
         registerIdempotentCounters(registry);
+        registerDraftClaimCounters(registry);
     }
 
     /** 记录一个队列任务在调度器边界的终态；调用方不得在 processor 或 queue 内重复记录。 */
@@ -137,6 +143,16 @@ public class TaskMetrics {
      */
     public void recordIdempotent(IdempotentKind kind) {
         idempotentCounters.get(kind).increment();
+    }
+
+    /**
+     * 记录一次草稿发布原子认领结果(Story 10.16) — 发布工作流在 addDraft 前的 claim 分支.
+     *
+     * <p>调用方仅允许传入 {@link DraftClaimOutcome} 封闭枚举——articleId/holderId 只进审计日志,
+     * 不得进入标签(低基数纪律); 调用方须自行 try/catch 隔离(观测是旁路, 不得影响发布结果)。
+     */
+    public void recordDraftClaim(DraftClaimOutcome outcome) {
+        draftClaimCounters.get(outcome).increment();
     }
 
     private void registerQueueGauges(MeterRegistry registry) {
@@ -219,6 +235,15 @@ public class TaskMetrics {
             idempotentCounters.put(kind, Counter.builder("aiaggregator.task.idempotent")
                     .description("Idempotent skips backed by persisted business identity (Story 10.6)")
                     .tag("kind", kind.tagValue())
+                    .register(registry));
+        }
+    }
+
+    private void registerDraftClaimCounters(MeterRegistry registry) {
+        for (DraftClaimOutcome outcome : DraftClaimOutcome.values()) {
+            draftClaimCounters.put(outcome, Counter.builder("aiaggregator.task.draft.claim")
+                    .description("WeChat draft publish atomic claim outcomes (Story 10.16)")
+                    .tag("outcome", outcome.tagValue())
                     .register(registry));
         }
     }
@@ -361,6 +386,35 @@ public class TaskMetrics {
         private final String tagValue;
 
         IdempotentKind(String tagValue) {
+            this.tagValue = tagValue;
+        }
+
+        public String tagValue() {
+            return tagValue;
+        }
+    }
+
+    /**
+     * 草稿发布原子认领结果分类(Story 10.16) — 封闭枚举, 防止 articleId/holderId 等高基数标签入库。
+     *
+     * <ul>
+     *   <li>{@code acquired} — 认领成功, 持有租约, 允许触达远端 addDraft</li>
+     *   <li>{@code skip-held} — 租约被其他实例持有(并发在途), 本方未触达远端</li>
+     *   <li>{@code skip-existing} — claim 命中既有收据(对账收据/快照留存 mediaId),
+     *       幂等跳过远端调用, 只补本地写回</li>
+     *   <li>{@code reconcile-parked} — 崩溃残留窗口且无任何收据, 停候 RECONCILING 告警,
+     *       未触达远端</li>
+     * </ul>
+     */
+    public enum DraftClaimOutcome {
+        ACQUIRED("acquired"),
+        SKIP_HELD("skip-held"),
+        SKIP_EXISTING("skip-existing"),
+        RECONCILE_PARKED("reconcile-parked");
+
+        private final String tagValue;
+
+        DraftClaimOutcome(String tagValue) {
             this.tagValue = tagValue;
         }
 
