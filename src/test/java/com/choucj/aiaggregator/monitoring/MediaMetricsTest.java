@@ -15,10 +15,12 @@ import static org.assertj.core.api.Assertions.assertThatCode;
 /**
  * Story 10.12: MediaMetrics 单元测试 (SimpleMeterRegistry 断言值域).
  *
- * <p>核心断言:
+ * <p>核心断言 (Story 10.17 语义重划后口径):
  * <ul>
  *   <li>Prometheus 指标名 {@code aiaggregator.media.phase.result} 存在且仅含封闭枚举标签</li>
- *   <li>仅预登记 18 条可达组合; 不可达组合 (如 download+retry_scheduled) 结构性不暴露</li>
+ *   <li>仅预登记 20 条可达组合; {@code retry_scheduled} 值域移除(媒体级不预记排期,
+ *       排期事实由任务级 {@code aiaggregator.task.retry} 唯一承担)</li>
+ *   <li>不可达组合 (如 download+blocked) 结构性不暴露</li>
  *   <li>record/recordSucceeded 正确累加; 不可达组合丢弃不抛异常、不虚增计数</li>
  *   <li>低基数纪律: 标签值域全部来自封闭枚举, 无 ID/URL/自由文本</li>
  * </ul>
@@ -39,8 +41,8 @@ class MediaMetricsTest {
     // ===== 值域: 指标存在 + 标签封闭 =====
 
     @Test
-    void shouldRegisterEighteenReachableCombinations() {
-        assertThat(registry.get(METRIC_NAME).meters()).hasSize(18);
+    void shouldRegisterTwentyReachableCombinations() {
+        assertThat(registry.get(METRIC_NAME).meters()).hasSize(20);
     }
 
     @Test
@@ -57,7 +59,7 @@ class MediaMetricsTest {
     void shouldRestrictTagValuesToClosedEnumDomains() {
         Set<String> typeValues = Set.of("photo", "video");
         Set<String> phaseValues = Set.of("download", "wechat_prepare", "article_reference");
-        Set<String> outcomeValues = Set.of("succeeded", "failed_terminal", "retry_scheduled", "blocked");
+        Set<String> outcomeValues = Set.of("succeeded", "failed_terminal", "failed", "blocked");
         Set<String> errorClassValues = Set.of("none", "environment_blocked", "rate_limited", "retryable", "permanent");
 
         registry.get(METRIC_NAME).meters().forEach(meter -> {
@@ -76,19 +78,20 @@ class MediaMetricsTest {
     // ===== 不可达组合: 结构性不暴露 + 丢弃不抛 =====
 
     @Test
-    void shouldNotExposeUnreachableCombination_downloadRetryScheduled() {
-        // 下载阶段只有 succeeded/failed_terminal, retry_scheduled 结构性缺席
+    void shouldNotExposeUnreachableCombination_downloadBlocked() {
+        // 下载阶段只有 succeeded/failed_terminal, blocked 结构性缺席
         assertThat(registry.find(METRIC_NAME)
                 .tag("phase", "download")
-                .tag("outcome", "retry_scheduled")
+                .tag("outcome", "blocked")
                 .counter()).isNull();
     }
 
     @Test
-    void shouldNotExposeUnreachableCombination_downloadBlocked() {
+    void shouldNotExposeUnreachableCombination_downloadFailed() {
+        // download 失败恒为 failed_terminal, failed(attempt 粒度) 结构性缺席
         assertThat(registry.find(METRIC_NAME)
                 .tag("phase", "download")
-                .tag("outcome", "blocked")
+                .tag("outcome", "failed")
                 .counter()).isNull();
     }
 
@@ -101,17 +104,31 @@ class MediaMetricsTest {
     }
 
     @Test
+    void shouldRegisterArticleReferenceFailureCombosPerNoGoSemantics() {
+        // Story 10.17: article_reference 失败组合登记 — photo=retryable, video=permanent
+        assertThat(counterValue("photo", "article_reference", "failed", "retryable")).isZero();
+        assertThat(counterValue("video", "article_reference", "failed", "permanent")).isZero();
+        // 交叉组合( violates No-Go 语义 )结构性缺席
+        assertThat(registry.find(METRIC_NAME)
+                .tag("phase", "article_reference").tag("type", "photo")
+                .tag("outcome", "failed").tag("errorClass", "permanent").counter()).isNull();
+        assertThat(registry.find(METRIC_NAME)
+                .tag("phase", "article_reference").tag("type", "video")
+                .tag("outcome", "failed").tag("errorClass", "retryable").counter()).isNull();
+    }
+
+    @Test
     void shouldDropUnreachableCombinationWithoutThrowingAndWithoutCounting() {
         double before = counterValue("photo", "download", "succeeded", "none");
 
         assertThatCode(() -> metrics.record(MediaMetrics.MediaType.PHOTO,
                 MediaMetrics.MediaPhase.DOWNLOAD,
-                MediaMetrics.MediaOutcome.RETRY_SCHEDULED,
+                MediaMetrics.MediaOutcome.BLOCKED,
                 MediaMetrics.MediaErrorClass.RETRYABLE)).doesNotThrowAnyException();
 
         // 不虚增任何可达计数, 也不新建 meter
         assertThat(counterValue("photo", "download", "succeeded", "none")).isEqualTo(before);
-        assertThat(registry.get(METRIC_NAME).meters()).hasSize(18);
+        assertThat(registry.get(METRIC_NAME).meters()).hasSize(20);
     }
 
     // ===== record/recordSucceeded 累加语义 =====
@@ -131,6 +148,17 @@ class MediaMetricsTest {
         metrics.recordSucceeded(MediaMetrics.MediaType.PHOTO, MediaMetrics.MediaPhase.WECHAT_PREPARE);
 
         assertThat(counterValue("photo", "wechat_prepare", "succeeded", "none")).isEqualTo(1.0);
+    }
+
+    @Test
+    void shouldRecordFailedAttemptFactForRetryablePrepare() {
+        // Story 10.17: preparer 只记本次 attempt 事实 failed, 不再预记 retry_scheduled
+        metrics.record(MediaMetrics.MediaType.PHOTO, MediaMetrics.MediaPhase.WECHAT_PREPARE,
+                MediaMetrics.MediaOutcome.FAILED, MediaMetrics.MediaErrorClass.RATE_LIMITED);
+
+        assertThat(counterValue("photo", "wechat_prepare", "failed", "rate_limited")).isEqualTo(1.0);
+        assertThat(registry.find(METRIC_NAME)
+                .tag("phase", "wechat_prepare").tag("outcome", "retry_scheduled").counter()).isNull();
     }
 
     @Test
@@ -164,7 +192,7 @@ class MediaMetricsTest {
     @Test
     void shouldNeverExposeHighCardinalityValuesInTags() {
         // ID/URL/correlationId 形态的值绝不出现在任何标签中
-        // (canary: 扫描整个 registry 的全部 meter — 仅扫本指标的 18 条封闭枚举 meter 是同义反复)
+        // (canary: 扫描整个 registry 的全部 meter — 仅扫本指标的 20 条封闭枚举 meter 是同义反复)
         registry.getMeters().forEach(meter ->
                 meter.getId().getTags().forEach(tag ->
                         assertThat(tag.getValue())

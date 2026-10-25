@@ -183,6 +183,23 @@ class TaskMetricsTest {
                 .tag("outcome", "dispatched").counter().count()).isEqualTo(4);
     }
 
+    // ============ Story 10.17: 收敛上下文缺失指标 ============
+
+    @Test
+    void should_count_context_missing_with_closed_kind_tag_only() {
+        metrics.recordContextMissing(TaskMetrics.ContextMissingKind.ARTICLE_ID);
+        metrics.recordContextMissing(TaskMetrics.ContextMissingKind.ARTICLE_ID);
+
+        assertThat(registry.get("aiaggregator.task.context.missing")
+                .tag("kind", "article_id").counter().count()).isEqualTo(2);
+        // kind 是唯一标签, 值域封闭
+        registry.get("aiaggregator.task.context.missing").meters().forEach(meter ->
+                assertThat(meter.getId().getTags())
+                        .allMatch(tag -> tag.getKey().equals("kind")
+                                && tag.getValue().equals("article_id")));
+        assertMeterIdsUseClosedLowCardinalityContract();
+    }
+
     @Test
     void should_expose_retry_and_dead_letter_queue_gauges() {
         when(taskQueue.retryCount()).thenReturn(6L);
@@ -252,7 +269,8 @@ class TaskMetricsTest {
                 "content_fetch", "batch_publish",
                 "scheduled", "dispatched", "exhausted", "dead_lettered", "replayed",
                 "archive", "draft",
-                "acquired", "skip-held", "skip-existing", "reconcile-parked");
+                "acquired", "skip-held", "skip-existing", "reconcile-parked",
+                "article_id");
         registry.getMeters().forEach(meter -> {
             assertThat(meter.getId().getName()).startsWith("aiaggregator.");
             assertThat(meter.getId().getTags())

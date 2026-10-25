@@ -471,6 +471,12 @@ public class TaskQueue {
      * {@code lastErrorCode} 用本次传入值覆盖 — 不再透传上一次瞬态错误码。
      * 人工补跑走 {@link #replayDeadLetter(String, String)}, 本方法不可逆。
      *
+     * <p>Story 10.17 范围澄清(裁决 1): 本路径服务<b>源级任务的不可重试失败终态</b> —
+     * 不携带 articleId/canonicalArchiveDate/failedStage 业务收敛上下文属预期
+     * (文章级不可重试交付失败由 {@code DeliveryFailureCoordinator} →
+     * {@code recordDeliveryFailure} 的 DELIVERY_FAILURE_SCRIPT 原子携带 articleId 收敛);
+     * 收敛上下文原子化仅覆盖 {@link #recordRetryableFailure} 的可重试状态机路径。
+     *
      * @param taskId    任务 ID
      * @param errorCode 脱敏错误码(如 ErrorCode 枚举名或异常类 simpleName, 审计本次失败原因)
      * @param reason    脱敏失败原因(写入前会再做换行清洗与截断)
@@ -513,30 +519,47 @@ public class TaskQueue {
     }
 
     /**
-     * 可重试失败推进(Story 10.5 AC1/AC3) — 单个原子状态迁移把 PROCESSING 任务
-     * 转为 RETRY_SCHEDULED(未达上限)或 DEAD_LETTER(已达上限).
+     * 可重试失败推进(Story 10.5 AC1/AC3) — 无业务上下文重载(源级任务, 如 fetch 失败),
+     * 等价于 {@link #recordRetryableFailure(String, String, String, RetryPolicyProperties,
+     * TaskFailureContext)} 传入 {@link TaskFailureContext#none()}。
+     */
+    public RetryAdvance recordRetryableFailure(String taskId, String errorCode,
+                                               String errorSummary, RetryPolicyProperties policy) {
+        return recordRetryableFailure(taskId, errorCode, errorSummary, policy, TaskFailureContext.none());
+    }
+
+    /**
+     * 可重试失败推进(Story 10.5 AC1/AC3; Story 10.17 扩展收敛上下文) — 单个原子状态迁移
+     * 把 PROCESSING 任务转为 RETRY_SCHEDULED(未达上限)或 DEAD_LETTER(已达上限),
+     * 并在<b>同一 Lua 操作</b>内写入 {@code articleId}/{@code canonicalArchiveDate}/
+     * {@code failedStage} 收敛上下文(Story 10.17 AC1 — 取代 10.8 的旁路 HSET 两步写)。
      *
      * <p>流程: 预读 state 当前 {@code attempt}(任务由本消费者独占, 无并发推进) →
      * 按 {@code RetryPolicyProperties.delayForAttempt(attempt+1)} 计算 dueAt
      * (饱和加法防 long 溢出翻负 — 10.5 review: 负 score 成员永远不会落入到期扫描区间) →
-     * RETRY_SCHEDULE 脚本原子完成校验 + SREM + attempt 递增 + 分支推进。
+     * RETRY_SCHEDULE 脚本原子完成校验 + SREM + attempt 递增 + 分支推进 + 条件上下文 HSET。
      * {@code errorCode}/{@code errorSummary} 写入前经 {@code sanitizeStateText} 净化(N4)。
      *
      * @param taskId       任务 ID
      * @param errorCode    脱敏错误码(如 ErrorCode 枚举名或异常类 simpleName)
      * @param errorSummary 脱敏错误摘要(写入前会再做换行清洗与截断)
      * @param policy       重试策略配置(上限/退避)
+     * @param context      收敛上下文({@link TaskFailureContext#none()} 表示源级任务无业务上下文,
+     *                     脚本不写上下文字段; 交付失败任务必须携带)
      * @return 推进结果(含 attempt/dueAt 审计字段, 供调用方 W11 日志):
      *         RETRY_SCHEDULED / DEAD_LETTERED / NOT_IN_PROCESSING(幂等跳过)
      * @throws RetryableException    Redis 连接异常
-     * @throws NonRetryableException 键 TYPE 校验拒绝或 state 数值字段损坏(数据损坏, 需运维介入)
+     * @throws NonRetryableException 键 TYPE 校验拒绝、state 数值字段损坏或上下文字段非法
+     *                               (数据损坏/调用点 bug, 需运维介入)
      */
     public RetryAdvance recordRetryableFailure(String taskId, String errorCode,
-                                               String errorSummary, RetryPolicyProperties policy) {
+                                               String errorSummary, RetryPolicyProperties policy,
+                                               TaskFailureContext context) {
         if (taskId == null) {
             throw new NonRetryableException(ErrorCode.REDIS_DATA_ERROR,
                     "recordRetryableFailure 失败: taskId 不能为 null");
         }
+        TaskFailureContext safeContext = context == null ? TaskFailureContext.none() : context;
         long currentAttempt = readAttempt(taskId);
         // 下一次执行是第 (currentAttempt+1) 次; 首次失败(currentAttempt=0)延迟 initial
         long delayMs = policy.delayForAttempt((int) Math.min(currentAttempt + 1, Integer.MAX_VALUE));
@@ -550,7 +573,12 @@ public class TaskQueue {
                         RedisKeys.taskDeadLetter(), RedisKeys.taskState(taskId)),
                 taskId, Instant.now().toString(), String.valueOf(dueAt),
                 sanitizeStateText(errorCode), sanitizeStateText(errorSummary),
-                String.valueOf(policy.getMaxAttempts()));
+                String.valueOf(policy.getMaxAttempts()),
+                safeContext.isEmpty() ? "" : safeContext.articleId(),
+                safeContext.isEmpty() || safeContext.canonicalArchiveDate() == null
+                        ? "" : safeContext.canonicalArchiveDate(),
+                safeContext.isEmpty() || safeContext.failedStage() == null
+                        ? "" : safeContext.failedStage());
         if (result != null && result == RETRY_RESULT_SCHEDULED) {
             log.warn("任务 {} 可重试失败, 已排期重试: attempt={}, dueAt={}, delayMs={}, errorCode={}",
                     taskId, currentAttempt + 1, dueAt, delayMs, sanitizeStateText(errorCode));
@@ -756,8 +784,9 @@ public class TaskQueue {
      * Story 10.8: 读取任务 state Hash 中的 {@code articleId} 上下文 (只读, 供调度器耗尽收敛钩子
      * 定位失败文章)。无记录/空白 taskId 或字段缺失/空白返回 {@link Optional#empty()}。
      *
-     * <p>{@code articleId} 由 {@link #recordDeliveryRetryContext} 在 RETRY_SCHEDULED 时写入;
-     * RETRY_SCHEDULE Lua 脚本只 HSET 自身键, 不清除该额外字段, 故耗尽落死信时仍可读。
+     * <p>{@code articleId} 由 RETRY_SCHEDULE Lua 脚本在状态迁移时<b>同 HSET 原子写入</b>
+     * (Story 10.17 AC1 — 取代 10.8 的旁路 {@code recordDeliveryRetryContext} 两步写),
+     * 排期与耗尽落死信两分支均携带, 故 RETRY_SCHEDULED 与 DEAD_LETTER 态均可读。
      */
     public Optional<String> readStateArticleId(String taskId) {
         if (taskId == null || taskId.isBlank()) {
@@ -768,23 +797,6 @@ public class TaskQueue {
                 () -> stringRedisTemplate.opsForHash().get(stateKey, "articleId"));
         return value instanceof String articleId && !articleId.isBlank()
                 ? Optional.of(articleId) : Optional.empty();
-    }
-
-    /**
-     * Story 10.8: 可重试媒体交付失败时把 {@code articleId} 记入任务 state Hash —
-     * 使重试耗尽落死信时调度器耗尽收敛钩子能凭 state 定位失败文章并触发四层收敛
-     * (先权威状态迁移、后旁路上下文写入, 不改 Lua 契约与 10.5 状态机语义)。
-     */
-    public void recordDeliveryRetryContext(String taskId, String articleId) {
-        if (taskId == null || taskId.isBlank() || articleId == null || articleId.isBlank()) {
-            throw new NonRetryableException(ErrorCode.REDIS_DATA_ERROR,
-                    "记录媒体交付重试上下文失败: taskId/articleId 不能为空");
-        }
-        String stateKey = RedisKeys.taskState(taskId);
-        supplyWithMapping("record-delivery-retry-context", stateKey, Operation.SET, () -> {
-            stringRedisTemplate.opsForHash().put(stateKey, "articleId", articleId);
-            return null;
-        });
     }
 
     private String sanitizeReplayRequestId(String replayRequestId) {
@@ -967,7 +979,8 @@ public class TaskQueue {
 
     /**
      * RETRY_SCHEDULE 脚本(4 键): KEYS=[processing, retry, dead-letter, state],
-     * ARGV=[taskId, now, dueAt, lastErrorCode, lastErrorSummary, maxAttempts].
+     * ARGV=[taskId, now, dueAt, lastErrorCode, lastErrorSummary, maxAttempts,
+     * contextArticleId, contextCanonicalArchiveDate, contextFailedStage].
      *
      * <p>单个原子状态迁移(AC1/AC3): 复核任务仍在 processing 且 state 为 PROCESSING
      * (10.5 review: 陈旧成员不得覆盖终态; state 缺失同样拒绝, 避免生成无 taskId 的孤儿审计)
@@ -979,6 +992,12 @@ public class TaskQueue {
      * 规范化整数同时完成"解析+递增+规范化") + ZADD retry(dueAt score)
      * + HSET RETRY_SCHEDULED(含脱敏错误字段); 已达 maxAttempts: SADD dead-letter +
      * HSET DEAD_LETTER(含本次错误码), 杜绝"先重试再判死信"的双步窗口。
+     *
+     * <p>Story 10.17(AC1): ARGV[7] 非空时(交付失败上下文存在), articleId/canonicalArchiveDate/
+     * failedStage 三字段在<b>同一脚本内</b> HSET — 与状态迁移同生共死, 消除
+     * 「先权威迁移、后旁路 HSET」中间崩溃产生的孤儿态; ARGV[7] 为空(源级任务)不写任何
+     * 上下文字段。上下文合法性(articleId 非空/date ISO/stage 闭式)已在 Java 侧
+     * {@link TaskFailureContext#of} 校验, 脚本只做纯键值搬运。
      * 返回 1=重试排期 / 2=耗尽落死信 / 0=不在 processing 或非 PROCESSING 状态 /
      * -1=TYPE 拒绝 / -2=state 数值字段损坏。
      */
@@ -1010,6 +1029,12 @@ public class TaskQueue {
                 redis.call('HSET', KEYS[4], 'taskId', ARGV[1], 'status', 'DEAD_LETTER',
                     'attempt', attemptNum + 1, 'lastErrorCode', ARGV[4],
                     'updatedAt', ARGV[2], 'deadLetteredAt', ARGV[2], 'lastErrorSummary', ARGV[5])
+                if ARGV[7] ~= '' then
+                    redis.call('HSET', KEYS[4], 'articleId', ARGV[7], 'failedStage', ARGV[9])
+                    if ARGV[8] ~= '' then
+                        redis.call('HSET', KEYS[4], 'canonicalArchiveDate', ARGV[8])
+                    end
+                end
                 return 2
             end
             redis.call('SREM', KEYS[1], ARGV[1])
@@ -1018,6 +1043,12 @@ public class TaskQueue {
             redis.call('HSET', KEYS[4], 'taskId', ARGV[1], 'status', 'RETRY_SCHEDULED',
                 'dueAt', ARGV[3], 'lastErrorCode', ARGV[4], 'lastErrorSummary', ARGV[5],
                 'updatedAt', ARGV[2])
+            if ARGV[7] ~= '' then
+                redis.call('HSET', KEYS[4], 'articleId', ARGV[7], 'failedStage', ARGV[9])
+                if ARGV[8] ~= '' then
+                    redis.call('HSET', KEYS[4], 'canonicalArchiveDate', ARGV[8])
+                end
+            end
             return 1
             """, Long.class);
 

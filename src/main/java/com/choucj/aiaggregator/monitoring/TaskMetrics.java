@@ -49,6 +49,11 @@ import java.util.function.LongSupplier;
  *       {@code aiaggregator_task_draft_claim_total}），Counter/认领次数，唯一标签
  *       {@code outcome=acquired|skip-held|skip-existing|reconcile-parked}（Story 10.16）。
  *       记录点：{@code ArticlePublicationWorkflow} 发布单点在 addDraft 前的原子认领分支。</li>
+ *   <li>{@code aiaggregator.task.context.missing}（Prometheus:
+ *       {@code aiaggregator_task_context_missing_total}），Counter/缺失次数，唯一标签
+ *       {@code kind=article_id}（Story 10.17）。记录点：可重试交付失败任务落死信后
+ *       耗尽收敛钩子发现 state 缺少收敛上下文 — 终态化照常但人工凭告警补跑（裁决 2,
+ *       不新增隔离键族）。</li>
  *   <li>{@code aiaggregator.schedule.last.success}（Prometheus:
  *       {@code aiaggregator_schedule_last_success_seconds}），Gauge/Unix 秒，唯一标签
  *       {@code operation=content_fetch|batch_publish}；进程启动后尚未成功执行时为 NaN，
@@ -86,6 +91,7 @@ public class TaskMetrics {
     private final Map<RetryMetricOutcome, Counter> retryCounters = new EnumMap<>(RetryMetricOutcome.class);
     private final Map<IdempotentKind, Counter> idempotentCounters = new EnumMap<>(IdempotentKind.class);
     private final Map<DraftClaimOutcome, Counter> draftClaimCounters = new EnumMap<>(DraftClaimOutcome.class);
+    private final Map<ContextMissingKind, Counter> contextMissingCounters = new EnumMap<>(ContextMissingKind.class);
 
     @Autowired
     public TaskMetrics(TaskQueue taskQueue, MeterRegistry registry) {
@@ -102,6 +108,7 @@ public class TaskMetrics {
         registerRetryCounters(registry);
         registerIdempotentCounters(registry);
         registerDraftClaimCounters(registry);
+        registerContextMissingCounters(registry);
     }
 
     /** 记录一个队列任务在调度器边界的终态；调用方不得在 processor 或 queue 内重复记录。 */
@@ -153,6 +160,18 @@ public class TaskMetrics {
      */
     public void recordDraftClaim(DraftClaimOutcome outcome) {
         draftClaimCounters.get(outcome).increment();
+    }
+
+    /**
+     * 记录一次任务收敛上下文缺失(Story 10.17 裁决 2) — 交付失败任务终态化照常但
+     * state 缺少收敛上下文, 人工凭告警补跑.
+     *
+     * <p>调用方仅允许传入 {@link ContextMissingKind} 封闭枚举——taskId/articleId 只进
+     * ERROR 日志, 不得进入标签(低基数纪律); 调用方须自行 try/catch 隔离(观测是旁路,
+     * 不得影响状态机推进)。
+     */
+    public void recordContextMissing(ContextMissingKind kind) {
+        contextMissingCounters.get(kind).increment();
     }
 
     private void registerQueueGauges(MeterRegistry registry) {
@@ -248,6 +267,15 @@ public class TaskMetrics {
         }
     }
 
+    private void registerContextMissingCounters(MeterRegistry registry) {
+        for (ContextMissingKind kind : ContextMissingKind.values()) {
+            contextMissingCounters.put(kind, Counter.builder("aiaggregator.task.context.missing")
+                    .description("Delivery tasks terminalized without convergence context (Story 10.17)")
+                    .tag("kind", kind.tagValue())
+                    .register(registry));
+        }
+    }
+
     private void registerBatchArticleCounters(MeterRegistry registry) {
         for (BatchArticleOutcome outcome : BatchArticleOutcome.values()) {
             batchArticleCounters.put(outcome, Counter.builder("aiaggregator.publish.batch.articles")
@@ -334,7 +362,9 @@ public class TaskMetrics {
      *   <li>{@code scheduled} — 可重试失败已按退避写入 retry ZSET</li>
      *   <li>{@code dispatched} — 到期重试已原子转回 pending 队列</li>
      *   <li>{@code exhausted} — 重试尝试耗尽, 同脚本落死信</li>
-     *   <li>{@code dead_lettered} — 不可重试失败或异常态兜底移入死信</li>
+     *   <li>{@code dead_lettered} — 不可重试失败或异常态兜底移入死信
+     *       (源级任务终态: 无业务收敛上下文属预期 — Story 10.17 裁决 1, markDeadLetter
+     *       路径不纳入上下文原子化)</li>
      *   <li>{@code replayed} — 死信任务经人工补跑创建新 pending 任务</li>
      * </ul>
      */
@@ -415,6 +445,29 @@ public class TaskMetrics {
         private final String tagValue;
 
         DraftClaimOutcome(String tagValue) {
+            this.tagValue = tagValue;
+        }
+
+        public String tagValue() {
+            return tagValue;
+        }
+    }
+
+    /**
+     * 任务收敛上下文缺失分类(Story 10.17) — 封闭枚举, 防止 taskId/articleId 等高基数标签入库。
+     *
+     * <ul>
+     *   <li>{@code article_id} — 交付失败任务终态化后 state Hash 缺少 {@code articleId}
+     *       收敛依据(上下文与状态迁移已在同一 Lua 原子写入, 正常路径不会缺失; 缺失即
+     *       state 数据异常), 人工凭告警补跑</li>
+     * </ul>
+     */
+    public enum ContextMissingKind {
+        ARTICLE_ID("article_id");
+
+        private final String tagValue;
+
+        ContextMissingKind(String tagValue) {
             this.tagValue = tagValue;
         }
 

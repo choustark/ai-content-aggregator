@@ -14,6 +14,7 @@ import com.choucj.aiaggregator.publish.status.ArticleDeliveryReplayExecutor;
 import com.choucj.aiaggregator.publish.status.DeliveryFailureCoordinator;
 import com.choucj.aiaggregator.publish.storage.TweetMediaArchiveWriter;
 import com.choucj.aiaggregator.task.queue.RetryPolicyProperties;
+import com.choucj.aiaggregator.task.queue.TaskFailureContext;
 import com.choucj.aiaggregator.task.queue.TaskQueue;
 import com.choucj.aiaggregator.task.queue.TaskRecoveryRunner;
 import org.junit.jupiter.api.BeforeEach;
@@ -574,7 +575,7 @@ class ContentSchedulerTest {
                 .doThrow(new IllegalStateException("unexpected"))
                 .when(twitterProcessor).process();
         when(taskQueue.recordRetryableFailure(anyString(), anyString(), anyString(),
-                any(RetryPolicyProperties.class)))
+                any(RetryPolicyProperties.class), any(TaskFailureContext.class)))
                 .thenReturn(TaskQueue.RetryAdvance.scheduled(1, System.currentTimeMillis()));
 
         observed.processContent();
@@ -592,7 +593,7 @@ class ContentSchedulerTest {
         // Story 10.5: 可重试失败不再留 processing, 而是原子推进重试/死信(摘要同样白名单化)
         verify(taskQueue).recordRetryableFailure(eq("twitter:retryable"),
                 eq(ErrorCode.REDIS_CONNECTION_ERROR.name()), eq("REDIS_CONNECTION_ERROR len=9"),
-                any(RetryPolicyProperties.class));
+                any(RetryPolicyProperties.class), any(TaskFailureContext.class));
         verify(taskQueue, never()).complete(eq("twitter:retryable"));
     }
 
@@ -604,7 +605,7 @@ class ContentSchedulerTest {
         doThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "temporary"))
                 .when(twitterProcessor).process();
         when(taskQueue.recordRetryableFailure(anyString(), anyString(), anyString(),
-                any(RetryPolicyProperties.class)))
+                any(RetryPolicyProperties.class), any(TaskFailureContext.class)))
                 .thenReturn(TaskQueue.RetryAdvance.deadLettered(3));
 
         observed.processContent();
@@ -615,63 +616,104 @@ class ContentSchedulerTest {
 
     // ===== Story 10.8: 媒体交付可重试失败的耗尽收敛钩子 =====
 
-    /** Story 10.8 (AC4): RETRY_SCHEDULED 时把 articleId 记入 state Hash — 耗尽时刻定位依据. */
+    /**
+     * Story 10.17 (AC1): 交付失败上下文与状态迁移在 RETRY_SCHEDULE 脚本内原子传递 —
+     * 调度器组装 TaskFailureContext(articleId/canonicalArchiveDate/failedStage)传入 5 参推进.
+     */
     @Test
-    void should_record_delivery_retry_context_when_article_failure_retry_scheduled() {
+    void should_pass_delivery_context_when_article_failure_retry_scheduled() {
         ContentScheduler observed = scheduler(Optional.empty(), Optional.of(taskMetrics));
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
                 .thenReturn("twitter:retryable", null);
         doThrow(new ArticleDeliveryRetryableException("tw-2083615699260313955",
-                "媒体微信准备失败(可重试): errcode=45009"))
+                "2026-10-25", "wechat_prepare",
+                ErrorCode.WECHAT_RATE_LIMITED, "媒体微信准备失败(可重试): errcode=45009"))
                 .when(twitterProcessor).process();
         when(taskQueue.recordRetryableFailure(anyString(), anyString(), anyString(),
-                any(RetryPolicyProperties.class)))
+                any(RetryPolicyProperties.class), any(TaskFailureContext.class)))
                 .thenReturn(TaskQueue.RetryAdvance.scheduled(1, System.currentTimeMillis()));
 
         observed.processContent();
 
-        verify(taskQueue).recordDeliveryRetryContext("twitter:retryable", "tw-2083615699260313955");
+        verify(taskQueue).recordRetryableFailure(eq("twitter:retryable"), anyString(), anyString(),
+                any(RetryPolicyProperties.class),
+                eq(TaskFailureContext.of("tw-2083615699260313955", "2026-10-25", "wechat_prepare")));
         verify(taskMetrics).recordRetry(TaskMetrics.RetryMetricOutcome.SCHEDULED);
+        verify(taskMetrics, never()).recordContextMissing(
+                TaskMetrics.ContextMissingKind.ARTICLE_ID);
     }
 
-    /** Story 10.8: articleId 上下文写入失败只降级告警 — SCHEDULED 指标与审计日志必然执行. */
+    /**
+     * Story 10.17 (裁决 2): 交付异常 articleId 空白 = 上下文缺失 — 终态化(排期)照常,
+     * ERROR 告警 + context.missing 计数, 不静默跳过.
+     */
     @Test
-    void should_still_record_scheduled_metric_when_delivery_retry_context_write_throws() {
+    void should_count_context_missing_and_still_schedule_when_article_id_blank() {
         ContentScheduler observed = scheduler(Optional.empty(), Optional.of(taskMetrics));
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
                 .thenReturn("twitter:retryable", null);
-        doThrow(new ArticleDeliveryRetryableException("tw-2083615699260313955",
+        doThrow(new ArticleDeliveryRetryableException(" ",
                 "媒体微信准备失败(可重试): errcode=45009"))
                 .when(twitterProcessor).process();
         when(taskQueue.recordRetryableFailure(anyString(), anyString(), anyString(),
-                any(RetryPolicyProperties.class)))
+                any(RetryPolicyProperties.class), any(TaskFailureContext.class)))
                 .thenReturn(TaskQueue.RetryAdvance.scheduled(1, System.currentTimeMillis()));
-        doThrow(new IllegalStateException("redis hset broken"))
-                .when(taskQueue).recordDeliveryRetryContext("twitter:retryable",
-                        "tw-2083615699260313955");
 
         observed.processContent();
 
+        verify(taskQueue).recordRetryableFailure(eq("twitter:retryable"), anyString(), anyString(),
+                any(RetryPolicyProperties.class), eq(TaskFailureContext.none()));
+        verify(taskMetrics).recordContextMissing(TaskMetrics.ContextMissingKind.ARTICLE_ID);
         verify(taskMetrics).recordRetry(TaskMetrics.RetryMetricOutcome.SCHEDULED);
+        // 上下文缺失不吞处理结果指标(承接原旁路写用例的 outcome 断言)
         verify(taskMetrics).recordProcessed(TaskMetrics.Source.TWITTER,
                 TaskMetrics.Outcome.RETRYABLE_FAILURE);
     }
 
-    /** Story 10.8: 非媒体交付类 RetryableException 不写 articleId 上下文 (无 getArticleId). */
+    /**
+     * Story 10.17 review: 上下文不完整(articleId 非空但 failedStage 缺失, 如 legacy
+     * 构造器产出)= 按裁决 2 缺失语义告警后以 none() 推进 — 排期照常,
+     * 不经 of() fail-closed 使任务滞留 PROCESSING.
+     */
     @Test
-    void should_not_record_delivery_retry_context_for_plain_retryable_exception() {
+    void should_degrade_to_none_and_alert_when_failed_stage_missing() {
+        ContentScheduler observed = scheduler(Optional.empty(), Optional.of(taskMetrics));
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter:retryable", null);
+        // legacy 2 参构造器: failedStage=null, articleId 合法
+        doThrow(new ArticleDeliveryRetryableException("tw-2083",
+                "媒体微信准备失败(可重试): errcode=45009"))
+                .when(twitterProcessor).process();
+        when(taskQueue.recordRetryableFailure(anyString(), anyString(), anyString(),
+                any(RetryPolicyProperties.class), any(TaskFailureContext.class)))
+                .thenReturn(TaskQueue.RetryAdvance.scheduled(1, System.currentTimeMillis()));
+
+        observed.processContent();
+
+        verify(taskQueue).recordRetryableFailure(eq("twitter:retryable"), anyString(), anyString(),
+                any(RetryPolicyProperties.class), eq(TaskFailureContext.none()));
+        verify(taskMetrics).recordContextMissing(TaskMetrics.ContextMissingKind.ARTICLE_ID);
+        verify(taskMetrics).recordRetry(TaskMetrics.RetryMetricOutcome.SCHEDULED);
+    }
+
+    /** Story 10.8: 非媒体交付类 RetryableException(源级任务)不携带上下文 — none(), 不计缺失. */
+    @Test
+    void should_not_pass_context_for_plain_retryable_exception() {
         ContentScheduler observed = scheduler(Optional.empty(), Optional.of(taskMetrics));
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
                 .thenReturn("twitter:retryable", null);
         doThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "temporary"))
                 .when(twitterProcessor).process();
         when(taskQueue.recordRetryableFailure(anyString(), anyString(), anyString(),
-                any(RetryPolicyProperties.class)))
+                any(RetryPolicyProperties.class), any(TaskFailureContext.class)))
                 .thenReturn(TaskQueue.RetryAdvance.scheduled(1, System.currentTimeMillis()));
 
         observed.processContent();
 
-        verify(taskQueue, never()).recordDeliveryRetryContext(anyString(), anyString());
+        verify(taskQueue).recordRetryableFailure(eq("twitter:retryable"), anyString(), anyString(),
+                any(RetryPolicyProperties.class), eq(TaskFailureContext.none()));
+        verify(taskMetrics, never()).recordContextMissing(
+                TaskMetrics.ContextMissingKind.ARTICLE_ID);
     }
 
     /** Story 10.8 (AC4): 重试耗尽落死信后 — 终态化 sidecar + 四层收敛 (state.articleId 驱动). */
@@ -685,10 +727,11 @@ class ContentSchedulerTest {
         when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
                 .thenReturn("twitter:retryable", null);
         doThrow(new ArticleDeliveryRetryableException("tw-2083615699260313955",
-                "媒体微信准备失败(可重试): errcode=45009"))
+                "2026-10-25", "wechat_prepare",
+                ErrorCode.WECHAT_RATE_LIMITED, "媒体微信准备失败(可重试): errcode=45009"))
                 .when(twitterProcessor).process();
         when(taskQueue.recordRetryableFailure(anyString(), anyString(), anyString(),
-                any(RetryPolicyProperties.class)))
+                any(RetryPolicyProperties.class), any(TaskFailureContext.class)))
                 .thenReturn(TaskQueue.RetryAdvance.deadLettered(3));
         when(taskQueue.readStateArticleId("twitter:retryable"))
                 .thenReturn(Optional.of("tw-2083615699260313955"));
@@ -709,7 +752,10 @@ class ContentSchedulerTest {
         verify(taskMetrics).recordRetry(TaskMetrics.RetryMetricOutcome.EXHAUSTED);
     }
 
-    /** Story 10.8: state 无 articleId (非媒体交付失败) 时耗尽钩子不收敛. */
+    /**
+     * Story 10.8/10.17: state 无 articleId 且为源级失败(非媒体交付异常)时
+     * 耗尽钩子安静跳过 — 无上下文属预期, 不计缺失告警.
+     */
     @Test
     void should_not_converge_exhausted_prepare_without_article_context() {
         ContentScheduler observed = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
@@ -722,16 +768,48 @@ class ContentSchedulerTest {
         doThrow(new RetryableException(ErrorCode.REDIS_CONNECTION_ERROR, "temporary"))
                 .when(twitterProcessor).process();
         when(taskQueue.recordRetryableFailure(anyString(), anyString(), anyString(),
-                any(RetryPolicyProperties.class)))
+                any(RetryPolicyProperties.class), any(TaskFailureContext.class)))
                 .thenReturn(TaskQueue.RetryAdvance.deadLettered(3));
         when(taskQueue.readStateArticleId("twitter:retryable")).thenReturn(Optional.empty());
 
         observed.processContent();
 
-        verify(taskQueue, never()).recordDeliveryRetryContext(anyString(), anyString());
         verify(archiveWriter, never()).markWechatPrepareExhausted(anyString(), anyString(), anyString());
         verify(deliveryFailureCoordinator, never()).converge(
                 anyString(), anyString(), anyString(), anyString(), anyString());
+        verify(taskMetrics, never()).recordContextMissing(
+                TaskMetrics.ContextMissingKind.ARTICLE_ID);
+    }
+
+    /**
+     * Story 10.17 (裁决 2): 交付失败任务死信后 state 缺 articleId = 数据异常 —
+     * 终态化照常(不收敛), 但 ERROR 告警 + context.missing 计数, 消除静默 return.
+     */
+    @Test
+    void should_count_context_missing_when_article_failure_dead_letter_without_state_article_id() {
+        ContentScheduler observed = new ContentScheduler(taskQueue, recoveryRunner, twitterProcessor,
+                Optional.of(githubProcessor), processorProperties, Optional.empty(),
+                Optional.of(taskMetrics), Optional.empty(),
+                Optional.of(deliveryFailureCoordinator), Optional.of(archiveWriter),
+                new RetryPolicyProperties(), true, FIXED_CLOCK);
+        when(taskQueue.poll(eq(0L), eq(TimeUnit.SECONDS)))
+                .thenReturn("twitter:retryable", null);
+        doThrow(new ArticleDeliveryRetryableException("tw-2083615699260313955",
+                "2026-10-25", "wechat_prepare",
+                ErrorCode.WECHAT_RATE_LIMITED, "媒体微信准备失败(可重试): errcode=45009"))
+                .when(twitterProcessor).process();
+        when(taskQueue.recordRetryableFailure(anyString(), anyString(), anyString(),
+                any(RetryPolicyProperties.class), any(TaskFailureContext.class)))
+                .thenReturn(TaskQueue.RetryAdvance.deadLettered(3));
+        when(taskQueue.readStateArticleId("twitter:retryable")).thenReturn(Optional.empty());
+
+        observed.processContent();
+
+        verify(archiveWriter, never()).markWechatPrepareExhausted(anyString(), anyString(), anyString());
+        verify(deliveryFailureCoordinator, never()).converge(
+                anyString(), anyString(), anyString(), anyString(), anyString());
+        verify(taskMetrics).recordContextMissing(TaskMetrics.ContextMissingKind.ARTICLE_ID);
+        verify(taskMetrics).recordRetry(TaskMetrics.RetryMetricOutcome.EXHAUSTED);
     }
 
     @Test
@@ -763,7 +841,7 @@ class ContentSchedulerTest {
                 .doNothing()
                 .when(twitterProcessor).process();
         when(taskQueue.recordRetryableFailure(anyString(), anyString(), anyString(),
-                any(RetryPolicyProperties.class)))
+                any(RetryPolicyProperties.class), any(TaskFailureContext.class)))
                 .thenReturn(TaskQueue.RetryAdvance.scheduled(1, System.currentTimeMillis()));
         doThrow(new IllegalStateException("metrics registry broken"))
                 .when(taskMetrics).recordRetry(TaskMetrics.RetryMetricOutcome.SCHEDULED);
@@ -773,7 +851,7 @@ class ContentSchedulerTest {
         // 主流程不受影响: 失败推进照常执行, 后续健康任务照常处理成功
         verify(taskQueue).recordRetryableFailure(eq("twitter:retryable"),
                 eq(ErrorCode.REDIS_CONNECTION_ERROR.name()), anyString(),
-                any(RetryPolicyProperties.class));
+                any(RetryPolicyProperties.class), any(TaskFailureContext.class));
         verify(taskMetrics).recordProcessed(TaskMetrics.Source.TWITTER,
                 TaskMetrics.Outcome.RETRYABLE_FAILURE);
         verify(taskQueue).complete("twitter:healthy");
@@ -788,7 +866,7 @@ class ContentSchedulerTest {
                 .when(twitterProcessor).process();
         // NOT_IN_PROCESSING: 任务已被并发恢复迁出, 幂等跳过不抛异常, while 循环继续
         when(taskQueue.recordRetryableFailure(anyString(), anyString(), anyString(),
-                any(RetryPolicyProperties.class)))
+                any(RetryPolicyProperties.class), any(TaskFailureContext.class)))
                 .thenReturn(TaskQueue.RetryAdvance.notInProcessing());
 
         observed.processContent();
@@ -809,7 +887,7 @@ class ContentSchedulerTest {
                 .doNothing()
                 .when(twitterProcessor).process();
         when(taskQueue.recordRetryableFailure(eq("twitter:corrupt"), anyString(), anyString(),
-                any(RetryPolicyProperties.class)))
+                any(RetryPolicyProperties.class), any(TaskFailureContext.class)))
                 .thenThrow(new NonRetryableException(ErrorCode.REDIS_DATA_ERROR, "corrupt state"));
 
         observed.processContent();
@@ -831,7 +909,7 @@ class ContentSchedulerTest {
                 .doNothing()
                 .when(twitterProcessor).process();
         when(taskQueue.recordRetryableFailure(eq("twitter:broken"), anyString(), anyString(),
-                any(RetryPolicyProperties.class)))
+                any(RetryPolicyProperties.class), any(TaskFailureContext.class)))
                 .thenThrow(new IllegalStateException("cluster topology changed"));
 
         observed.processContent();

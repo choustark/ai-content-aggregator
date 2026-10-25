@@ -5,6 +5,7 @@ import com.choucj.aiaggregator.common.exception.RetryableException;
 import com.choucj.aiaggregator.common.model.ErrorCode;
 import com.choucj.aiaggregator.common.observability.SlowOperationRecorder;
 import com.choucj.aiaggregator.common.util.RedisKeys;
+import com.choucj.aiaggregator.task.queue.TaskFailureContext;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -112,8 +113,9 @@ class TaskQueueRetryReplayTest {
                 RedisKeys.taskProcessing(), RedisKeys.taskRetry(),
                 RedisKeys.taskDeadLetter(), RedisKeys.taskState("task-1"));
         assertThat(argsCaptor.getValue()[0]).isEqualTo("task-1");
-        // ARGV: [taskId, now, dueAt, errorCode, errorSummary, maxAttempts]
-        assertThat(argsCaptor.getValue()).hasSize(6);
+        // ARGV: [taskId, now, dueAt, errorCode, errorSummary, maxAttempts,
+        //        contextArticleId, contextCanonicalArchiveDate, contextFailedStage]
+        assertThat(argsCaptor.getValue()).hasSize(9);
         long dueAt = Long.parseLong((String) argsCaptor.getValue()[2]);
         // 首次失败延迟 = backoff-initial-ms(60s), 允许测试执行耗时带来的毫秒漂移
         assertThat(dueAt).isBetween(
@@ -125,6 +127,43 @@ class TaskQueueRetryReplayTest {
         assertThat(argsCaptor.getValue()[3]).isEqualTo("REDIS_CONNECTION_ERROR");
         assertThat(argsCaptor.getValue()[4]).isEqualTo("conn refused bad chars");
         assertThat(argsCaptor.getValue()[5]).isEqualTo("3");
+        // 源级任务无业务上下文: ARGV[7] 为空串, 脚本不写上下文字段(Story 10.17)
+        assertThat(argsCaptor.getValue()[6]).isEqualTo("");
+        assertThat(argsCaptor.getValue()[7]).isEqualTo("");
+        assertThat(argsCaptor.getValue()[8]).isEqualTo("");
+    }
+
+    @Test
+    void should_pass_delivery_context_args_when_context_provided() {
+        when(stringRedisTemplate.opsForHash()).thenReturn(hashOps);
+        when(hashOps.get(RedisKeys.taskState("task-1"), "attempt")).thenReturn(null);
+        stubExecute(2L);
+
+        TaskQueue.RetryAdvance advance = taskQueue.recordRetryableFailure(
+                "task-1", "WECHAT_RATE_LIMITED", "rate limited", policy,
+                TaskFailureContext.of("tw-123", "2026-10-25",
+                        TaskFailureContext.TaskFailureStage.WECHAT_PREPARE.tagValue()));
+
+        assertThat(advance.outcome()).isEqualTo(TaskQueue.RetryOutcome.DEAD_LETTERED);
+        ArgumentCaptor<List<String>> keysCaptor = ArgumentCaptor.forClass((Class) List.class);
+        ArgumentCaptor<Object[]> argsCaptor = ArgumentCaptor.forClass(Object[].class);
+        verify(stringRedisTemplate).execute(any(RedisScript.class), keysCaptor.capture(),
+                argsCaptor.capture());
+        assertThat(argsCaptor.getValue()).hasSize(9);
+        // 收敛上下文 ARGV[7-9]: 与状态迁移同脚本原子落位(Story 10.17 AC1)
+        assertThat(argsCaptor.getValue()[6]).isEqualTo("tw-123");
+        assertThat(argsCaptor.getValue()[7]).isEqualTo("2026-10-25");
+        assertThat(argsCaptor.getValue()[8]).isEqualTo("wechat_prepare");
+    }
+
+    @Test
+    void should_reject_context_with_unregistered_stage() {
+        assertThatThrownBy(() -> TaskFailureContext.of("tw-123", "2026-10-25", "free-text-stage"))
+                .isInstanceOf(NonRetryableException.class);
+        assertThatThrownBy(() -> TaskFailureContext.of("tw-123", "2026/10/25", "wechat_prepare"))
+                .isInstanceOf(NonRetryableException.class);
+        assertThatThrownBy(() -> TaskFailureContext.of("", "2026-10-25", "wechat_prepare"))
+                .isInstanceOf(NonRetryableException.class);
     }
 
     @Test

@@ -2,6 +2,7 @@ package com.choucj.aiaggregator.task.queue;
 
 import com.choucj.aiaggregator.common.exception.NonRetryableException;
 import com.choucj.aiaggregator.common.util.RedisKeys;
+import com.choucj.aiaggregator.task.queue.TaskFailureContext;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.BeforeAll;
@@ -157,6 +158,64 @@ class TaskQueueRetryIntegrationTest {
         // 不在 pending, 不在死信
         assertThat(pendingMembers()).isEmpty();
         assertThat(taskQueue.deadLetterCount()).isZero();
+    }
+
+    // ============ Story 10.17 AC1: 收敛上下文与状态迁移原子一致 ============
+
+    @Test
+    void shouldWriteContextAtomicallyWithRetryScheduledState() {
+        RetryPolicyProperties policy = immediatePolicy();
+        taskQueue.push("retry-ctx");
+        assertThat(taskQueue.poll(0, TimeUnit.SECONDS)).isEqualTo("retry-ctx");
+
+        TaskQueue.RetryAdvance advance = taskQueue.recordRetryableFailure(
+                "retry-ctx", "WECHAT_RATE_LIMITED", "rate limited", policy,
+                TaskFailureContext.of("tw-2083615699260313955", "2026-10-25",
+                        TaskFailureContext.TaskFailureStage.WECHAT_PREPARE.tagValue()));
+
+        assertThat(advance.outcome()).isEqualTo(TaskQueue.RetryOutcome.RETRY_SCHEDULED);
+        // 同一 Lua 脚本返回后 state 即同时携带状态与三上下文字段 — 无「仅状态」中间窗口
+        assertThat(stateField("retry-ctx", "status")).isEqualTo("RETRY_SCHEDULED");
+        assertThat(stateField("retry-ctx", "articleId")).isEqualTo("tw-2083615699260313955");
+        assertThat(stateField("retry-ctx", "canonicalArchiveDate")).isEqualTo("2026-10-25");
+        assertThat(stateField("retry-ctx", "failedStage")).isEqualTo("wechat_prepare");
+        assertThat(taskQueue.readStateArticleId("retry-ctx"))
+                .contains("tw-2083615699260313955");
+    }
+
+    @Test
+    void shouldNotWriteContextFieldsWhenContextAbsent() {
+        RetryPolicyProperties policy = immediatePolicy();
+        taskQueue.push("retry-noctx");
+        assertThat(taskQueue.poll(0, TimeUnit.SECONDS)).isEqualTo("retry-noctx");
+
+        taskQueue.recordRetryableFailure("retry-noctx", "E", "source-level", policy);
+
+        assertThat(stateField("retry-noctx", "status")).isEqualTo("RETRY_SCHEDULED");
+        assertThat(stateField("retry-noctx", "articleId")).as("无上下文不写字段").isNull();
+        assertThat(stateField("retry-noctx", "canonicalArchiveDate")).isNull();
+        assertThat(stateField("retry-noctx", "failedStage")).isNull();
+    }
+
+    @Test
+    void shouldWriteContextAtomicallyWithDeadLetterState() {
+        RetryPolicyProperties policy = immediatePolicy();
+        policy.setMaxAttempts(1);
+        taskQueue.push("retry-dl-ctx");
+        assertThat(taskQueue.poll(0, TimeUnit.SECONDS)).isEqualTo("retry-dl-ctx");
+
+        TaskQueue.RetryAdvance advance = taskQueue.recordRetryableFailure(
+                "retry-dl-ctx", "WECHAT_RATE_LIMITED", "first failure exhausts", policy,
+                TaskFailureContext.of("tw-42", "2026-10-25",
+                        TaskFailureContext.TaskFailureStage.WECHAT_PREPARE.tagValue()));
+
+        assertThat(advance.outcome()).isEqualTo(TaskQueue.RetryOutcome.DEAD_LETTERED);
+        // 耗尽分支: 死信 state 与收敛上下文同生共死 — 耗尽钩子凭 state 可定位失败文章
+        assertThat(stateField("retry-dl-ctx", "status")).isEqualTo("DEAD_LETTER");
+        assertThat(stateField("retry-dl-ctx", "articleId")).isEqualTo("tw-42");
+        assertThat(stateField("retry-dl-ctx", "canonicalArchiveDate")).isEqualTo("2026-10-25");
+        assertThat(stateField("retry-dl-ctx", "failedStage")).isEqualTo("wechat_prepare");
+        assertThat(taskQueue.readStateArticleId("retry-dl-ctx")).contains("tw-42");
     }
 
     // ============ AC2: 到期重投 ============

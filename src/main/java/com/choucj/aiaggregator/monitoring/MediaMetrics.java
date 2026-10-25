@@ -17,7 +17,7 @@ import java.util.concurrent.ConcurrentHashMap;
  *   <li>{@code aiaggregator.media.phase.result}（Prometheus:
  *       {@code aiaggregator_media_phase_result_total}），Counter/媒体阶段结果数，标签
  *       {@code type=photo|video}、{@code phase=download|wechat_prepare|article_reference}、
- *       {@code outcome=succeeded|failed_terminal|retry_scheduled|blocked} 与
+ *       {@code outcome=succeeded|failed_terminal|failed|blocked} 与
  *       {@code errorClass=none|environment_blocked|rate_limited|retryable|permanent}。</li>
  * </ul>
  *
@@ -25,20 +25,27 @@ import java.util.concurrent.ConcurrentHashMap;
  * <ul>
  *   <li>{@code download} — {@code TweetMediaArchiver} 下载成功写 {@code succeeded};
  *       下载失败唯一汇聚点 {@code logFailedDownload} 写 {@code failed_terminal}
- *       (下载阶段只有 succeeded/failed_terminal, 不产生 {@code retry_scheduled};
- *       可重试下载异常仍终态, errorClass=retryable 仅记录异常性质)</li>
- *   <li>{@code wechat_prepare} — {@code WeChatMediaPreparer} 上传成功写 {@code succeeded};
- *       可重试分类写 {@code retry_scheduled} (errorClass=retryable|rate_limited);
+ *       (下载阶段只有 succeeded/failed_terminal; 可重试下载异常仍终态,
+ *       errorClass=retryable 仅记录异常性质)</li>
+ *   <li>{@code wechat_prepare} — <b>attempt 粒度 (Story 10.17 语义重划)</b>:
+ *       {@code WeChatMediaPreparer} 只记本次尝试的事实 — 上传成功写 {@code succeeded};
+ *       可重试分类写 {@code failed} (errorClass=retryable|rate_limited);
  *       环境阻塞 (40164) 写 {@code blocked+environment_blocked} (立即终态零重试);
- *       其余终态写 {@code failed_terminal+permanent}</li>
+ *       其余终态写 {@code failed_terminal+permanent}。媒体级指标<b>不预记排期</b> —
+ *       排期事实由任务级 {@code aiaggregator.task.retry{outcome=scheduled}} 唯一承担
+ *       (实际排期发生在稍后任务级, preparer 预记会与任务级双重记账并失真成功率分母);
+ *       重试耗尽收敛补记 {@code failed_terminal+permanent}(10.8 钩子, 语义不变)</li>
  *   <li>{@code article_reference} — {@code TweetMediaArchiveWriter.markArticleReferencesSucceeded}
- *       引用成功单点写 {@code succeeded}</li>
+ *       引用成功单点写 {@code succeeded}; Story 10.17 起失败组合可观测:
+ *       photo 证据不完整写 {@code failed+retryable}(任务重试后再装配);
+ *       video 固定 {@code failed+permanent}(10.13 No-Go: 正文播放器引用 fail-closed,
+ *       重试不改变结果)</li>
  * </ul>
  *
  * <p><b>低基数纪律 (镜像 {@link TaskMetrics}):</b> API 只接受封闭枚举 — type/phase/outcome/errorClass
  * 全部为固定值域, 各类 ID/URL/correlationId/异常文本只进 JSON 日志, 绝不进入标签;
  * 不引入 Trace 与新日志后端。Counter 仅按下方矩阵登记「可达组合」, 不可达组合
- * (如 {@code download+retry_scheduled}) 不注册即不暴露, 从结构上保证矩阵语义。
+ * (如 {@code download+blocked}) 不注册即不暴露, 从结构上保证矩阵语义。
  * publishability gate 跳过与幂等跳过不产生指标 (零副作用); GIF (DEFERRED) 不建指标。
  * errorClass 值域直接对应 {@code MediaPreparationResult.FailureClass} 四分类 + {@code none}。
  */
@@ -52,17 +59,21 @@ public class MediaMetrics {
     @Autowired
     public MediaMetrics(MeterRegistry registry) {
         this.registry = registry;
-        // 预登记全部可达组合 (类型×阶段×结果×错误分类 = 2×9 = 18 条时间序列, 封闭且有界)。
+        // 预登记全部可达组合 (Story 10.17 语义重划 = 2×10 = 20 条时间序列, 封闭且有界):
+        // download 3 + wechat_prepare 5 + article_reference 2 (succeeded + 按类型分派失败组合:
+        // photo=failed+retryable, video=failed+permanent — 10.13 No-Go fail-closed)
         for (MediaType type : MediaType.values()) {
             register(type, MediaPhase.DOWNLOAD, MediaOutcome.SUCCEEDED, MediaErrorClass.NONE);
             register(type, MediaPhase.DOWNLOAD, MediaOutcome.FAILED_TERMINAL, MediaErrorClass.RETRYABLE);
             register(type, MediaPhase.DOWNLOAD, MediaOutcome.FAILED_TERMINAL, MediaErrorClass.PERMANENT);
             register(type, MediaPhase.WECHAT_PREPARE, MediaOutcome.SUCCEEDED, MediaErrorClass.NONE);
-            register(type, MediaPhase.WECHAT_PREPARE, MediaOutcome.RETRY_SCHEDULED, MediaErrorClass.RETRYABLE);
-            register(type, MediaPhase.WECHAT_PREPARE, MediaOutcome.RETRY_SCHEDULED, MediaErrorClass.RATE_LIMITED);
+            register(type, MediaPhase.WECHAT_PREPARE, MediaOutcome.FAILED, MediaErrorClass.RETRYABLE);
+            register(type, MediaPhase.WECHAT_PREPARE, MediaOutcome.FAILED, MediaErrorClass.RATE_LIMITED);
             register(type, MediaPhase.WECHAT_PREPARE, MediaOutcome.BLOCKED, MediaErrorClass.ENVIRONMENT_BLOCKED);
             register(type, MediaPhase.WECHAT_PREPARE, MediaOutcome.FAILED_TERMINAL, MediaErrorClass.PERMANENT);
             register(type, MediaPhase.ARTICLE_REFERENCE, MediaOutcome.SUCCEEDED, MediaErrorClass.NONE);
+            register(type, MediaPhase.ARTICLE_REFERENCE, MediaOutcome.FAILED,
+                    type == MediaType.VIDEO ? MediaErrorClass.PERMANENT : MediaErrorClass.RETRYABLE);
         }
     }
 
@@ -132,16 +143,19 @@ public class MediaMetrics {
      *
      * <ul>
      *   <li>{@code succeeded} — 阶段成功 (含 article_reference 引用校验通过)</li>
-     *   <li>{@code failed_terminal} — 终态失败, 不再重试 (下载失败恒为此值)</li>
-     *   <li>{@code retry_scheduled} — 仅 wechat_prepare 在实际发生有限重试时计;
-     *       download 阶段不产生该值</li>
+     *   <li>{@code failed_terminal} — 终态失败, 不再重试 (下载失败恒为此值;
+     *       wechat_prepare 仅耗尽收敛钩子补记此值)</li>
+     *   <li>{@code failed} — 本次 attempt 失败的事实记录 (Story 10.17 语义重划: 替代
+     *       原 {@code retry_scheduled} 预记 — 排期事实由任务级
+     *       {@code aiaggregator.task.retry{outcome=scheduled}} 唯一承担, 消除双重记账;
+     *       article_reference: photo=retryable 可重试, video=permanent fail-closed)</li>
      *   <li>{@code blocked} — 仅 wechat_prepare 环境阻塞 (40164) 立即终态零重试时计</li>
      * </ul>
      */
     public enum MediaOutcome {
         SUCCEEDED("succeeded"),
         FAILED_TERMINAL("failed_terminal"),
-        RETRY_SCHEDULED("retry_scheduled"),
+        FAILED("failed"),
         BLOCKED("blocked");
 
         private final String tagValue;

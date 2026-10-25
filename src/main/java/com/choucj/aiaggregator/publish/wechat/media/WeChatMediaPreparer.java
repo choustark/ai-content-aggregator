@@ -647,8 +647,11 @@ public class WeChatMediaPreparer {
     }
 
     /**
-     * 按四分类计数 wechat_prepare 失败: RETRYABLE/RATE_LIMITED → {@code retry_scheduled}
-     * (既有重试钩子实际排期), ENVIRONMENT_BLOCKED → {@code blocked} (立即终态零重试),
+     * 按四分类计数 wechat_prepare 失败 — <b>attempt 粒度</b>(Story 10.17 语义重划):
+     * 只记本次尝试的事实, RETRYABLE/RATE_LIMITED → {@code failed}(不再预记
+     * {@code retry_scheduled} — 排期事实由任务级 {@code aiaggregator.task.retry}
+     * {@code {outcome=scheduled}} 唯一承担, 消除双重记账与成功率分母失真),
+     * ENVIRONMENT_BLOCKED → {@code blocked} (立即终态零重试),
      * PERMANENT → {@code failed_terminal}。
      */
     private void recordPrepareFailure(TweetMedia media, MediaPreparationResult.FailureClass failureClass) {
@@ -658,9 +661,9 @@ public class WeChatMediaPreparer {
         }
         switch (failureClass) {
             case RETRYABLE -> mediaMetrics.record(type, MediaMetrics.MediaPhase.WECHAT_PREPARE,
-                    MediaMetrics.MediaOutcome.RETRY_SCHEDULED, MediaMetrics.MediaErrorClass.RETRYABLE);
+                    MediaMetrics.MediaOutcome.FAILED, MediaMetrics.MediaErrorClass.RETRYABLE);
             case RATE_LIMITED -> mediaMetrics.record(type, MediaMetrics.MediaPhase.WECHAT_PREPARE,
-                    MediaMetrics.MediaOutcome.RETRY_SCHEDULED, MediaMetrics.MediaErrorClass.RATE_LIMITED);
+                    MediaMetrics.MediaOutcome.FAILED, MediaMetrics.MediaErrorClass.RATE_LIMITED);
             case ENVIRONMENT_BLOCKED -> mediaMetrics.record(type, MediaMetrics.MediaPhase.WECHAT_PREPARE,
                     MediaMetrics.MediaOutcome.BLOCKED, MediaMetrics.MediaErrorClass.ENVIRONMENT_BLOCKED);
             case PERMANENT -> mediaMetrics.record(type, MediaMetrics.MediaPhase.WECHAT_PREPARE,

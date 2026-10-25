@@ -692,6 +692,33 @@ class TweetMediaArchiveWriterTest {
     }
 
     @Test
+    void should_record_article_reference_failure_metrics_by_type_semantics() {
+        // Story 10.17 (AC2): article_reference 失败组合可观测 —
+        // photo 证据不完整 = failed+retryable (任务重试后再装配);
+        // video = failed+permanent (10.13 No-Go fail-closed, 重试不改变结果)
+        LocalDateTime when = LocalDateTime.of(2026, 10, 25, 10, 0);
+        TweetMedia incompletePhoto = samplePhotoMedia("p", "https://x/p.jpg").toBuilder()
+                .downloadStatus(MediaDownloadStatus.DOWNLOADED)
+                .uploadStatus(MediaUploadStatus.UPLOADED)
+                .build();
+        writer.writeSidecar("ref-fail-photo", when, List.of(incompletePhoto));
+        assertThat(writer.markArticleReferencesSucceeded("ref-fail-photo", "正文")).isFalse();
+        assertThat(counterValue("photo", "article_reference", "failed", "retryable")).isEqualTo(1.0);
+
+        TweetMedia video = TweetMedia.builder().id("v").type(TweetMediaType.VIDEO)
+                .downloadStatus(MediaDownloadStatus.DOWNLOADED)
+                .uploadStatus(MediaUploadStatus.UPLOADED)
+                .wechatUrl("https://mmbiz.qpic.cn/v.jpg")
+                .build();
+        writer.writeSidecar("ref-fail-video", when, List.of(video));
+        assertThat(writer.markArticleReferencesSucceeded("ref-fail-video", "正文")).isFalse();
+        assertThat(counterValue("video", "article_reference", "failed", "permanent")).isEqualTo(1.0);
+
+        // 成功组合不受失败计数污染
+        assertThat(counterValue("photo", "article_reference", "succeeded", "none")).isZero();
+    }
+
+    @Test
     void should_accept_valid_deferred_gif_only_without_marking_required_reference() {
         TweetMedia gif = TweetMedia.builder().id("g").type(TweetMediaType.GIF)
                 .originalPostUrl("https://x/status/1").build();
@@ -784,5 +811,44 @@ class TweetMediaArchiveWriterTest {
         assertThat(stored.getWechatPrepare().getNextRetryAt()).isNull();
         assertThat(stored.getWechatPrepare().getErrorClass()).isEqualTo("TERMINAL");
         assertThat(stored.getUploadStatus()).isEqualTo(MediaUploadStatus.FAILED);
+    }
+
+    // ============ Story 10.17: resolveCanonicalArchiveDate 只读契约(收敛上下文来源) ============
+
+    @Test
+    void shouldResolveIndexedDateWithoutFallingBackToPublishedAt() {
+        LocalDateTime archivedAt = LocalDateTime.of(2026, 8, 2, 10, 0);
+        writer.writeSidecar("2083", archivedAt, List.of(samplePhotoMedia("m1", "https://x.com/p1.jpg")));
+
+        // 索引命中优先 — 与传入 publishedAt 无关, 保证上下文与既有归档目录一致
+        assertThat(writer.resolveCanonicalArchiveDate("2083", LocalDateTime.of(2026, 9, 15, 8, 0)))
+                .contains(LocalDate.of(2026, 8, 2));
+    }
+
+    @Test
+    void shouldDeriveFromPublishedAtWithoutPersistingIndex() {
+        // 未命中索引由 publishedAt 推导, 且不写索引(无落盘副作用, 失败路径零污染)
+        assertThat(writer.resolveCanonicalArchiveDate("2099", LocalDateTime.of(2026, 9, 15, 8, 0)))
+                .contains(LocalDate.of(2026, 9, 15));
+        try (var walk = Files.walk(tempDir)) {
+            assertThat(walk.noneMatch(path -> path.toString().contains("2099"))).isTrue();
+        } catch (IOException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    @Test
+    void shouldReturnEmptyWhenCanonicalIndexCorrupted() {
+        LocalDateTime archivedAt = LocalDateTime.of(2026, 8, 2, 10, 0);
+        writer.writeSidecar("2083", archivedAt, List.of(samplePhotoMedia("m1", "https://x.com/p1.jpg")));
+        Path index = tempDir.resolve("media").resolve("twitter").resolve(".canonical").resolve("2083.date");
+        try {
+            Files.writeString(index, "not-a-date");
+        } catch (IOException e) {
+            throw new IllegalStateException(e);
+        }
+
+        // 索引损坏降级 empty(观测旁路): 不改变抛出点异常类型, 调度器按缺失语义告警
+        assertThat(writer.resolveCanonicalArchiveDate("2083", archivedAt)).isEmpty();
     }
 }

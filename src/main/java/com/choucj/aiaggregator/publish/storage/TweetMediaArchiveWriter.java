@@ -402,6 +402,9 @@ public class TweetMediaArchiveWriter {
                     && renderedContent.contains(media.getWechatUrl());
         });
         if (!evidenceComplete) {
+            // Story 10.17: article_reference 失败可观测 — photo 证据不完整=retryable
+            // (任务重试后再装配), video=permanent (10.13 No-Go fail-closed, 观测旁路)
+            recordArticleReferenceFailures(required);
             return false;
         }
         LocalDateTime now = LocalDateTime.now();
@@ -482,6 +485,29 @@ public class TweetMediaArchiveWriter {
         }
     }
 
+    /**
+     * Story 10.17: article_reference 装配/校验失败计数(观测旁路) — 逐必需媒体按类型分派:
+     * photo 证据不完整为 {@code failed+retryable}(任务级延迟重试后会再装配);
+     * video 固定 {@code failed+permanent}(10.13 No-Go: 正文播放器引用 fail-closed,
+     * 重试不改变结果)。
+     */
+    private void recordArticleReferenceFailures(List<TweetMedia> required) {
+        if (mediaMetrics == null) {
+            return;
+        }
+        required.forEach(media -> {
+            MediaMetrics.MediaType type = metricTypeOf(media);
+            if (type == null) {
+                return;
+            }
+            mediaMetrics.record(type, MediaMetrics.MediaPhase.ARTICLE_REFERENCE,
+                    MediaMetrics.MediaOutcome.FAILED,
+                    media.getType() == TweetMediaType.VIDEO
+                            ? MediaMetrics.MediaErrorClass.PERMANENT
+                            : MediaMetrics.MediaErrorClass.RETRYABLE);
+        });
+    }
+
     /** wechat_prepare 重试耗尽终态计数 (PERMANENT 分类). */
     private void recordPrepareExhausted(TweetMedia media) {
         MediaMetrics.MediaType type = metricTypeOf(media);
@@ -533,6 +559,23 @@ public class TweetMediaArchiveWriter {
                             "canonical archive date 索引写后缺失: tweetId=" + tweetId, null));
         }
         return date;
+    }
+
+    /**
+     * Story 10.17: 只读解析 canonical archive date 供生成器在可重试失败抛出点组装
+     * 任务收敛上下文 — 命中 canonical date 索引返回索引值, 未命中由 publishedAt 推导,
+     * <b>不写索引</b>(无任何落盘副作用)。索引损坏等解析异常返回 {@link Optional#empty()}
+     * (观测/上下文是旁路: 解析失败不得改变抛出点异常类型与状态机路径, 任务 state 中
+     * 该字段留空由调度器按缺失语义告警)。
+     */
+    public Optional<LocalDate> resolveCanonicalArchiveDate(String tweetId, LocalDateTime publishedAt) {
+        try {
+            return Optional.of(resolveCanonicalDate(tweetId, publishedAt, false));
+        } catch (RuntimeException e) {
+            log.warn("canonical archive date 解析失败(上下文留空, 不阻断抛出点): tweetId={}, reason={}",
+                    tweetId, TextTruncateUtil.truncateForLog(e.getMessage(), LOG_MSG_MAX_LENGTH));
+            return Optional.empty();
+        }
     }
 
     private Optional<LocalDate> readCanonicalDateIndex(String tweetId) {

@@ -27,6 +27,7 @@ import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
@@ -432,12 +433,19 @@ class MediaAwareRewriteArticleGeneratorTest {
         when(gate.evaluate(any(Tweet.class))).thenReturn(publishableResult());
         when(preparer.prepareMedia(eq(TWEET_ID), eq(PUBLISHED_AT), anyList(), any(), any()))
                 .thenReturn(rateLimitedPrepareFailure());
+        when(writer.resolveCanonicalArchiveDate(eq(TWEET_ID), eq(PUBLISHED_AT)))
+                .thenReturn(Optional.of(LocalDate.of(2026, 8, 30)));
 
         assertThatThrownBy(() -> generator.generate(tweet))
                 .isInstanceOf(ArticleDeliveryRetryableException.class)
                 .hasMessageContaining(TWEET_ID)
-                .satisfies(e -> assertThat(((ArticleDeliveryRetryableException) e).getArticleId())
-                        .isEqualTo("tw-" + TWEET_ID));
+                .satisfies(e -> {
+                    ArticleDeliveryRetryableException delivery = (ArticleDeliveryRetryableException) e;
+                    assertThat(delivery.getArticleId()).isEqualTo("tw-" + TWEET_ID);
+                    // Story 10.17: 收敛上下文随异常携带 — 调度器凭此原子写入任务 state
+                    assertThat(delivery.getCanonicalArchiveDate()).isEqualTo("2026-08-30");
+                    assertThat(delivery.getFailedStage()).isEqualTo("wechat_prepare");
+                });
         verifyNoInteractions(deliveryFailureCoordinator);
     }
 

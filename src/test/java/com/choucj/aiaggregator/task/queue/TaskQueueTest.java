@@ -27,6 +27,7 @@ import org.springframework.data.redis.serializer.SerializationException;
 import java.time.Duration;
 import java.util.Collections;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
@@ -641,32 +642,28 @@ class TaskQueueTest {
         assertThat(taskQueue.migrateLegacyPending("task-1")).isZero();
     }
 
-    // ============ Story 10.8: 媒体交付重试上下文 (state.articleId) ============
+    // ============ Story 10.8/10.17: 媒体交付重试上下文 (state.articleId) ============
 
-    /** Story 10.8: recordDeliveryRetryContext / readStateArticleId 写读同一 hash 字段名 "articleId". */
+    /**
+     * Story 10.17: 旁路 {@code recordDeliveryRetryContext} 已移除(上下文由 RETRY_SCHEDULE
+     * 脚本与状态迁移同 HSET 原子写入); readStateArticleId 只读路径保持同字段名 "articleId".
+     */
     @Test
-    void should_record_and_read_delivery_retry_context_with_same_hash_field() {
+    void should_read_state_article_id_from_same_hash_field() {
         when(stringRedisTemplate.opsForHash()).thenReturn((HashOperations) hashOps);
         when(hashOps.get(RedisKeys.taskState("task-1"), "articleId")).thenReturn("tw-2083");
 
-        taskQueue.recordDeliveryRetryContext("task-1", "tw-2083");
-
-        verify(hashOps).put(RedisKeys.taskState("task-1"), "articleId", "tw-2083");
         assertThat(taskQueue.readStateArticleId("task-1")).contains("tw-2083");
-        // 读路径与写路径使用同一字段名 "articleId"
         verify(hashOps).get(RedisKeys.taskState("task-1"), "articleId");
     }
 
-    /** Story 10.8: taskId/articleId 空白写前拒绝 (NonRetryable); 未记录 → readStateArticleId 空. */
+    /** Story 10.8: state 字段空白值/空白 taskId → readStateArticleId 空且不抛. */
     @Test
-    void should_reject_blank_delivery_retry_context_and_read_empty_without_record() {
+    void should_read_empty_article_id_when_state_field_missing_or_blank() {
         when(stringRedisTemplate.opsForHash()).thenReturn((HashOperations) hashOps);
+        when(hashOps.get(RedisKeys.taskState("task-1"), "articleId")).thenReturn(" ");
 
-        assertThatThrownBy(() -> taskQueue.recordDeliveryRetryContext("task-1", " "))
-                .isInstanceOf(NonRetryableException.class);
-        assertThatThrownBy(() -> taskQueue.recordDeliveryRetryContext(" ", "tw-2083"))
-                .isInstanceOf(NonRetryableException.class);
         assertThat(taskQueue.readStateArticleId("task-1")).isEmpty();
-        verify(hashOps, never()).put(anyString(), any(), any());
+        assertThat(taskQueue.readStateArticleId(" ")).isEmpty();
     }
 }

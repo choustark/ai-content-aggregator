@@ -334,8 +334,8 @@ class WeChatMediaPreparerTest {
         assertThat(succeeded.getUploadStatus()).isEqualTo(MediaUploadStatus.UPLOADED);
         assertThat(succeeded.getWechatUrl()).isEqualTo(WECHAT_URL);
 
-        // Story 10.12: 重试分类 → retry_scheduled/retryable; 成功媒体 → succeeded
-        assertThat(counterValue("photo", "wechat_prepare", "retry_scheduled", "retryable")).isEqualTo(1.0);
+        // Story 10.12/10.17: 重试分类 → failed/retryable(attempt 粒度, 不预记排期); 成功媒体 → succeeded
+        assertThat(counterValue("photo", "wechat_prepare", "failed", "retryable")).isEqualTo(1.0);
         assertThat(counterValue("photo", "wechat_prepare", "succeeded", "none")).isEqualTo(1.0);
     }
 
@@ -606,8 +606,8 @@ class WeChatMediaPreparerTest {
         assertThat(sidecarMedia.getWechatPrepare().getErrorCode()).isEqualTo("WECHAT_RATE_LIMITED");
         assertThat(sidecarMedia.getWechatPrepare().getErrorSummary()).contains("45009");
 
-        // Story 10.12: 45009 → retry_scheduled/rate_limited
-        assertThat(counterValue("photo", "wechat_prepare", "retry_scheduled", "rate_limited")).isEqualTo(1.0);
+        // Story 10.12/10.17: 45009 → failed/rate_limited(attempt 粒度, 排期事实由任务级 task.retry 承担)
+        assertThat(counterValue("photo", "wechat_prepare", "failed", "rate_limited")).isEqualTo(1.0);
     }
 
     /** Story 10.8 (I/O 矩阵「40164 环境阻塞」): 终态 ENVIRONMENT_BLOCKED 证据 + nextRetryAt=null. */
@@ -853,8 +853,8 @@ class WeChatMediaPreparerTest {
         assertThat(sidecarMedia.getWechatPrepare().getErrorClass()).isEqualTo("RETRYABLE");
         assertThat(sidecarMedia.getWechatVideoMediaId()).isNull();
 
-        // Story 10.12: VIDEO 45009 → retry_scheduled/rate_limited
-        assertThat(counterValue("video", "wechat_prepare", "retry_scheduled", "rate_limited")).isEqualTo(1.0);
+        // Story 10.12/10.17: VIDEO 45009 → failed/rate_limited(attempt 粒度, 不预记排期)
+        assertThat(counterValue("video", "wechat_prepare", "failed", "rate_limited")).isEqualTo(1.0);
     }
 
     /** I/O 矩阵「本地前置失败」: 文件缺失 → 不发起上传, FAILED_TERMINAL (NonRetryable). */

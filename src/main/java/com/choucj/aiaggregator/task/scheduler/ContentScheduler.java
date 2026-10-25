@@ -15,6 +15,7 @@ import com.choucj.aiaggregator.publish.status.ArticleDeliveryReplayExecutor;
 import com.choucj.aiaggregator.publish.status.DeliveryFailureCoordinator;
 import com.choucj.aiaggregator.publish.storage.TweetMediaArchiveWriter;
 import com.choucj.aiaggregator.task.queue.RetryPolicyProperties;
+import com.choucj.aiaggregator.task.queue.TaskFailureContext;
 import com.choucj.aiaggregator.task.queue.TaskQueue;
 import com.choucj.aiaggregator.task.queue.TaskRecoveryRunner;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -356,25 +357,13 @@ public class ContentScheduler {
      */
     private void advanceRetryableFailure(String taskId, RetryableException e, long startedAtMs) {
         try {
+            // Story 10.17: 收敛上下文与状态迁移在 RETRY_SCHEDULE 脚本内同一 HSET 原子落位 —
+            // 取代 10.8 的「先权威迁移、后旁路 HSET」两步写, 消除中间崩溃孤儿态(AC1)。
+            TaskFailureContext context = deliveryContextOf(taskId, e);
             TaskQueue.RetryAdvance advance = taskQueue.recordRetryableFailure(
-                    taskId, errorCodeOf(e), safeErrorSummary(e), retryPolicy);
+                    taskId, errorCodeOf(e), safeErrorSummary(e), retryPolicy, context);
             TaskQueue.RetryOutcome outcome = advance.outcome();
             if (outcome == TaskQueue.RetryOutcome.RETRY_SCHEDULED) {
-                // Story 10.8: 媒体交付可重试失败 — 把 articleId 记入 state Hash,
-                // 使重试耗尽落死信时耗尽收敛钩子能凭 state 定位失败文章
-                // (先权威状态迁移、后旁路上下文写入, 写入失败只降级告警,
-                // 不得跳过下方 SCHEDULED 指标与 W11 审计日志)。
-                if (e instanceof ArticleDeliveryRetryableException articleFailure
-                        && articleFailure.getArticleId() != null
-                        && !articleFailure.getArticleId().isBlank()) {
-                    try {
-                        taskQueue.recordDeliveryRetryContext(taskId, articleFailure.getArticleId());
-                    } catch (RuntimeException contextFailure) {
-                        log.warn("articleId 上下文写入失败(降级, 不阻断重试排期审计): "
-                                        + "taskId={}, articleId={}, reason={}",
-                                taskId, articleFailure.getArticleId(), contextFailure.getMessage());
-                    }
-                }
                 recordRetryMetricSafely(TaskMetrics.RetryMetricOutcome.SCHEDULED, taskId);
                 // W11: 重试排期审计日志 — 到点时间/尝试次数/失败耗时全量落盘,
                 // 运维凭 taskId 即可回答"这个任务下次何时重试"(10.5 review)
@@ -383,20 +372,6 @@ public class ContentScheduler {
                         taskId, advance.attempt(), advance.dueAtEpochMs(),
                         System.currentTimeMillis() - startedAtMs, errorCodeOf(e));
             } else if (outcome == TaskQueue.RetryOutcome.DEAD_LETTERED) {
-                // Story 10.8: max-attempts=1 等场景首次失败即落死信, 补记 articleId 上下文
-                // (幂等: 已存在则 HSET 覆盖为本次失败文章, 语义不变; 写入失败只降级告警,
-                // 不得跳过下方 EXHAUSTED 指标与耗尽收敛钩子)。
-                if (e instanceof ArticleDeliveryRetryableException articleFailure
-                        && articleFailure.getArticleId() != null
-                        && !articleFailure.getArticleId().isBlank()) {
-                    try {
-                        taskQueue.recordDeliveryRetryContext(taskId, articleFailure.getArticleId());
-                    } catch (RuntimeException contextFailure) {
-                        log.warn("articleId 上下文写入失败(降级, 不阻断耗尽钩子): "
-                                        + "taskId={}, articleId={}, reason={}",
-                                taskId, articleFailure.getArticleId(), contextFailure.getMessage());
-                    }
-                }
                 recordRetryMetricSafely(TaskMetrics.RetryMetricOutcome.EXHAUSTED, taskId);
                 log.warn("任务 {} 失败(可重试)且尝试耗尽, 已落死信: attempt={}, "
                                 + "failedAfterMs={}, errorCode={}",
@@ -419,15 +394,18 @@ public class ContentScheduler {
      * Story 10.8: 可重试媒体交付失败的<b>耗尽收敛</b>旁路钩子 —
      * 先权威落死信(上方 {@code recordRetryableFailure} 同脚本迁移), 再旁路收敛。
      *
-     * <p>触发条件: state Hash 携带 {@code articleId}({@code tw-} 前缀, 由
-     * {@code recordDeliveryRetryContext} 在 RETRY_SCHEDULED 时写入)且协调器已注册。
+     * <p>触发条件: state Hash 携带 {@code articleId}({@code tw-} 前缀, 由 RETRY_SCHEDULE
+     * 脚本与状态迁移<b>同一 HSET 原子写入</b>, Story 10.17)且协调器已注册。
      * 步骤: 先把 canonical sidecar 中 {@code wechatPrepare=RETRY_SCHEDULED} 的媒体终态化为
      * {@code FAILED_TERMINAL}(保留本次 attempt, nextRetryAt=null), 再调
      * {@code DeliveryFailureCoordinator.converge(articleId,…)} 四层收敛 —
      * AC4 语义: 配置上限内重试期间文章快照保持 MEDIA_PROCESSING, 耗尽才终态。
      *
-     * <p>不改 Lua 契约与 10.5 重试状态机语义; 钩子自身异常只降级日志 — 权威死信迁移已完成,
-     * 未收敛的文章可经死信显式补跑恢复(10.7 零 LLM 路径)。
+     * <p>Story 10.17(裁决 2): 交付失败异常本应携带上下文, state 缺失即数据异常 —
+     * 终态化照常 + ERROR 日志 + {@code context.missing} 计数(可观测, 不静默跳过);
+     * 源级任务(非 {@code ArticleDeliveryRetryableException})无上下文属预期, 安静返回。
+     * 钩子自身异常只降级日志 — 权威死信迁移已完成, 未收敛的文章可经死信显式补跑恢复
+     * (10.7 零 LLM 路径)。
      */
     private void convergeExhaustedPrepare(String taskId, RetryableException e) {
         if (deliveryFailureCoordinatorOptional.isEmpty()) {
@@ -435,6 +413,12 @@ public class ContentScheduler {
         }
         Optional<String> articleId = taskQueue.readStateArticleId(taskId);
         if (articleId.isEmpty() || !articleId.get().startsWith("tw-")) {
+            if (e instanceof ArticleDeliveryRetryableException) {
+                log.error("交付失败任务死信后 state 缺少 articleId 收敛上下文(终态化照常, "
+                        + "文章快照可能滞留 MEDIA_PROCESSING, 人工凭告警补跑): taskId={}, errorCode={}",
+                        taskId, errorCodeOf(e));
+                recordContextMissingSafely(taskId);
+            }
             return;
         }
         String code = errorCodeOf(e);
@@ -509,6 +493,46 @@ public class ContentScheduler {
             log.warn("重试指标记录失败(已降级, 不影响失败处理): taskId={}, outcome={}, reason={}",
                     taskId, outcome, e.getMessage());
         }
+    }
+
+    /** 上下文缺失告警计数(观测旁路: 指标失败不影响终态化推进)。 */
+    private void recordContextMissingSafely(String taskId) {
+        try {
+            taskMetricsOptional.ifPresent(metrics ->
+                    metrics.recordContextMissing(TaskMetrics.ContextMissingKind.ARTICLE_ID));
+        } catch (RuntimeException e) {
+            log.warn("上下文缺失指标记录失败(已降级, 不影响状态机推进): taskId={}, reason={}",
+                    taskId, e.getMessage());
+        }
+    }
+
+    /**
+     * Story 10.17: 从可重试异常组装 RETRY_SCHEDULE 脚本收敛上下文 — 非交付异常返回
+     * {@link TaskFailureContext#none()}(源级任务无业务上下文属预期); 交付异常 articleId
+     * 空白按缺失语义告警(ERROR + context.missing 计数, 裁决 2)后仍以 none() 推进 —
+     * 终态化照常, 不静默跳过。上下文组装自身的非法值(articleId 非空但 stage/date 非法)
+     * 抛 {@link NonRetryableException} 由上方批次内隔离捕获(fail-closed)。
+     */
+    private TaskFailureContext deliveryContextOf(String taskId, RetryableException e) {
+        if (!(e instanceof ArticleDeliveryRetryableException failure)) {
+            return TaskFailureContext.none();
+        }
+        if (failure.getArticleId() == null || failure.getArticleId().isBlank()) {
+            log.error("交付失败异常缺少 articleId 收敛上下文(终态化照常, 人工凭告警补跑): "
+                    + "taskId={}, errorCode={}", taskId, errorCodeOf(e));
+            recordContextMissingSafely(taskId);
+            return TaskFailureContext.none();
+        }
+        if (failure.getFailedStage() == null || failure.getFailedStage().isBlank()) {
+            // Story 10.17 review: 上下文不完整(stage 缺失, 如 legacy 构造器产出)按裁决 2 缺失
+            // 语义告警后以 none() 推进 — 终态化照常, 不经 of() fail-closed 卡 PROCESSING
+            log.error("交付失败异常缺少 failedStage 收敛上下文(终态化照常, 人工凭告警补跑): "
+                    + "taskId={}, errorCode={}", taskId, errorCodeOf(e));
+            recordContextMissingSafely(taskId);
+            return TaskFailureContext.none();
+        }
+        return TaskFailureContext.of(failure.getArticleId(), failure.getCanonicalArchiveDate(),
+                failure.getFailedStage());
     }
 
     /**

@@ -247,7 +247,11 @@ public class PreserveOriginalArticleGenerator implements OriginalPostGenerationG
                 // Story 10.8: 重抛必须携带 articleId — 否则调度器 instanceof 判否,
                 // state.articleId 永不写入, RETRY_SCHEDULED 证据在耗尽后无收敛
                 // (文章永久滞留 MEDIA_PROCESSING)。message 保留原失败摘要, cause 保留分类链路。
+                // Story 10.17: 同时携带 canonicalArchiveDate/failedStage 收敛上下文 —
+                // 调度器在 RETRY_SCHEDULE 脚本内与状态迁移同 HSET 原子落位。
                 throw new ArticleDeliveryRetryableException("tw-" + tweetId,
+                        canonicalArchiveDateOf(tweetId, publishedAt), "wechat_prepare",
+                        ErrorCode.RETRYABLE_ERROR,
                         "媒体微信准备失败(可重试): tweetId=" + tweetId + ", root="
                                 + failure.getMessage(),
                         failure);
@@ -267,6 +271,7 @@ public class PreserveOriginalArticleGenerator implements OriginalPostGenerationG
             }
             if (preparation.failCount() > 0 && preparation.hasRetryableFailure()) {
                 throw new ArticleDeliveryRetryableException("tw-" + tweetId,
+                        canonicalArchiveDateOf(tweetId, publishedAt), "wechat_prepare",
                         ErrorCode.WECHAT_RATE_LIMITED,
                         "媒体微信准备失败(可重试, wechatPrepare=RETRY_SCHEDULED): tweetId=" + tweetId
                                 + ", failCount=" + preparation.failCount());
@@ -376,6 +381,17 @@ public class PreserveOriginalArticleGenerator implements OriginalPostGenerationG
             return aggregator.getErrorCode().name();
         }
         return failure.getClass().getSimpleName();
+    }
+
+    /**
+     * Story 10.17: 解析 canonical archive date 供可重试异常携带(只读, 不写索引) —
+     * 解析失败返回 null, 任务 state 该字段留空由调度器按上下文缺失语义告警
+     * (上下文是旁路: 解析失败不得改变抛出点异常类型与状态机路径)。
+     */
+    private String canonicalArchiveDateOf(String tweetId, LocalDateTime publishedAt) {
+        return tweetMediaArchiveWriter.flatMap(
+                        writer -> writer.resolveCanonicalArchiveDate(tweetId, publishedAt))
+                .map(java.time.LocalDate::toString).orElse(null);
     }
 
     /** 有媒体但依赖 Bean 缺失 → 配置不一致 fail-fast (AC9, message 含 tweetId + 缺失开关名)。 */
