@@ -6,6 +6,7 @@ import com.choucj.aiaggregator.publish.storage.MediaArchiveRecord;
 import com.choucj.aiaggregator.publish.storage.TweetMediaArchiveWriter;
 import com.choucj.aiaggregator.source.twitter.model.MediaPhaseState;
 import com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus;
+import com.choucj.aiaggregator.source.twitter.model.MediaUploadStatus;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import org.junit.jupiter.api.Test;
@@ -64,6 +65,71 @@ class ArticleMediaReadinessGateTest {
     }
 
     @Test
+    void should_allow_deliberately_degraded_video_publish() {
+        when(writer.readCanonicalSidecar("1")).thenReturn(Optional.of(record(degradedVideo())));
+
+        assertThat(gate.evaluate(article("tw-1"))).isEqualTo(ArticleMediaReadinessGate.GateResult.READY);
+    }
+
+    @Test
+    void should_allow_mixed_photo_and_degraded_video() {
+        when(writer.readCanonicalSidecar("1"))
+                .thenReturn(Optional.of(record(photo(MediaPhaseStatus.SUCCEEDED), degradedVideo())));
+
+        assertThat(gate.evaluate(article("tw-1"))).isEqualTo(ArticleMediaReadinessGate.GateResult.READY);
+    }
+
+    @Test
+    void should_block_video_with_terminal_download_failure() {
+        // markDownloadFailed 后 uploadStatus 保持 PENDING: 真实失败不得触发降级豁免
+        when(writer.readCanonicalSidecar("1")).thenReturn(Optional.of(record(
+                degradedVideo().toBuilder()
+                        .download(MediaPhaseState.builder().status(MediaPhaseStatus.FAILED_TERMINAL).build())
+                        .build())));
+
+        assertThat(gate.evaluate(article("tw-1")))
+                .isEqualTo(ArticleMediaReadinessGate.GateResult.PHASE_INCOMPLETE);
+    }
+
+    @Test
+    void should_block_video_when_prepare_phase_actively_failed_despite_skip_mark() {
+        // uploadStatus=SKIPPED 但 wechatPrepare 已进入失败/进行中状态: 不视为有意跳过
+        when(writer.readCanonicalSidecar("failed")).thenReturn(Optional.of(record(
+                degradedVideo().toBuilder()
+                        .wechatPrepare(MediaPhaseState.builder().status(MediaPhaseStatus.FAILED_TERMINAL).build())
+                        .build())));
+        when(writer.readCanonicalSidecar("running")).thenReturn(Optional.of(record(
+                degradedVideo().toBuilder()
+                        .wechatPrepare(MediaPhaseState.builder().status(MediaPhaseStatus.IN_PROGRESS).build())
+                        .build())));
+
+        assertThat(gate.evaluate(article("tw-failed")))
+                .isEqualTo(ArticleMediaReadinessGate.GateResult.PHASE_INCOMPLETE);
+        assertThat(gate.evaluate(article("tw-running")))
+                .isEqualTo(ArticleMediaReadinessGate.GateResult.PHASE_INCOMPLETE);
+    }
+
+    @Test
+    void should_block_video_skipped_without_evidence_of_deliberate_degradation() {
+        // 下载未成功即 SKIPPED / 缺跳过原因 / preparer 未运行 (PENDING): 均不放行
+        when(writer.readCanonicalSidecar("not-downloaded")).thenReturn(Optional.of(record(
+                degradedVideo().toBuilder()
+                        .download(MediaPhaseState.builder().status(MediaPhaseStatus.NOT_STARTED).build())
+                        .build())));
+        when(writer.readCanonicalSidecar("no-reason")).thenReturn(Optional.of(record(
+                degradedVideo().toBuilder().failureReason(" ").build())));
+        when(writer.readCanonicalSidecar("preparer-not-run")).thenReturn(Optional.of(record(
+                degradedVideo().toBuilder().uploadStatus(MediaUploadStatus.PENDING).build())));
+
+        assertThat(gate.evaluate(article("tw-not-downloaded")))
+                .isEqualTo(ArticleMediaReadinessGate.GateResult.PHASE_INCOMPLETE);
+        assertThat(gate.evaluate(article("tw-no-reason")))
+                .isEqualTo(ArticleMediaReadinessGate.GateResult.PHASE_INCOMPLETE);
+        assertThat(gate.evaluate(article("tw-preparer-not-run")))
+                .isEqualTo(ArticleMediaReadinessGate.GateResult.PHASE_INCOMPLETE);
+    }
+
+    @Test
     void should_allow_demonstrably_media_free_non_rewrite_article() {
         when(writer.readCanonicalSidecar("text")).thenReturn(Optional.empty());
         assertThat(gate.evaluate(article("tw-text"))).isEqualTo(ArticleMediaReadinessGate.GateResult.READY);
@@ -85,6 +151,16 @@ class ArticleMediaReadinessGateTest {
         MediaPhaseState phase = MediaPhaseState.builder().status(status).build();
         return TweetMedia.builder().id("p").type(TweetMediaType.PHOTO)
                 .download(phase).wechatPrepare(phase).articleReference(phase).build();
+    }
+
+    /** 有意降级的 VIDEO: 下载成功 + 微信侧 SKIPPED (携带 8.2 原因) + 准备/引用两阶段未启动。 */
+    private static TweetMedia degradedVideo() {
+        MediaPhaseState download = MediaPhaseState.builder().status(MediaPhaseStatus.SUCCEEDED).build();
+        return TweetMedia.builder().id("v").type(TweetMediaType.VIDEO)
+                .download(download)
+                .uploadStatus(MediaUploadStatus.SKIPPED)
+                .failureReason("视频内嵌未证实，降级为预览图+原文链接 (video_embed_unverified, Story 8.2)")
+                .build();
     }
 
     private static MediaArchiveRecord record(TweetMedia... media) {

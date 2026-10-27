@@ -274,6 +274,7 @@
 												<include>TEST-com.choucj.aiaggregator.publish.e2e.WeChatDeliveryE2EFailureTest.xml</include>
 												<include>TEST-com.choucj.aiaggregator.publish.wechat.DraftPublishClaimIntegrationTest.xml</include>
 												<include>TEST-com.choucj.aiaggregator.task.queue.TaskQueueRecoveryIntegrationTest.xml</include>
+											<include>TEST-com.choucj.aiaggregator.task.queue.TaskQueueRetryIntegrationTest.xml</include>
 											</includes>
 										</fileset>
 									</filesets>

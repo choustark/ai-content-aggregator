@@ -4,7 +4,9 @@ import com.choucj.aiaggregator.common.model.Article;
 import com.choucj.aiaggregator.common.model.ContentGenerationMode;
 import com.choucj.aiaggregator.publish.storage.MediaArchiveRecord;
 import com.choucj.aiaggregator.publish.storage.TweetMediaArchiveWriter;
+import com.choucj.aiaggregator.source.twitter.model.MediaPhaseState;
 import com.choucj.aiaggregator.source.twitter.model.MediaPhaseStatus;
+import com.choucj.aiaggregator.source.twitter.model.MediaUploadStatus;
 import com.choucj.aiaggregator.source.twitter.model.TweetMedia;
 import com.choucj.aiaggregator.source.twitter.model.TweetMediaType;
 import lombok.RequiredArgsConstructor;
@@ -54,7 +56,7 @@ public class ArticleMediaReadinessGate {
             if (media.getType() == TweetMediaType.UNKNOWN) {
                 return GateResult.UNKNOWN_MEDIA;
             }
-            if (media.getType() == TweetMediaType.PHOTO || media.getType() == TweetMediaType.VIDEO) {
+            if (media.getType() == TweetMediaType.PHOTO) {
                 if (media.getDownload() == null || media.getWechatPrepare() == null
                         || media.getArticleReference() == null) {
                     return GateResult.PHASE_INCOMPLETE;
@@ -65,8 +67,44 @@ public class ArticleMediaReadinessGate {
                     return GateResult.PHASE_INCOMPLETE;
                 }
             }
+            if (media.getType() == TweetMediaType.VIDEO) {
+                if (isVideoFullyPrepared(media) || isDeliberatelyDegradedVideo(media)) {
+                    continue;
+                }
+                return GateResult.PHASE_INCOMPLETE;
+            }
         }
         return GateResult.READY;
+    }
+
+    /** VIDEO 完整链路: 下载/微信准备/正文引用三阶段全部 SUCCEEDED。 */
+    private static boolean isVideoFullyPrepared(TweetMedia media) {
+        return media.getDownload() != null && media.getWechatPrepare() != null
+                && media.getArticleReference() != null
+                && media.getDownload().getStatus() == MediaPhaseStatus.SUCCEEDED
+                && media.getWechatPrepare().getStatus() == MediaPhaseStatus.SUCCEEDED
+                && media.getArticleReference().getStatus() == MediaPhaseStatus.SUCCEEDED;
+    }
+
+    /**
+     * VIDEO 降级发布豁免 (Story 8.2 语义, E10R-VIDEO-BLOCK-SEMANTICS): 仅放行
+     * 「视频文件本身下载成功、微信侧被有意跳过 (uploadStatus=SKIPPED 且携带跳过原因)
+     * 且准备/引用两阶段未启动」的 VIDEO —— 按预览图+原文链接降级发布, 不再整篇阻断。
+     * download FAILED_TERMINAL 等真实失败不放行 (Story 10.10 整篇失败语义不变)。
+     */
+    private static boolean isDeliberatelyDegradedVideo(TweetMedia media) {
+        return media.getDownload() != null
+                && media.getDownload().getStatus() == MediaPhaseStatus.SUCCEEDED
+                && media.getUploadStatus() == MediaUploadStatus.SKIPPED
+                && media.getFailureReason() != null && !media.getFailureReason().isBlank()
+                && phaseNotEntered(media.getWechatPrepare())
+                && phaseNotEntered(media.getArticleReference());
+    }
+
+    /** 阶段未进入判定: null / 无状态 / NOT_STARTED 均视为未启动 (sidecar 缺字段防御)。 */
+    private static boolean phaseNotEntered(MediaPhaseState phase) {
+        return phase == null || phase.getStatus() == null
+                || phase.getStatus() == MediaPhaseStatus.NOT_STARTED;
     }
 
     /** 门禁结果为固定有限集，避免日志产生高基数失败原因。 */
